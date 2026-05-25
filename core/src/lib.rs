@@ -16,6 +16,15 @@ const Z_NEAR: f32 = 1.0;
 const Z_FAR: f32 = 40000.0;
 const ASPECT_DEFAULT: f32 = 16.0 / 9.0;
 
+// --- Chase camera offsets (ship-local space) ---
+// Camera sits behind (+z = back) and above (+y) the ship.
+const CHASE_UP: f32 = 5.0;     // world units above ship
+const CHASE_BACK: f32 = 25.0;  // world units behind ship (along +z body axis)
+
+/// Scale to apply to the normalized aircraft model (length ≈ 1.0) in world units.
+/// A value of 8.0 makes the craft ~8 wu tip-to-tail, clearly visible at chase distance.
+pub const AIRCRAFT_SCALE: f32 = 8.0;
+
 /// Spawn camera placement:
 ///   - Near south edge of terrain, above max elevation + 100 wu.
 ///   - Looking toward the center-north so the Alps fill the horizon.
@@ -37,11 +46,17 @@ const LOOK_YAW_MAX: f32 = std::f32::consts::FRAC_PI_3 * 2.0;  // ±120°
 const LOOK_PITCH_MAX: f32 = 1.396;                              // ±80°
 
 fn compute_view_proj(phys: &Physics, look_yaw: f32, look_pitch: f32, aspect: f32) -> [f32; 16] {
+    // Chase camera: position is behind and above the ship in ship-local space.
+    let cam_offset = phys.orientation * Vec3::new(0.0, CHASE_UP, CHASE_BACK);
+    let cam_pos = phys.position + cam_offset;
+
+    // View direction: ship orientation + freelook offset.
     let look_offset = Quat::from_rotation_y(look_yaw) * Quat::from_rotation_x(look_pitch);
     let cam_orient = phys.orientation * look_offset;
     let fwd = cam_orient * Vec3::NEG_Z;
-    let up = cam_orient * Vec3::Y;
-    let view = Mat4::look_to_rh(phys.position, fwd, up);
+    let up  = cam_orient * Vec3::Y;
+
+    let view = Mat4::look_to_rh(cam_pos, fwd, up);
     let proj = Mat4::perspective_rh(FOV_Y_RAD, aspect, Z_NEAR, Z_FAR);
     (proj * view).to_cols_array()
 }
@@ -103,8 +118,10 @@ impl Engine {
         let view_proj_mat = compute_view_proj(&phys, 0.0, 0.0, ASPECT_DEFAULT);
 
         // Generate initial geometry so getters work before first step
+        let cam_offset = phys.orientation * Vec3::new(0.0, CHASE_UP, CHASE_BACK);
+        let cam_pos = phys.position + cam_offset;
         let cam_fwd = phys.orientation * Vec3::NEG_Z;
-        let geom = geometry::generate(&hf, phys.position, cam_fwd);
+        let geom = geometry::generate(&hf, cam_pos, cam_fwd);
 
         Engine {
             hf,
@@ -172,8 +189,10 @@ impl Engine {
             self.i_boost, self.i_ftl,
         );
 
+        let cam_offset = self.phys.orientation * Vec3::new(0.0, CHASE_UP, CHASE_BACK);
+        let cam_pos = self.phys.position + cam_offset;
         let cam_fwd = self.phys.orientation * Vec3::NEG_Z;
-        self.geom = geometry::generate(&self.hf, self.phys.position, cam_fwd);
+        self.geom = geometry::generate(&self.hf, cam_pos, cam_fwd);
         self.view_proj_mat = compute_view_proj(&self.phys, self.look_yaw, self.look_pitch, self.aspect);
     }
 
@@ -190,12 +209,31 @@ impl Engine {
         arr
     }
 
-    /// Camera world position [x, y, z].
+    /// Camera world position [x, y, z] — chase-cam position, behind and above ship.
     pub fn camera_position(&self) -> Float32Array {
-        let p = self.phys.position;
+        let cam_offset = self.phys.orientation * Vec3::new(0.0, CHASE_UP, CHASE_BACK);
+        let cam_pos = self.phys.position + cam_offset;
         let arr = Float32Array::new_with_length(3);
-        arr.copy_from(&[p.x, p.y, p.z]);
+        arr.copy_from(&[cam_pos.x, cam_pos.y, cam_pos.z]);
         arr
+    }
+
+    /// Column-major model matrix (16 f32) for the aircraft mesh.
+    ///
+    /// = translate(ship_position) * rotate(ship_orientation)
+    ///
+    /// Does NOT bake AIRCRAFT_SCALE — web multiplies vertices by `eng.aircraft_scale()`
+    /// when building the scaled mesh, keeping model_matrix pure position+rotation.
+    pub fn model_matrix(&self) -> Float32Array {
+        let mat = Mat4::from_rotation_translation(self.phys.orientation, self.phys.position);
+        let arr = Float32Array::new_with_length(16);
+        arr.copy_from(&mat.to_cols_array());
+        arr
+    }
+
+    /// Scale factor for the normalized aircraft model (nose-to-tail ≈ 1 wu → world units).
+    pub fn aircraft_scale(&self) -> f32 {
+        AIRCRAFT_SCALE
     }
 
     /// Packed fill triangle-strip vertices [x,y,z, ...].
