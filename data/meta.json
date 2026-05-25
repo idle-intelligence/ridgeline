@@ -1,18 +1,17 @@
 {
   "bbox": {
-    "lat_min": 41.0,
-    "lat_max": 51.5,
-    "lon_min": -5.5,
-    "lon_max": 9.8
+    "lat_min": -90,
+    "lat_max": 90,
+    "lon_min": -180,
+    "lon_max": 180
   },
   "width": 8192,
-  "height": 8192,
+  "height": 4096,
   "elev_min": 0,
-  "elev_max": 4672,
+  "elev_max": 7712,
   "dtype": "int16",
   "byte_order": "little",
   "row_order": "north_to_south",
   "col_order": "west_to_east",
-  "nodata_fill": "nearest_valid_edt",
-  "source": "SRTM3"
+  "source": "ETOPO 2022 v1 60s ice-surface (NOAA NCEI)"
 }
