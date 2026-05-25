@@ -29,19 +29,25 @@ const eng = new Engine(             // #[wasm_bindgen(constructor)] → JS `new`
 
 ## Per-frame input (call before `step`)
 ```
+eng.set_look(d_yaw, d_pitch);
+// d_yaw:   f32 radians, positive = look right. Accumulated; clamped ±120°.
+// d_pitch: f32 radians, positive = look up.   Accumulated; clamped ±80°.
+// Call with pointer-lock mouse deltas converted to radians each frame.
+// Affects view matrix only — flight physics use flight_orientation unchanged.
+
 eng.set_input(
-  thrust,   // f32 -1..1  forward/back  (Z/S, ↑/↓)
-  strafe,   // f32 -1..1  left/right    (Q/D)
-  lift,     // f32 -1..1  down/up vertical
-  pitch,    // f32 rate, mouse-Y + keys (radians/sec scale; core clamps)
-  yaw,      // f32 rate, mouse-X + keys
-  roll,     // f32 rate  (A/E)
-  boost,    // f32 0..1   Shift = accelerate
-  ftl       // bool       Space-hold = very-fast / FTL
+  thrust,   // f32 -1..1  throttle up/down  (ShiftLeft/Right = +1, CtrlLeft/Right = -1)
+  strafe,   // f32 -1..1  unused (pass 0)
+  lift,     // f32 -1..1  unused (pass 0)
+  pitch,    // f32 rad/s  KeyW = nose up, KeyS = nose down
+  yaw,      // f32 rad/s  KeyQ = left, KeyE = right (rudder)
+  roll,     // f32 rad/s  KeyA = left, KeyD = right
+  boost,    // f32        unused (pass 0); throttle controlled by thrust axis
+  ftl       // bool       Space-hold = afterburner
 );
 eng.step(dt); // f32 seconds — advances quaternion physics + regenerates visible geometry
 ```
-Mouse-look: JS converts pointer-lock deltas into pitch/yaw values; core integrates them.
+Mouse drives freelook only (`set_look`); flight controls are keyboard-only.
 
 ## Viewport
 - `eng.set_aspect(aspect)` — `aspect` = canvas width/height (f32). Call once after construction and on

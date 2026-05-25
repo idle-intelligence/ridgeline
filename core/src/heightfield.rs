@@ -19,7 +19,7 @@
 
 pub const VE: f32 = 3.0;
 // Half-width of the world box in world units
-pub const WORLD_HALF: f32 = 2000.0;
+pub const WORLD_HALF: f32 = 6000.0;
 
 pub struct Heightfield {
     pub width: u32,

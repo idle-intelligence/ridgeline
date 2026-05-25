@@ -22,7 +22,7 @@
 use crate::heightfield::Heightfield;
 use glam::Vec3;
 
-const LOD_TIERS: [(f32, u32); 3] = [(800.0, 1), (1600.0, 2), (f32::MAX, 4)];
+const LOD_TIERS: [(f32, u32); 3] = [(3000.0, 1), (6000.0, 2), (f32::MAX, 2)];
 
 pub struct GeometryBuffers {
     pub fill_verts: Vec<f32>,
