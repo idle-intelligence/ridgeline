@@ -4,42 +4,59 @@
 //   - fill: triangle-strip from a baseline y (below terrain min) up to the elevation profile
 //   - line: polyline along the ridge profile only
 //
-// LOD scheme (two axes):
+// LOD scheme (stable, index-anchored):
 //
-// ROW LOD — at most ROW_BUDGET strips rendered per frame regardless of grid height.
-//   Rows are divided into 5 distance tiers; each tier gets a weighted slice of the budget
-//   (near tiers denser). Hard far-cull beyond FAR_CULL_Z wu from camera.
+// ROW LOD — row `r` is rendered iff `r % row_stride == 0`.
+//   row_stride is a power-of-two determined solely by the row's distance from the camera.
+//   Because the grid is always sampled at row indices 0, stride, 2*stride, …, the set of
+//   rendered rows does NOT change with sub-grid camera movement — only at discrete LOD
+//   pop boundaries (power-of-two aligned).
 //
-// COLUMN LOD — each row is sampled to at most COL_NEAR_POINTS (close) or COL_FAR_POINTS
-//   (distant) evenly-spaced points. The last column is always included so strips close.
+// COLUMN LOD — within a rendered row, sample column `c` iff `c % col_stride == 0`.
+//   col_stride is also a power-of-two determined by the row's distance.
+//   Constant along the row (no per-column variation = no diagonal artifacts).
+//   Always includes the last column so strips close.
+//
+// Distance bands → (row_stride, col_stride):
+//   [0,      BAND1)  → (1,  2)    very near: every row, dense columns
+//   [BAND1,  BAND2)  → (2,  4)
+//   [BAND2,  BAND3)  → (4,  8)
+//   [BAND3,  BAND4)  → (8,  16)
+//   [BAND4,  BAND5)  → (16, 32)
+//   [BAND5,  FAR)    → (32, 64)   far: thin rows, coarse columns
+//
+// Hard far-cull beyond FAR_CULL_Z.
 //
 // Output order: farthest row first (back-to-front painter's order).
 
 use crate::heightfield::Heightfield;
 use glam::Vec3;
 
-// ── Row budget ────────────────────────────────────────────────────────────────
+// ── Distance bands (world units from camera z) ────────────────────────────────
 
-/// Hard far-cull distance (world units from camera z).
+/// Hard far-cull distance.
 const FAR_CULL_Z: f32 = 14_000.0;
 
-/// Maximum strips emitted per frame regardless of grid size.
-const ROW_BUDGET: usize = 200;
+/// Band thresholds (ascending). Each band index maps to a stride pair below.
+/// The world is ±6000 wu with 8192 grid rows/cols, so ~1.46 wu per cell.
+const BANDS: [f32; 6] = [300.0, 800.0, 2_000.0, 4_500.0, 8_000.0, FAR_CULL_Z];
 
-/// Distance tier thresholds (world units). Must be ascending, last ≥ FAR_CULL_Z.
-const ROW_TIER_THRESHOLDS: [f32; 5] = [400.0, 1200.0, 3000.0, 6000.0, 14_000.0];
-
-/// Budget weights per tier (near tiers get proportionally more strips).
-const ROW_TIER_WEIGHTS: [usize; 5] = [8, 6, 5, 4, 3]; // sum = 26
-
-// ── Column budget ─────────────────────────────────────────────────────────────
-
-/// Max sample points per row for near rows (dist_z ≤ COL_FAR_DIST).
-const COL_NEAR_POINTS: u32 = 320;
-/// Max sample points per row for distant rows.
-const COL_FAR_POINTS: u32 = 128;
-/// Distance beyond which far-column count applies.
-const COL_FAR_DIST: f32 = 3_000.0;
+/// (row_stride, col_stride) per band index (power-of-two, index-aligned).
+/// col_stride is relative to the 8192-column grid.
+///   near  (<300wu):  every 4th row, every 64th col  → ~200 rows, 128 cols  = ~25k fill verts
+///   mid1  (<800wu):  every 8th row, every 128th col → sparse but smooth
+///   mid2  (<2000wu): every 16th row, every 256th col
+///   mid3  (<4500wu): every 32nd row, every 512th col
+///   mid4  (<8000wu): every 64th row, every 1024th col
+///   far   (< cull):  every 128th row, every 2048th col
+const STRIDES: [(u32, u32); 6] = [
+    (4,   64),
+    (8,   128),
+    (16,  256),
+    (32,  512),
+    (64,  1024),
+    (128, 2048),
+];
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -54,9 +71,10 @@ pub fn generate(hf: &Heightfield, cam_pos: Vec3, cam_fwd: Vec3) -> GeometryBuffe
     let baseline_y = hf.elev_world_min - 5.0;
     let cam_fwd_n = cam_fwd.normalize_or_zero();
 
-    // ── Collect visible rows ──────────────────────────────────────────────────
-    // For each row: (row_index, dist_z, fwd_proj_for_sort)
-    let mut visible: Vec<(u32, f32, f32)> = Vec::new();
+    // ── Collect visible rows (back-to-front) ──────────────────────────────────
+    // We need painter's order: sort by forward projection, farthest first.
+    // Collect eligible rows first, then sort.
+    let mut visible: Vec<(u32, f32, f32)> = Vec::new(); // (row, dist_z, fwd_proj)
 
     for row in 0..hf.height {
         let world_z = hf.row_z(row);
@@ -66,9 +84,18 @@ pub fn generate(hf: &Heightfield, cam_pos: Vec3, cam_fwd: Vec3) -> GeometryBuffe
             continue;
         }
 
-        // Loose forward-hemisphere cull (~114° half-angle)
+        // Loose forward-hemisphere cull (~114° half-angle).
         let to_row = Vec3::new(cam_pos.x, cam_pos.y, world_z) - cam_pos;
         if to_row.normalize_or_zero().dot(cam_fwd_n) < -0.4 {
+            continue;
+        }
+
+        // Determine row_stride for this distance band.
+        let band = band_of(dist_z);
+        let row_stride = STRIDES[band].0;
+
+        // Index-anchored: only render rows whose index is aligned to the stride.
+        if row % row_stride != 0 {
             continue;
         }
 
@@ -76,29 +103,28 @@ pub fn generate(hf: &Heightfield, cam_pos: Vec3, cam_fwd: Vec3) -> GeometryBuffe
         visible.push((row, dist_z, fwd_proj));
     }
 
-    // Sort farthest-first (painter's order)
+    // Sort farthest-first (painter's order).
     visible.sort_unstable_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
 
-    // ── Row budget: sub-sample within each tier ───────────────────────────────
-    let selected = apply_row_budget(&visible);
-
     // ── Emit geometry ─────────────────────────────────────────────────────────
-    // Preallocate conservatively: ROW_BUDGET rows × COL_NEAR_POINTS columns × 2 verts/col × 3 floats
-    let cap = ROW_BUDGET * COL_NEAR_POINTS as usize * 2 * 3;
+    let est_rows = visible.len();
+    // conservative per-row: max columns at coarsest col_stride=2 for near, up to width/2
+    let col_cap = (hf.width / 2 + 2) as usize;
+    let cap = est_rows * col_cap * 2 * 3;
     let mut fill_verts: Vec<f32> = Vec::with_capacity(cap);
-    let mut fill_draws: Vec<u32> = Vec::with_capacity(ROW_BUDGET * 2);
+    let mut fill_draws: Vec<u32> = Vec::with_capacity(est_rows * 2);
     let mut line_verts: Vec<f32> = Vec::with_capacity(cap / 2);
-    let mut line_draws: Vec<u32> = Vec::with_capacity(ROW_BUDGET * 2);
+    let mut line_draws: Vec<u32> = Vec::with_capacity(est_rows * 2);
 
-    for (row, dist_z) in selected {
-        let world_z = hf.row_z(row);
-        let max_cols = if dist_z > COL_FAR_DIST { COL_FAR_POINTS } else { COL_NEAR_POINTS };
-        let col_stride = col_stride_for(hf.width, max_cols);
+    for (row, dist_z, _) in &visible {
+        let world_z = hf.row_z(*row);
+        let band = band_of(*dist_z);
+        let col_stride = STRIDES[band].1;
 
         // Fill strip
         let fill_start = (fill_verts.len() / 3) as u32;
         let fill_before = fill_verts.len();
-        emit_row(hf, row, world_z, col_stride, baseline_y, &mut fill_verts, true);
+        emit_row(hf, *row, world_z, col_stride, baseline_y, &mut fill_verts, true);
         let fill_count = ((fill_verts.len() - fill_before) / 3) as u32;
         if fill_count > 0 {
             fill_draws.push(fill_start);
@@ -108,7 +134,7 @@ pub fn generate(hf: &Heightfield, cam_pos: Vec3, cam_fwd: Vec3) -> GeometryBuffe
         // Line strip
         let line_start = (line_verts.len() / 3) as u32;
         let line_before = line_verts.len();
-        emit_row(hf, row, world_z, col_stride, baseline_y, &mut line_verts, false);
+        emit_row(hf, *row, world_z, col_stride, baseline_y, &mut line_verts, false);
         let line_count = ((line_verts.len() - line_before) / 3) as u32;
         if line_count > 0 {
             line_draws.push(line_start);
@@ -121,74 +147,15 @@ pub fn generate(hf: &Heightfield, cam_pos: Vec3, cam_fwd: Vec3) -> GeometryBuffe
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn tier_of(dist_z: f32) -> usize {
-    for (i, &t) in ROW_TIER_THRESHOLDS.iter().enumerate() {
-        if dist_z < t { return i; }
-    }
-    ROW_TIER_THRESHOLDS.len() - 1
-}
-
-/// Sub-sample the sorted visible list to ≤ ROW_BUDGET entries.
-/// Near tiers receive more budget; within each tier rows are evenly spaced.
-fn apply_row_budget(visible: &[(u32, f32, f32)]) -> Vec<(u32, f32)> {
-    // Count rows per tier
-    let mut tier_count = [0usize; 5];
-    for &(_, dist_z, _) in visible {
-        tier_count[tier_of(dist_z)] += 1;
-    }
-
-    // Allocate budget per tier (weighted, capped by available rows)
-    let weight_sum: usize = ROW_TIER_WEIGHTS.iter().sum();
-    let mut tier_budget = [0usize; 5];
-    let mut allocated = 0usize;
-    for i in 0..5 {
-        let alloc = (ROW_BUDGET * ROW_TIER_WEIGHTS[i] / weight_sum).min(tier_count[i]);
-        tier_budget[i] = alloc;
-        allocated += alloc;
-    }
-    // Give unused budget to tiers that have remaining rows (nearest first)
-    let mut spare = ROW_BUDGET.saturating_sub(allocated);
-    for i in 0..5 {
-        if spare == 0 { break; }
-        let extra = (tier_count[i].saturating_sub(tier_budget[i])).min(spare);
-        tier_budget[i] += extra;
-        spare -= extra;
-    }
-
-    // Walk sorted list (back-to-front) and evenly select within each tier.
-    // Bresenham accumulator: select row `seen` if acc >= 1, then acc -= 1.
-    let mut tier_seen = [0usize; 5];
-    let mut tier_acc = [0.0f32; 5]; // fractional accumulator
-    let mut out: Vec<(u32, f32)> = Vec::with_capacity(ROW_BUDGET);
-
-    for &(row, dist_z, _) in visible {
-        let t = tier_of(dist_z);
-        let budget = tier_budget[t];
-        let count = tier_count[t];
-
-        if budget > 0 && count > 0 {
-            // Advance accumulator by budget/count each row; emit when ≥ 1
-            tier_acc[t] += budget as f32 / count as f32;
-            if tier_acc[t] >= 1.0 {
-                tier_acc[t] -= 1.0;
-                out.push((row, dist_z));
-            }
-        }
-        tier_seen[t] += 1;
-    }
-
-    out
-}
-
-/// Column stride so that `width` columns produce at most `max_points` samples.
+/// Map a distance to a band index.
 #[inline]
-fn col_stride_for(width: u32, max_points: u32) -> u32 {
-    if max_points == 0 || width <= max_points {
-        1
-    } else {
-        // ceiling division: ensures we don't exceed max_points
-        width.div_ceil(max_points)
+fn band_of(dist_z: f32) -> usize {
+    for (i, &t) in BANDS.iter().enumerate() {
+        if dist_z < t {
+            return i;
+        }
     }
+    BANDS.len() - 1
 }
 
 /// Emit vertices for one row into `out`.
@@ -217,7 +184,9 @@ fn emit_row(
             out.extend_from_slice(&[x, y_top, world_z]);
         }
 
-        if c == last_col { break; }
+        if c == last_col {
+            break;
+        }
         col = (col + stride).min(last_col);
     }
 }

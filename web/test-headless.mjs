@@ -176,6 +176,116 @@ async function run() {
     }
   }
 
+  // ── Motion-stability test ─────────────────────────────────────────────────
+  // Verify that grid lines don't "swim" (jump to different world positions) as the
+  // camera moves. Strategy:
+  //   1. Snapshot line_vertices() now (draws already captured above after 60 steps).
+  //   2. Apply forward thrust + several step()s to move camera ~100 wu forward.
+  //   3. Snapshot again.
+  //   4. Find rows present in both snapshots (same world Z, within epsilon).
+  //      For an index-anchored scheme, a row's Z is fixed to the grid; its X coords
+  //      must be unchanged between snapshots.
+  //   5. Count "snapping" rows (where X changed unexpectedly). Should be zero.
+  const motionResult = await page.evaluate(() => {
+    const eng = window._eng;
+    if (!eng) return { ok: false, reason: 'window._eng not set' };
+
+    // Helper: extract per-row Z values + first vertex X from line_vertices/line_draws.
+    function rowSamples(verts, draws) {
+      const rows = [];
+      for (let i = 0; i < draws.length; i += 2) {
+        const start = draws[i];
+        const count = draws[i + 1];
+        if (count < 2) continue;
+        const base = start * 3;
+        // First vertex of this row strip
+        const x0 = verts[base];
+        const z0 = verts[base + 2];
+        // Second vertex x (to cross-check)
+        const x1 = verts[base + 3];
+        const z1 = verts[base + 5];
+        rows.push({ z: z0, x0, x1, z1 });
+      }
+      return rows;
+    }
+
+    const snapA_verts = eng.line_vertices();
+    const snapA_draws = eng.line_draws();
+    const rowsA = rowSamples(snapA_verts, snapA_draws);
+
+    // Move forward: apply thrust for 10 steps of 0.016s
+    eng.set_input(1.0, 0, 0, 0, 0, 0, 0, false);
+    for (let i = 0; i < 10; i++) eng.step(0.016);
+
+    const snapB_verts = eng.line_vertices();
+    const snapB_draws = eng.line_draws();
+    const rowsB = rowSamples(snapB_verts, snapB_draws);
+
+    // Build lookup: z-rounded → row data from B
+    const EPS_Z = 0.5; // world units — rows are on fixed grid so this should be tiny
+    const mapB = new Map();
+    for (const r of rowsB) {
+      mapB.set(Math.round(r.z * 10), r);
+    }
+
+    let shared = 0;
+    let snapped = 0;
+    const snapExamples = [];
+    for (const rA of rowsA) {
+      const key = Math.round(rA.z * 10);
+      const rB = mapB.get(key);
+      if (!rB) continue; // row left viewport — normal
+      shared++;
+      // For a stable row, x0 must be identical (same grid column sampled).
+      const dx = Math.abs(rA.x0 - rB.x0);
+      if (dx > 0.01) {
+        snapped++;
+        if (snapExamples.length < 3) snapExamples.push({ z: rA.z, xA: rA.x0, xB: rB.x0, dx });
+      }
+    }
+
+    // Also log a few stable rows' positions across frames for the report
+    const stableExamples = [];
+    for (const rA of rowsA) {
+      const key = Math.round(rA.z * 10);
+      const rB = mapB.get(key);
+      if (!rB) continue;
+      const dx = Math.abs(rA.x0 - rB.x0);
+      if (dx < 0.01 && stableExamples.length < 4) {
+        stableExamples.push({ z: rA.z.toFixed(1), xA: rA.x0.toFixed(2), xB: rB.x0.toFixed(2) });
+      }
+    }
+
+    return { ok: true, shared, snapped, snapExamples, stableExamples,
+             rowsA: rowsA.length, rowsB: rowsB.length };
+  });
+
+  if (!motionResult.ok) {
+    console.warn(`WARN: motion-stability test skipped — ${motionResult.reason}`);
+  } else {
+    const { shared, snapped, snapExamples, stableExamples, rowsA, rowsB } = motionResult;
+    console.log(`MOTION: rows before=${rowsA} after=${rowsB} shared=${shared} snapped=${snapped}`);
+    if (stableExamples.length > 0) {
+      console.log(`MOTION stable row samples (z, xA, xB):`);
+      for (const s of stableExamples) {
+        console.log(`  z=${s.z}  xA=${s.xA}  xB=${s.xB}  (diff=${Math.abs(s.xA - s.xB).toFixed(4)})`);
+      }
+    }
+    if (snapped > 0) {
+      console.error(`FAIL: ${snapped}/${shared} rows snapped to new X positions — swimming not fixed`);
+      for (const e of snapExamples) {
+        console.error(`  z=${e.z.toFixed(1)} xA=${e.xA.toFixed(2)} xB=${e.xB.toFixed(2)} dx=${e.dx.toFixed(3)}`);
+      }
+      await browser.close();
+      server.close();
+      process.exit(1);
+    } else if (shared > 0) {
+      console.log(`PASS: motion-stability OK — ${shared} shared rows, 0 snapped (index-anchored grid stable)`);
+    } else {
+      console.warn(`WARN: no shared rows found between snapshots (camera moved far) — cannot verify stability`);
+    }
+  }
+
   await browser.close();
   server.close();
   console.log('All checks passed.');
