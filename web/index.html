@@ -36,15 +36,16 @@
     #overlay p.err  { color: #c0624a; }
     #overlay p.hint { color: #7a7870; font-size: 12px; max-width: 420px; text-align: center; }
 
-    /* HUD — minimal, bottom-left */
+    /* HUD — bottom-left, readable at a glance */
     #hud {
       position: fixed;
-      bottom: 14px;
-      left: 16px;
+      bottom: 16px;
+      left: 18px;
       font-family: 'Courier New', Courier, monospace;
-      font-size: 12px;
-      color: rgba(200, 196, 188, 0.55);
-      letter-spacing: 0.05em;
+      font-size: 16px;
+      font-weight: bold;
+      color: rgba(220, 216, 208, 0.85);
+      letter-spacing: 0.08em;
       pointer-events: none;
       user-select: none;
     }
@@ -73,9 +74,9 @@
   <div id="hud"></div>
 
   <div id="controls">
-    Z / ↑ &nbsp;forward &nbsp;&nbsp;&nbsp;S / ↓ &nbsp;back<br>
-    Q / ← &nbsp;left &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;D / → &nbsp;right<br>
-    A / E &nbsp;&nbsp;roll<br>
+    W / ↑ &nbsp;forward &nbsp;&nbsp;&nbsp;S / ↓ &nbsp;back<br>
+    A / ← &nbsp;left &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;D / → &nbsp;right<br>
+    Q / E &nbsp;&nbsp;roll<br>
     Shift &nbsp;boost &nbsp;&nbsp;&nbsp;Space &nbsp;FTL<br>
     click to capture mouse
   </div>

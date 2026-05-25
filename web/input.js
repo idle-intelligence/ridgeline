@@ -3,8 +3,8 @@
 //   thrust, strafe, lift, pitch, yaw, roll, boost, ftl
 
 // Mouse-look accumulates deltas each frame and resets them; core integrates rates.
-const MOUSE_SENSITIVITY = 0.0015; // radians per pixel
-const KEY_TURN_RATE = 1.2;        // radians/sec for key-based look
+const MOUSE_SENSITIVITY = 0.006; // radians per pixel
+const KEY_TURN_RATE = 1.2;       // radians/sec for key-based look
 
 export class InputHandler {
   constructor(canvas) {
@@ -39,18 +39,25 @@ export class InputHandler {
   }
 
   // Returns the 8-arg tuple; call this once per frame before eng.set_input().
+  // Keyboard mapping (event.code = physical key position, layout-independent):
+  //   KeyW / ArrowUp    → thrust +1  (Z on AZERTY, W on QWERTY)
+  //   KeyS / ArrowDown  → thrust -1
+  //   KeyA / ArrowLeft  → strafe -1  (Q on AZERTY, A on QWERTY)
+  //   KeyD / ArrowRight → strafe +1
+  //   KeyQ              → roll left  (A on AZERTY, Q on QWERTY)
+  //   KeyE              → roll right
+  //   R/F               → lift up/down
+  //   Shift             → boost, Space → FTL
   sample() {
     const k = this.keys;
 
-    // thrust: Z (AZERTY fwd) or ArrowUp = +1, S or ArrowDown = -1
-    const thrust = (k.has('KeyZ') || k.has('ArrowUp')   ? 1 : 0)
-                 - (k.has('KeyS') || k.has('ArrowDown')  ? 1 : 0);
+    const thrust = (k.has('KeyW') || k.has('ArrowUp')    ? 1 : 0)
+                 - (k.has('KeyS') || k.has('ArrowDown')   ? 1 : 0);
 
-    // strafe: Q (AZERTY left) or ArrowLeft = -1, D or ArrowRight = +1
-    const strafe = (k.has('KeyD') || k.has('ArrowRight') ? 1 : 0)
-                 - (k.has('KeyQ') || k.has('ArrowLeft')  ? 1 : 0);
+    const strafe = (k.has('KeyD') || k.has('ArrowRight')  ? 1 : 0)
+                 - (k.has('KeyA') || k.has('ArrowLeft')   ? 1 : 0);
 
-    // lift: no dedicated key in v1 spec; R/F as convenience (not in spec, leave at 0)
+    // lift: R/F convenience
     const lift = (k.has('KeyR') ? 1 : 0) - (k.has('KeyF') ? 1 : 0);
 
     // pitch from mouse Y + keyboard fallback (I=pitch up, K=pitch down)
@@ -65,8 +72,8 @@ export class InputHandler {
                    + (k.has('KeyL') ?  KEY_TURN_RATE : 0);
     const yaw = mouseYaw + keyYaw;
 
-    // roll: A = left roll, E = right roll  (per API.md)
-    const roll = (k.has('KeyE') ? 1 : 0) - (k.has('KeyA') ? 1 : 0);
+    // roll: KeyQ = roll left, KeyE = roll right
+    const roll = (k.has('KeyE') ? 1 : 0) - (k.has('KeyQ') ? 1 : 0);
 
     // boost: Shift
     const boost = (k.has('ShiftLeft') || k.has('ShiftRight')) ? 1.0 : 0.0;

@@ -127,7 +127,7 @@ async function main() {
     // HUD
     const spd = eng.speed().toFixed(0);
     const alt = eng.altitude().toFixed(0);
-    hud.textContent = `${spd} u/s  ·  ${alt} m`;
+    hud.textContent = `SPD ${spd}   ALT ${alt}m`;
 
     requestAnimationFrame(frame);
   }
