@@ -54,21 +54,19 @@ pub struct GeometryBuffers {
 /// Choose (row_stride, col_stride) — both powers of two — from camera altitude above
 /// the sea-level sphere (world units). Far away → coarse; diving in → fine.
 fn strides_for_altitude(altitude_wu: f32) -> (u32, u32) {
-    // altitude is |cam_pos| - R_WORLD. Spawn is ~2.5*R = 15000 → alt ~9000.
+    // altitude is |cam_pos| - R_WORLD. Spawn is ~2*R → alt ~12000.
+    // Whole-globe view is dense enough that coastlines/continents read clearly; perf
+    // headroom is large, so we spend it on the far LOD (the "that's Earth!" view).
     if altitude_wu > 6000.0 {
-        (64, 64) // whole globe in view: cheap coarse wireframe
-    } else if altitude_wu > 3000.0 {
-        (32, 32)
+        (16, 16) // whole globe in view: dense — continents read clearly
     } else if altitude_wu > 1500.0 {
-        (16, 16)
+        (8, 8)
     } else if altitude_wu > 700.0 {
-        (8, 16)
-    } else if altitude_wu > 300.0 {
         (4, 8)
     } else if altitude_wu > 120.0 {
-        (2, 8)
+        (2, 4)
     } else {
-        (1, 4) // skimming the surface: fine detail
+        (1, 2) // skimming the surface: fine detail
     }
 }
 
