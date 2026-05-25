@@ -12,16 +12,16 @@ use physics::Physics;
 
 // --- Camera projection constants ---
 const FOV_Y_RAD: f32 = std::f32::consts::FRAC_PI_4; // 45°
-const Z_NEAR: f32 = 0.5;
-const Z_FAR: f32 = 4000.0;
+const Z_NEAR: f32 = 1.0;
+const Z_FAR: f32 = 16000.0;
 const ASPECT_DEFAULT: f32 = 16.0 / 9.0;
 
 /// Spawn camera placement:
-///   - Near south edge of terrain (z = z_min + 10% of span), above max elevation + 40 wu.
-///   - Looking toward the center-north, slightly downward, so the Alps fill the horizon.
+///   - Near south edge of terrain, above max elevation + 100 wu.
+///   - Looking toward the center-north so the Alps fill the horizon.
 fn spawn_position(hf: &Heightfield) -> Vec3 {
     let z = hf.z_min + (hf.z_max - hf.z_min) * 0.1;
-    let y = hf.elev_world_max + 40.0;
+    let y = hf.elev_world_max + 100.0;
     Vec3::new(0.0, y, z)
 }
 
@@ -49,8 +49,6 @@ pub struct Engine {
     aspect: f32,
     // pending inputs (set_input → step)
     i_thrust: f32,
-    i_strafe: f32,
-    i_lift: f32,
     i_pitch: f32,
     i_yaw: f32,
     i_roll: f32,
@@ -106,8 +104,6 @@ impl Engine {
             view_proj_mat,
             aspect: ASPECT_DEFAULT,
             i_thrust: 0.0,
-            i_strafe: 0.0,
-            i_lift: 0.0,
             i_pitch: 0.0,
             i_yaw: 0.0,
             i_roll: 0.0,
@@ -118,20 +114,20 @@ impl Engine {
 
     /// Set per-frame input axes. Call before `step`.
     ///
-    /// - `thrust`: f32 -1..1  forward/back
-    /// - `strafe`: f32 -1..1  left/right
-    /// - `lift`:   f32 -1..1  down/up
+    /// - `thrust`: f32 -1..1  throttle up/down
+    /// - `_strafe`: unused (pass 0)
+    /// - `_lift`:   unused (pass 0)
     /// - `pitch`:  f32 rad/s  mouse-Y + keys
-    /// - `yaw`:    f32 rad/s  mouse-X + keys
-    /// - `roll`:   f32 rad/s  A/E keys
-    /// - `boost`:  f32 0..1   Shift = accelerate
-    /// - `ftl`:    bool       Space-hold = very fast
+    /// - `yaw`:    f32 rad/s  mouse-X + rudder keys
+    /// - `roll`:   f32 rad/s  A/D keys
+    /// - `boost`:  f32 0..1   Shift = boost
+    /// - `ftl`:    bool       Space-hold = FTL
     #[allow(clippy::too_many_arguments)]
     pub fn set_input(
         &mut self,
         thrust: f32,
-        strafe: f32,
-        lift: f32,
+        _strafe: f32,
+        _lift: f32,
         pitch: f32,
         yaw: f32,
         roll: f32,
@@ -139,8 +135,6 @@ impl Engine {
         ftl: bool,
     ) {
         self.i_thrust = thrust;
-        self.i_strafe = strafe;
-        self.i_lift = lift;
         self.i_pitch = pitch;
         self.i_yaw = yaw;
         self.i_roll = roll;
@@ -152,7 +146,7 @@ impl Engine {
     pub fn step(&mut self, dt: f32) {
         self.phys.step(
             dt,
-            self.i_thrust, self.i_strafe, self.i_lift,
+            self.i_thrust,
             self.i_pitch, self.i_yaw, self.i_roll,
             self.i_boost, self.i_ftl,
         );
@@ -216,8 +210,8 @@ impl Engine {
         self.phys.position.y - self.hf.elev_world_min
     }
 
-    /// Current speed (world units/sec) based on active boost/ftl state.
+    /// Current speed (world units/sec).
     pub fn speed(&self) -> f32 {
-        Physics::current_speed(self.i_boost, self.i_ftl)
+        self.phys.speed
     }
 }

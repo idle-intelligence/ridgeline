@@ -14,12 +14,12 @@
 //   x: longitude, west = negative, east = positive
 //   z: latitude,  south (lat_min, row N-1) = negative, north (lat_max, row 0) = positive
 //   y: elevation in world units (meters × VE / HORIZ_SCALE), scaled so the horizontal
-//      extent is ~[-0.5, 0.5] on each axis.  We pick WORLD_HALF = 500.0 world units so
-//      the terrain sits in a ±500 box in x/z, and elevation is in [0, ~215] world units.
+//      extent is ~[-0.5, 0.5] on each axis.  We pick WORLD_HALF = 2000.0 world units so
+//      the terrain sits in a ±2000 box in x/z, and elevation is in [0, ~860] world units.
 
 pub const VE: f32 = 3.0;
 // Half-width of the world box in world units
-pub const WORLD_HALF: f32 = 500.0;
+pub const WORLD_HALF: f32 = 2000.0;
 
 pub struct Heightfield {
     pub width: u32,
