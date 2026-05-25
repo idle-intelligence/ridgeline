@@ -1,44 +1,52 @@
-// World-space constants (documented here, referenced by all modules):
+// Spherical world model — a globe of stacked latitude rings.
 //
-// Horizontal scale:
-//   The heightfield bbox spans ~2 degrees lat × 2 degrees lon for the France Alps smoke-test.
-//   We map each degree of longitude to 111_000 m * cos(lat_mid) and each degree of lat to
-//   111_000 m. For the smoke-test that is ~156 km EW × 222 km NS, but since the bbox is
-//   passed at construction we compute exact scale factors from it dynamically.
+// Each heightfield cell (row → latitude φ, col → longitude λ, elev_m) maps to a 3D
+// point on a sphere centered at the origin:
 //
-// Vertical exaggeration: VE = 4.0
-//   France full grid spans ~10° lat × ~12° lon (~1100 km × ~925 km). WORLD_HALF=40000.
-//   horiz_scale ≈ 0.0726 wu/m → Mont Saint Clair (175 m) renders ~51 wu; Mont Blanc
-//   (4672 m) ~1357 wu. VE=4 keeps slopes dramatic without coastal hills becoming walls.
+//   R_world = planet radius in world units = 6000.0
+//   h_wu    = elev_m * VERT_SCALE      (vertical exaggeration)
+//   r       = R_world + h_wu
+//   x = r·cosφ·cosλ,  y = r·sinφ,  z = r·cosφ·sinλ   (north pole = +Y)
 //
-// The world box is centered at (0, 0, 0).
-//   x: longitude, west = negative, east = positive
-//   z: latitude,  south (lat_min, row N-1) = negative, north (lat_max, row 0) = positive
-//   y: elevation in world units (meters × VE × horiz_scale). WORLD_HALF=40000 → ±40000
-//      box in x/z; craft/camera/cull distances are small vs the 80000 wu world span.
+// φ in [-90,90]°, λ in [-180,180]°. row 0 = +90° north, col 0 = -180° west.
+//
+// VERT_SCALE: max elevation (7712 m) should bulge ~8–12% of R_world (~500–700 wu).
+//   VERT_SCALE = 0.08 → Everest-class peak ≈ 617 wu (~10% of R_world).
+//
+// Each ROW (constant latitude) is a parallel ring around the globe; as λ sweeps it
+// traces the ring with elevation bumps. Land bulges out, ocean (h=0) is a smooth
+// circle at R_world.
 
-pub const VE: f32 = 6.0;
-// Half-width of the world box in world units
-pub const WORLD_HALF: f32 = 40_000.0;
+use glam::Vec3;
+
+/// Planet radius in world units.
+pub const R_WORLD: f32 = 6000.0;
+
+/// Vertical exaggeration: world units per meter of elevation.
+/// 0.11 → Everest-class peak (7712 m) ≈ 848 wu (~14% of R_world) — dramatic relief.
+pub const VERT_SCALE: f32 = 0.11;
+
+/// Earth radius in meters — for HUD horizontal scale (meters per world unit).
+pub const EARTH_RADIUS_M: f32 = 6_371_000.0;
+
+/// Meters of real surface per world unit (so the globe maps to Earth's true size).
+/// m_per_wu = EARTH_RADIUS_M / R_WORLD ≈ 1061.8 m/wu.
+pub const M_PER_WU: f32 = EARTH_RADIUS_M / R_WORLD;
 
 pub struct Heightfield {
     pub width: u32,
     pub height: u32,
-    // elevation in world-units, row 0 = north (z_max), stored row-major
+    // elevation in world units (elev_m * VERT_SCALE), row 0 = north, row-major.
     pub elev: Vec<f32>,
-    // 1 = water (retained for potential future use; not used for sea-hiding — see geometry.rs)
     #[allow(dead_code)]
     pub water: Vec<u8>,
-    // world-space range of elevation
-    pub elev_world_min: f32,
+    // world-unit elevation range (max drives elev_norm)
     pub elev_world_max: f32,
-    // world-space extents
-    pub x_min: f32,  // west
-    pub x_max: f32,  // east
-    pub z_min: f32,  // south (lat_min)
-    pub z_max: f32,  // north (lat_max)
-    // horizontal scale: world-units per meter (wu/m). Inverse = meters per wu.
-    pub horiz_scale: f32,
+    // geographic bbox (degrees)
+    pub lat_min: f32,
+    pub lat_max: f32,
+    pub lon_min: f32,
+    pub lon_max: f32,
 }
 
 impl Heightfield {
@@ -59,35 +67,15 @@ impl Heightfield {
     ) -> Self {
         let n = (width * height) as usize;
 
-        // Horizontal scale: map the bbox to [-WORLD_HALF, +WORLD_HALF] on each axis.
-        // We use the larger bbox dimension so the terrain fills the box uniformly.
-        let lat_mid_rad = ((lat_min + lat_max) * 0.5).to_radians();
-        let meters_per_deg_lat = 111_000.0_f32;
-        let meters_per_deg_lon = 111_000.0_f32 * lat_mid_rad.cos();
-        let span_ns = (lat_max - lat_min) * meters_per_deg_lat; // meters
-        let span_ew = (lon_max - lon_min) * meters_per_deg_lon;
-        // scale: world_units per meter
-        let horiz_scale = (2.0 * WORLD_HALF) / span_ns.max(span_ew);
-
-        let elev_world_min = elev_min * VE * horiz_scale;
-        let elev_world_max = elev_max * VE * horiz_scale;
-
-        // x/z world extents (centered)
-        let x_half = span_ew * horiz_scale * 0.5;
-        let z_half = span_ns * horiz_scale * 0.5;
-        let x_min = -x_half;
-        let x_max = x_half;
-        let z_min = -z_half; // south
-        let z_max = z_half;  // north
+        let _ = elev_min;
+        let elev_world_max = elev_max * VERT_SCALE;
 
         let mut elev = Vec::with_capacity(n);
         for i in 0..n {
             let lo = hf_bytes[i * 2] as i16;
             let hi = hf_bytes[i * 2 + 1] as i16;
-            let raw = lo | (hi << 8); // little-endian i16
-            let raw = raw as f32;
-            // world-space elevation: scale by VE * horiz_scale, baseline at 0
-            elev.push(raw * VE * horiz_scale);
+            let raw = (lo | (hi << 8)) as f32; // little-endian i16, meters
+            elev.push(raw * VERT_SCALE);
         }
 
         let water = water_bytes[..n].to_vec();
@@ -97,29 +85,26 @@ impl Heightfield {
             height,
             elev,
             water,
-            elev_world_min,
             elev_world_max,
-            x_min,
-            x_max,
-            z_min,
-            z_max,
-            horiz_scale,
+            lat_min,
+            lat_max,
+            lon_min,
+            lon_max,
         }
     }
 
-    /// World-space x for column `col` (0 = west).
+    /// Latitude (degrees) for row `row`. row 0 = lat_max (north).
     #[inline]
-    pub fn col_x(&self, col: u32) -> f32 {
-        let t = col as f32 / (self.width - 1) as f32;
-        self.x_min + t * (self.x_max - self.x_min)
+    pub fn row_lat(&self, row: u32) -> f32 {
+        let t = row as f32 / (self.height - 1) as f32;
+        self.lat_max - t * (self.lat_max - self.lat_min)
     }
 
-    /// World-space z for row `row` (0 = north = z_max).
+    /// Longitude (degrees) for col `col`. col 0 = lon_min (west).
     #[inline]
-    pub fn row_z(&self, row: u32) -> f32 {
-        let t = row as f32 / (self.height - 1) as f32;
-        // row 0 = north (z_max), row H-1 = south (z_min)
-        self.z_max - t * (self.z_max - self.z_min)
+    pub fn col_lon(&self, col: u32) -> f32 {
+        let t = col as f32 / (self.width - 1) as f32;
+        self.lon_min + t * (self.lon_max - self.lon_min)
     }
 
     /// Elevation sample (world units) at (row, col).
@@ -128,16 +113,7 @@ impl Heightfield {
         self.elev[(row * self.width + col) as usize]
     }
 
-    /// True if (row, col) is marked as water.
-    /// NOTE: not used for sea-hiding (see geometry.rs SEA_EPS logic).
-    #[allow(dead_code)]
-    #[inline]
-    pub fn is_water(&self, row: u32, col: u32) -> bool {
-        self.water[(row * self.width + col) as usize] != 0
-    }
-
-    /// Normalized elevation in [0,1] for (row, col), clamped.
-    /// 0 = sea level, 1 = highest peak.
+    /// Normalized elevation in [0,1] for (row, col), clamped. 0 = sea, 1 = highest.
     #[inline]
     pub fn elev_norm(&self, row: u32, col: u32) -> f32 {
         if self.elev_world_max <= 0.0 {
@@ -145,4 +121,16 @@ impl Heightfield {
         }
         (self.sample(row, col) / self.elev_world_max).clamp(0.0, 1.0)
     }
+
+    /// Map (lat°, lon°, elev_wu) → 3D world point on the sphere.
+    #[inline]
+    pub fn sphere_point(lat_deg: f32, lon_deg: f32, h_wu: f32) -> Vec3 {
+        let phi = lat_deg.to_radians();
+        let lam = lon_deg.to_radians();
+        let r = R_WORLD + h_wu;
+        let (sin_phi, cos_phi) = phi.sin_cos();
+        let (sin_lam, cos_lam) = lam.sin_cos();
+        Vec3::new(r * cos_phi * cos_lam, r * sin_phi, r * cos_phi * sin_lam)
+    }
+
 }
