@@ -14,7 +14,7 @@ use physics::Physics;
 const FOV_Y_RAD: f32 = std::f32::consts::FRAC_PI_4; // 45°
 const Z_NEAR: f32 = 0.5;
 const Z_FAR: f32 = 4000.0;
-const ASPECT: f32 = 16.0 / 9.0;
+const ASPECT_DEFAULT: f32 = 16.0 / 9.0;
 
 /// Spawn camera placement:
 ///   - Near south edge of terrain (z = z_min + 10% of span), above max elevation + 40 wu.
@@ -32,11 +32,11 @@ fn spawn_look(hf: &Heightfield) -> Vec3 {
     (target - pos).normalize()
 }
 
-fn compute_view_proj(phys: &Physics) -> [f32; 16] {
+fn compute_view_proj(phys: &Physics, aspect: f32) -> [f32; 16] {
     let fwd = phys.orientation * Vec3::NEG_Z;
     let up = phys.orientation * Vec3::Y;
     let view = Mat4::look_to_rh(phys.position, fwd, up);
-    let proj = Mat4::perspective_rh(FOV_Y_RAD, ASPECT, Z_NEAR, Z_FAR);
+    let proj = Mat4::perspective_rh(FOV_Y_RAD, aspect, Z_NEAR, Z_FAR);
     (proj * view).to_cols_array()
 }
 
@@ -46,6 +46,7 @@ pub struct Engine {
     phys: Physics,
     geom: GeometryBuffers,
     view_proj_mat: [f32; 16],
+    aspect: f32,
     // pending inputs (set_input → step)
     i_thrust: f32,
     i_strafe: f32,
@@ -92,7 +93,7 @@ impl Engine {
         let pos = spawn_position(&hf);
         let look = spawn_look(&hf);
         let phys = Physics::new(pos, look);
-        let view_proj_mat = compute_view_proj(&phys);
+        let view_proj_mat = compute_view_proj(&phys, ASPECT_DEFAULT);
 
         // Generate initial geometry so getters work before first step
         let cam_fwd = phys.orientation * Vec3::NEG_Z;
@@ -103,6 +104,7 @@ impl Engine {
             phys,
             geom,
             view_proj_mat,
+            aspect: ASPECT_DEFAULT,
             i_thrust: 0.0,
             i_strafe: 0.0,
             i_lift: 0.0,
@@ -157,7 +159,13 @@ impl Engine {
 
         let cam_fwd = self.phys.orientation * Vec3::NEG_Z;
         self.geom = geometry::generate(&self.hf, self.phys.position, cam_fwd);
-        self.view_proj_mat = compute_view_proj(&self.phys);
+        self.view_proj_mat = compute_view_proj(&self.phys, self.aspect);
+    }
+
+    /// Set viewport aspect ratio (width / height). Call on init and on resize.
+    pub fn set_aspect(&mut self, aspect: f32) {
+        self.aspect = aspect;
+        self.view_proj_mat = compute_view_proj(&self.phys, self.aspect);
     }
 
     /// Column-major proj*view matrix (16 f32). Pass directly to gl.uniformMatrix4fv.

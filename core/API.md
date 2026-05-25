@@ -18,7 +18,7 @@ Both sides build against THIS document. If you need to change it, change it here
 ## Construction
 ```
 await init();                       // wasm-pack default init
-const eng = Engine.new(
+const eng = new Engine(             // #[wasm_bindgen(constructor)] → JS `new`, not Engine.new
   width, height,                    // u32, from meta.json
   heightfieldBytes,                 // Uint8Array, raw int16 LE, len = width*height*2
   waterMaskBytes,                   // Uint8Array, u8 0/1, len = width*height
@@ -42,6 +42,11 @@ eng.set_input(
 eng.step(dt); // f32 seconds — advances quaternion physics + regenerates visible geometry
 ```
 Mouse-look: JS converts pointer-lock deltas into pitch/yaw values; core integrates them.
+
+## Viewport
+- `eng.set_aspect(aspect)` — `aspect` = canvas width/height (f32). Call once after construction and on
+  every resize. Core bakes a 45° vertical-FOV perspective; without this it defaults to 16:9 and
+  non-16:9 canvases stretch. (Added during integration — projection math stays in core.)
 
 ## Camera getters (valid after `step`)
 - `eng.view_proj()` → `Float32Array` length 16, **column-major**, ready for
