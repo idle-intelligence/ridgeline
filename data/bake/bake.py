@@ -258,8 +258,9 @@ def main():
     elev, fill_method = fill_voids(elev)
     print(f"void-fill: {fill_method}")
 
-    # clamp to int16 range (real elevations are well within it)
-    np.clip(elev, -32767, 32767, out=elev)
+    # clamp to [0, int16]: sea sits at exactly 0 (SRTM has no bathymetry; the only
+    # sub-zero cells are ocean/void-fill artifacts — land is never below sea level here).
+    np.clip(elev, 0, 32767, out=elev)
     elev16 = elev.astype("<i2")  # little-endian int16
 
     elev_min = int(elev16.min())

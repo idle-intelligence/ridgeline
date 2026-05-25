@@ -1,14 +1,14 @@
 {
   "bbox": {
-    "lat_min": 44.5,
-    "lat_max": 46.5,
-    "lon_min": 5.5,
-    "lon_max": 7.5
+    "lat_min": 41.0,
+    "lat_max": 51.5,
+    "lon_min": -5.5,
+    "lon_max": 9.8
   },
-  "width": 256,
-  "height": 256,
-  "elev_min": 181,
-  "elev_max": 4459,
+  "width": 8192,
+  "height": 8192,
+  "elev_min": 0,
+  "elev_max": 4672,
   "dtype": "int16",
   "byte_order": "little",
   "row_order": "north_to_south",
