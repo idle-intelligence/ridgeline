@@ -1,121 +1,44 @@
-// Per-frame geometry generation.
+// Per-frame geometry generation for the SPHERE model.
 //
-// Each heightfield row is a constant-latitude strip:
-//   - fill: triangle-strip from a baseline y (below terrain min) up to the elevation profile
-//   - line: polyline along the ridge profile only
+// The world is a globe of stacked latitude rings centered at the origin.
 //
-// LOD scheme (stable, index-anchored):
+// LINE channel = bright latitude rings. For each visible ring (a row of the grid),
+//   a LINE_STRIP of 3D sphere points sweeping longitude. Per-vertex elevation drives
+//   brightness (ocean rings dim, land bright); per-vertex strength fades at the limb.
 //
-// ROW LOD — row `r` is rendered iff `r % row_stride == 0`.
-//   row_stride is a power-of-two determined solely by the row's distance from the camera.
-//   Because the grid is always sampled at row indices 0, stride, 2*stride, …, the set of
-//   rendered rows does NOT change with sub-grid camera movement — only at discrete LOD
-//   pop boundaries (power-of-two aligned).
+// FILL channel = a dark OCCLUDER SPHERE at radius R_world*0.999 (just below sea level
+//   so it never z-fights the h=0 ocean rings). A coarse lat/lon tessellation of the
+//   visible hemisphere, drawn TRIANGLE_STRIP per occluder ring. fill_elevations = 0
+//   (it's the dark sphere); fill_strengths ~1, fading at the limb. Depth test then
+//   hides the back side of the globe behind it.
 //
-// COLUMN LOD — within a rendered row, sample column `c` iff `c % col_stride == 0`.
-//   col_stride is also a power-of-two determined by the row's distance.
-//   Constant along the row (no per-column variation = no diagonal artifacts).
-//   Always includes the last column so strips close.
+// LOD (index-anchored, power-of-two strides → no swimming):
+//   row `r` rendered iff `r % row_stride == 0`; longitude sample `c` iff `c % col_stride == 0`.
+//   Strides chosen by camera altitude (distance to surface): far → coarse (cheap whole
+//   globe), close → fine. The same stride set is used globe-wide each frame so the set of
+//   rendered rows/cols changes only at discrete power-of-two boundaries.
 //
-// Distance bands → (row_stride, col_stride):
-//   [0,       800)    → (1,    4)    ultra-near  (very fine: calanques/coast readable)
-//   [800,     2500)   → (2,    8)    near-fine
-//   [2500,    6000)   → (4,   16)    near
-//   [6000,    15000)  → (8,   64)
-//   [15000,   28000)  → (16,  128)
-//   [28000,   45000)  → (32,  256)
-//   [45000,   65000)  → (64,  512)
-//   [65000,   90000)  → (128, 1024)
-//   [90000,   110000) → (256, 2048)
-//   [110000,  FAR)    → (512, 4096)  ultra-far: whole-country survey at high altitude
+// Horizon / back-face cull (view-independent): a surface point P is visible iff
+//   dot(normalize(P), normalize(cam_pos)) > R_world/|cam_pos| − margin. Rings entirely
+//   beyond the limb are skipped; within a ring, longitude samples beyond the limb are
+//   dropped (the strip is split into visible runs).
 //
-// Per-vertex strength (0..1):
-//   Each vertex gets a "strength" in [0..1] that drives alpha blending in the renderer.
-//   Strength is 1.0 in the interior of each band and ramps toward 0 at:
-//     (a) the far-cull distance (far-fade, hides the speckle/pop horizon)
-//     (b) the outer edge of each band (outer-fade, softens LOD seam appearance)
-//   The near edge of each band is NOT faded (rows are always 100% opaque as they enter).
-//   This eliminates the "diagonal density wall" seam and the far speckle.
-//
-// Hard far-cull beyond far_cull (computed from camera altitude each frame).
-//
-// Earth curvature: each emitted vertex has y reduced by d²/(2R) where d is horizontal
-// (XZ-plane) distance from the camera and R = CURVE_R world units.
-//
-// Output order: farthest row first (back-to-front painter's order).
+// Strength fade: ramps to 0 as a point approaches the horizon, so rings dissolve at the
+//   edge of the visible hemisphere instead of popping.
 
-use crate::heightfield::Heightfield;
+use crate::heightfield::{Heightfield, R_WORLD};
 use glam::Vec3;
 
-// ── Distance bands (world units from camera z) ────────────────────────────────
-//
-// WORLD_HALF=40000 → world spans ±40000 wu. Far-cull peaks ~115000 wu at altitude
-// (covers the full France diagonal ~113k wu). Bands extended to cover new MAX.
-// Bands are spaced so transitions happen far from camera (sub-pixel at distance)
-// and the camera travels a long way before any band boundary crosses a visible row.
+/// Occluder sphere radius — just below sea level so it never z-fights ocean rings.
+const OCCLUDER_R: f32 = R_WORLD * 0.999;
 
-/// Band thresholds (ascending). Each band index maps to a stride pair below.
-const BANDS: [f32; 10] = [
-      800.0,
-    2_500.0,
-    6_000.0,
-    15_000.0,
-    28_000.0,
-    45_000.0,
-    65_000.0,
-    90_000.0,
-    110_000.0,
-    f32::MAX,
-];
+/// Horizon cull margin (subtracted from the horizon dot threshold) so geometry slightly
+/// past the geometric limb is still emitted and fades out smoothly rather than popping.
+const HORIZON_MARGIN: f32 = 0.04;
 
-/// (row_stride, col_stride) per band index (power-of-two, index-aligned).
-const STRIDES: [(u32, u32); 10] = [
-    (1,    4),
-    (2,    8),
-    (4,   16),
-    (8,   64),
-    (16,  128),
-    (32,  256),
-    (64,  512),
-    (128, 1024),
-    (256, 2048),
-    (512, 4096),
-];
-
-// ── Altitude-driven far-cull ─────────────────────────────────────────────────
-/// Baseline far-cull at sea level (world units): local/vast, edge of France hidden.
-const FAR_CULL_BASE: f32 = 18_000.0;
-/// Far-cull increase per world unit of altitude (linear gain).
-/// At altitude 0 wu → cull 18k wu (local); at ~1000 wu (~2.3 km real) → cull ~68k wu;
-/// at ~2000 wu (~4.6 km real) → cull 118k → clamped to MAX (whole country visible).
-const FAR_CULL_ALT_GAIN: f32 = 50.0;
-/// Minimum far-cull.
-const FAR_CULL_MIN: f32 = 12_000.0;
-/// Maximum far-cull: covers the France world diagonal ~113k wu (sqrt(2)*80k).
-const FAR_CULL_MAX: f32 = 115_000.0;
-
-/// Strength fade begins this far before the hard cull boundary.
-const FAR_FADE_MARGIN: f32 = 8_000.0;
-
-/// Elevation epsilon (world units): vertices at or below this are treated as sea and hidden.
-/// Sea was clamped to exactly 0 m in the bake, so any world-space elev <= EPS is open ocean.
-const SEA_EPS: f32 = 0.01;
-
-/// Compute per-frame far-cull distance from camera altitude (world-space y, sea = 0).
-#[inline]
-fn far_cull(cam_y: f32) -> f32 {
-    let altitude = cam_y.max(0.0);
-    (FAR_CULL_BASE + FAR_CULL_ALT_GAIN * altitude).clamp(FAR_CULL_MIN, FAR_CULL_MAX)
-}
-
-// ── Earth curvature ───────────────────────────────────────────────────────────
-/// Effective planet radius in world units.
-/// WORLD_HALF=40000 → world ~6x larger than before → R scales accordingly.
-/// R≈360000 gives a visibly curved horizon at high altitude without warping nearby terrain.
-const CURVE_R: f32 = 360_000.0;
-
-
-// ─────────────────────────────────────────────────────────────────────────────
+/// Fade band (in dot-product units above the horizon threshold) over which strength
+/// ramps 0→1. Points right at the horizon are strength 0; well inside are 1.
+const FADE_BAND: f32 = 0.12;
 
 pub struct GeometryBuffers {
     pub fill_verts: Vec<f32>,
@@ -128,111 +51,156 @@ pub struct GeometryBuffers {
     pub line_elevations: Vec<f32>,
 }
 
-pub fn generate(hf: &Heightfield, cam_pos: Vec3, cam_fwd: Vec3) -> GeometryBuffers {
-    // Pull baseline well below terrain minimum so fill polygons fully occlude each other.
-    let baseline_y = hf.elev_world_min - 200.0;
-    let cam_fwd_n = cam_fwd.normalize_or_zero();
-
-    // Altitude-driven far-cull: camera y is world-space (sea = 0).
-    let far_cull_dist = far_cull(cam_pos.y);
-
-    // ── Collect visible rows (back-to-front) ──────────────────────────────────
-    let mut visible: Vec<(u32, f32, f32)> = Vec::new(); // (row, dist_z, fwd_proj)
-
-    for row in 0..hf.height {
-        let world_z = hf.row_z(row);
-        let dist_z = (world_z - cam_pos.z).abs();
-
-        if dist_z > far_cull_dist {
-            continue;
-        }
-
-        // Forward-hemisphere cull (~120° half-angle, cos(120°) = -0.5).
-        // Slightly wider than the old -0.4 (~114°) to give a safe margin against
-        // edge-row pop when the camera looks near the cull boundary.
-        let to_row = Vec3::new(cam_pos.x, cam_pos.y, world_z) - cam_pos;
-        if to_row.normalize_or_zero().dot(cam_fwd_n) < -0.5 {
-            continue;
-        }
-
-        // Determine row_stride for this distance band.
-        let band = band_of(dist_z);
-        let row_stride = STRIDES[band].0;
-
-        // Index-anchored: only render rows whose index is aligned to the stride.
-        if row % row_stride != 0 {
-            continue;
-        }
-
-        let fwd_proj = Vec3::new(0.0, 0.0, world_z).dot(cam_fwd_n) - cam_pos.dot(cam_fwd_n);
-        visible.push((row, dist_z, fwd_proj));
+/// Choose (row_stride, col_stride) — both powers of two — from camera altitude above
+/// the sea-level sphere (world units). Far away → coarse; diving in → fine.
+fn strides_for_altitude(altitude_wu: f32) -> (u32, u32) {
+    // altitude is |cam_pos| - R_WORLD. Spawn is ~2.5*R = 15000 → alt ~9000.
+    if altitude_wu > 6000.0 {
+        (64, 64) // whole globe in view: cheap coarse wireframe
+    } else if altitude_wu > 3000.0 {
+        (32, 32)
+    } else if altitude_wu > 1500.0 {
+        (16, 16)
+    } else if altitude_wu > 700.0 {
+        (8, 16)
+    } else if altitude_wu > 300.0 {
+        (4, 8)
+    } else if altitude_wu > 120.0 {
+        (2, 8)
+    } else {
+        (1, 4) // skimming the surface: fine detail
     }
+}
 
-    // Sort farthest-first (painter's order).
-    visible.sort_unstable_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+/// Visibility strength of a surface point given the camera direction and horizon threshold.
+/// Returns 0 if culled (behind horizon + margin), ramping 0→1 across FADE_BAND.
+#[inline]
+fn point_strength(p: Vec3, cam_dir: Vec3, horizon_dot: f32) -> f32 {
+    let d = p.normalize_or_zero().dot(cam_dir);
+    let cut = horizon_dot - HORIZON_MARGIN;
+    if d <= cut {
+        0.0
+    } else {
+        ((d - cut) / FADE_BAND).clamp(0.0, 1.0)
+    }
+}
 
-    // ── Emit geometry ─────────────────────────────────────────────────────────
-    let est_rows = visible.len();
-    let col_cap = (hf.width / 4 + 2) as usize;
-    let cap = est_rows * col_cap * 2 * 3;
-    let mut fill_verts: Vec<f32> = Vec::with_capacity(cap);
-    let mut fill_draws: Vec<u32> = Vec::with_capacity(est_rows * 2);
-    let mut fill_strengths: Vec<f32> = Vec::with_capacity(cap / 3);
-    let mut fill_elevations: Vec<f32> = Vec::with_capacity(cap / 3);
-    let mut line_verts: Vec<f32> = Vec::with_capacity(cap / 2);
-    let mut line_draws: Vec<u32> = Vec::with_capacity(est_rows * 2);
-    let mut line_strengths: Vec<f32> = Vec::with_capacity(cap / 6);
-    let mut line_elevations: Vec<f32> = Vec::with_capacity(cap / 6);
+pub fn generate(hf: &Heightfield, cam_pos: Vec3, _cam_fwd: Vec3) -> GeometryBuffers {
+    let cam_len = cam_pos.length().max(R_WORLD + 1.0);
+    let cam_dir = cam_pos / cam_len;
+    // Horizon plane: points with dot(P̂, cam_dir) > R/|cam| are on the near hemisphere.
+    let horizon_dot = (R_WORLD / cam_len).clamp(-1.0, 1.0);
+    let altitude_wu = cam_len - R_WORLD;
+    let (row_stride, col_stride) = strides_for_altitude(altitude_wu);
 
-    // Scratch buffer for per-vertex (is_sea, elev_norm) from emit_row_ex.
-    // is_sea = true when elevation <= SEA_EPS (open ocean clamped to 0 in the bake).
-    let mut col_buf: Vec<(bool, f32)> = Vec::new();
+    let mut fill_verts: Vec<f32> = Vec::new();
+    let mut fill_draws: Vec<u32> = Vec::new();
+    let mut fill_strengths: Vec<f32> = Vec::new();
+    let mut fill_elevations: Vec<f32> = Vec::new();
+    let mut line_verts: Vec<f32> = Vec::new();
+    let mut line_draws: Vec<u32> = Vec::new();
+    let mut line_strengths: Vec<f32> = Vec::new();
+    let mut line_elevations: Vec<f32> = Vec::new();
 
-    for (row, dist_z, _) in &visible {
-        let world_z = hf.row_z(*row);
-        let band = band_of(*dist_z);
-        let col_stride = STRIDES[band].1;
+    // ── Occluder sphere (dark, hides far side via depth) ───────────────────────
+    // Coarse lat/lon tessellation. We tessellate the whole sphere but skip rings whose
+    // every vertex is fully culled; per-vertex strength fades at the limb.
+    {
+        // Build occluder on a fixed coarse grid independent of terrain resolution.
+        let occ_lat_steps = 96; // rings of latitude
+        let occ_lon_steps = 96; // segments of longitude
+        // Iterate adjacent latitude pairs → one TRIANGLE_STRIP per band.
+        for li in 0..occ_lat_steps {
+            let lat_a = 90.0 - 180.0 * (li as f32) / (occ_lat_steps as f32);
+            let lat_b = 90.0 - 180.0 * ((li + 1) as f32) / (occ_lat_steps as f32);
 
-        // Compute per-row strength (0..1): fades only near the far-cull horizon.
-        let row_str = row_strength(*dist_z, band, far_cull_dist);
+            let strip_start = (fill_verts.len() / 3) as u32;
+            let strip_before = fill_verts.len();
+            let mut any_visible = false;
 
-        // Fill strip
-        col_buf.clear();
-        let fill_start = (fill_verts.len() / 3) as u32;
-        let fill_before = fill_verts.len();
-        emit_row_ex(hf, *row, world_z, col_stride, baseline_y, cam_pos,
-                    &mut fill_verts, true, &mut col_buf);
-        let fill_count = ((fill_verts.len() - fill_before) / 3) as u32;
-        if fill_count > 0 {
-            fill_draws.push(fill_start);
-            fill_draws.push(fill_count);
-            // col_buf has one entry per column; fill emits 2 verts per col (baseline+top).
-            for &(is_sea, en) in &col_buf {
-                // Sea (elev ≈ 0) is hidden; flat LAND (elev > SEA_EPS) renders normally.
-                let s = if is_sea { 0.0 } else { row_str };
-                // baseline vertex
-                fill_strengths.push(s);
-                fill_elevations.push(en);
-                // top vertex
-                fill_strengths.push(s);
-                fill_elevations.push(en);
+            for lj in 0..=occ_lon_steps {
+                let lon = -180.0 + 360.0 * (lj as f32) / (occ_lon_steps as f32);
+                let pa = Heightfield::sphere_point(lat_a, lon, OCCLUDER_R - R_WORLD);
+                let pb = Heightfield::sphere_point(lat_b, lon, OCCLUDER_R - R_WORLD);
+                let sa = point_strength(pa, cam_dir, horizon_dot);
+                let sb = point_strength(pb, cam_dir, horizon_dot);
+                if sa > 0.0 || sb > 0.0 {
+                    any_visible = true;
+                }
+                fill_verts.extend_from_slice(&[pa.x, pa.y, pa.z]);
+                fill_verts.extend_from_slice(&[pb.x, pb.y, pb.z]);
+                fill_strengths.push(sa);
+                fill_strengths.push(sb);
+                fill_elevations.push(0.0);
+                fill_elevations.push(0.0);
+            }
+
+            if any_visible {
+                let count = ((fill_verts.len() - strip_before) / 3) as u32;
+                fill_draws.push(strip_start);
+                fill_draws.push(count);
+            } else {
+                // discard this fully-culled band (rewind parallel buffers)
+                let added = 2 * (occ_lon_steps + 1);
+                fill_verts.truncate(strip_before);
+                fill_strengths.truncate(fill_strengths.len() - added);
+                fill_elevations.truncate(fill_elevations.len() - added);
             }
         }
+    }
 
-        // Line strip
-        col_buf.clear();
-        let line_start = (line_verts.len() / 3) as u32;
-        let line_before = line_verts.len();
-        emit_row_ex(hf, *row, world_z, col_stride, baseline_y, cam_pos,
-                    &mut line_verts, false, &mut col_buf);
-        let line_count = ((line_verts.len() - line_before) / 3) as u32;
-        if line_count > 0 {
-            line_draws.push(line_start);
-            line_draws.push(line_count);
-            for &(is_sea, en) in &col_buf {
-                let s = if is_sea { 0.0 } else { row_str };
+    // ── Latitude rings (bright lines) ──────────────────────────────────────────
+    let last_col = hf.width - 1;
+    for row in (0..hf.height).step_by(row_stride as usize) {
+        let lat = hf.row_lat(row);
+
+        // Sweep longitude, splitting into visible runs (strips broken at the limb).
+        let mut run_start: Option<u32> = None; // vertex index where current run began
+        let mut col = 0u32;
+        loop {
+            let c = col.min(last_col);
+            let lon = hf.col_lon(c);
+            let h = hf.sample(row, c);
+            let p = Heightfield::sphere_point(lat, lon, h);
+            let s = point_strength(p, cam_dir, horizon_dot);
+            let en = hf.elev_norm(row, c);
+
+            if s > 0.0 {
+                if run_start.is_none() {
+                    run_start = Some((line_verts.len() / 3) as u32);
+                }
+                line_verts.extend_from_slice(&[p.x, p.y, p.z]);
                 line_strengths.push(s);
                 line_elevations.push(en);
+            } else if let Some(start) = run_start.take() {
+                // close the run
+                let count = (line_verts.len() / 3) as u32 - start;
+                if count >= 2 {
+                    line_draws.push(start);
+                    line_draws.push(count);
+                } else {
+                    // single-vertex run is useless; drop it
+                    line_verts.truncate((start as usize) * 3);
+                    line_strengths.truncate(start as usize);
+                    line_elevations.truncate(start as usize);
+                }
+            }
+
+            if c == last_col {
+                break;
+            }
+            col = (col + col_stride).min(last_col);
+        }
+        // close a run that reaches the wrap-around end
+        if let Some(start) = run_start.take() {
+            let count = (line_verts.len() / 3) as u32 - start;
+            if count >= 2 {
+                line_draws.push(start);
+                line_draws.push(count);
+            } else {
+                line_verts.truncate((start as usize) * 3);
+                line_strengths.truncate(start as usize);
+                line_elevations.truncate(start as usize);
             }
         }
     }
@@ -240,97 +208,5 @@ pub fn generate(hf: &Heightfield, cam_pos: Vec3, cam_fwd: Vec3) -> GeometryBuffe
     GeometryBuffers {
         fill_verts, fill_draws, fill_strengths, fill_elevations,
         line_verts, line_draws, line_strengths, line_elevations,
-    }
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-/// Map a distance to a band index (works for any BANDS length).
-#[inline]
-fn band_of(dist_z: f32) -> usize {
-    for (i, &t) in BANDS.iter().enumerate() {
-        if dist_z < t {
-            return i;
-        }
-    }
-    BANDS.len() - 1
-}
-
-/// Compute per-row strength in [0..1].
-///
-/// Fades toward 0 near the far-cull boundary (FAR_FADE_MARGIN before it),
-/// so the distant horizon dissolves into the sky instead of popping out.
-///
-/// Band-boundary fading is intentionally NOT applied here: the index-anchored
-/// power-of-two stride scheme means coarser-band rows are a subset of finer-band
-/// rows, so transitions are stable with at most a subtle LOD pop — no transparent
-/// arc artifacts.
-#[inline]
-fn row_strength(dist_z: f32, _band: usize, far_cull_dist: f32) -> f32 {
-    // Far-fade: linear ramp from 1→0 over FAR_FADE_MARGIN before hard cull.
-    let far_fade_start = (far_cull_dist - FAR_FADE_MARGIN).max(0.0);
-    if dist_z >= far_cull_dist {
-        0.0
-    } else if dist_z > far_fade_start {
-        (1.0 - (dist_z - far_fade_start) / FAR_FADE_MARGIN).clamp(0.0, 1.0)
-    } else {
-        1.0
-    }
-}
-
-/// Emit vertices for one row into `out`, recording per-column (is_sea, elev_norm) in `col_buf`.
-/// fill=true: alternating (baseline, top) pairs for TRIANGLE_STRIP — 1 col_buf entry per pair.
-/// fill=false: top-only for LINE_STRIP — 1 col_buf entry per vertex.
-///
-/// is_sea is determined by elevation only (elev_world <= SEA_EPS), NOT the water mask.
-/// The water mask is unreliable for land/sea classification (it also flags flat plains,
-/// river valleys, and lagoons). Sea was clamped to exactly 0 m in the bake, so elevation
-/// is the authoritative signal.
-///
-/// Earth curvature: each vertex's y is reduced by d²/(2·CURVE_R) where d is the
-/// horizontal (XZ-plane) distance from cam_pos. The baseline vertex gets the same
-/// drop so fill strips don't open gaps at the bottom.
-#[allow(clippy::too_many_arguments)]
-fn emit_row_ex(
-    hf: &Heightfield,
-    row: u32,
-    world_z: f32,
-    stride: u32,
-    baseline_y: f32,
-    cam_pos: Vec3,
-    out: &mut Vec<f32>,
-    fill: bool,
-    col_buf: &mut Vec<(bool, f32)>,
-) {
-    let last_col = hf.width - 1;
-    let mut col = 0u32;
-    let dz = world_z - cam_pos.z;
-    loop {
-        let c = col.min(last_col);
-        let x = hf.col_x(c);
-        let y_top = hf.sample(row, c);
-        // Sea detection: elevation only. SEA_EPS guards against floating-point noise at
-        // the bake's 0 m clamp. Flat LAND (plains, valleys, lagoons) has elev > 0 and
-        // will NOT be hidden — only genuine open ocean renders blank.
-        let is_sea = y_top <= SEA_EPS;
-        let en = hf.elev_norm(row, c);
-
-        // Horizontal distance from camera for curvature drop.
-        let dx = x - cam_pos.x;
-        let d2 = dx * dx + dz * dz;
-        let drop = d2 / (2.0 * CURVE_R);
-
-        if fill {
-            out.extend_from_slice(&[x, baseline_y - drop, world_z]);
-            out.extend_from_slice(&[x, y_top - drop, world_z]);
-        } else {
-            out.extend_from_slice(&[x, y_top - drop, world_z]);
-        }
-        col_buf.push((is_sea, en));
-
-        if c == last_col {
-            break;
-        }
-        col = (col + stride).min(last_col);
     }
 }
