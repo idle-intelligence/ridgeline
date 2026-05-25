@@ -34,7 +34,9 @@ Space-hold = FTL/very-fast · mouse-look. Prioritize sense of speed + uncluttere
 Take off, fly over the heightfield, recognize the Alps, with a satisfying sense of speed.
 
 ## Run locally
-`cd web && python3 -m http.server` then open the printed URL. Fetches wasm + `../data/*.bin` + meta at runtime.
+Serve from the REPO ROOT (not `web/`) so the app's `../data/*` fetches resolve:
+`python3 -m http.server 8080` then open `http://localhost:8080/web/`.
+(Port 8080 — `:8000` is another project. Fetches wasm + `../data/*.bin` + meta at runtime.)
 
 ## Conventions
 - Commit early and often: small, atomic, one logical change each.
