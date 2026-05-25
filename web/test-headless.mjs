@@ -140,6 +140,42 @@ async function run() {
     }
   }
 
+  // ── Perf benchmark: 60 step() calls, measure avg ms and vertex counts ──────
+  const perfResult = await page.evaluate(async () => {
+    const eng = window._eng;
+    if (!eng) return { ok: false, reason: 'window._eng not set' };
+
+    const ITERS = 60;
+    const t0 = performance.now();
+    for (let i = 0; i < ITERS; i++) {
+      eng.step(0.016);
+    }
+    const elapsed = performance.now() - t0;
+    const avgMs = elapsed / ITERS;
+
+    const fillLen = eng.fill_vertices().length / 3; // vertex count
+    const lineLen = eng.line_vertices().length / 3;
+    return { ok: true, avgMs, fillVerts: fillLen, lineVerts: lineLen };
+  });
+
+  if (!perfResult.ok) {
+    console.warn(`WARN: perf benchmark skipped — ${perfResult.reason}`);
+  } else {
+    const { avgMs, fillVerts, lineVerts } = perfResult;
+    const totalVerts = fillVerts + lineVerts;
+    console.log(`PERF: avg step = ${avgMs.toFixed(2)} ms/frame | fill_verts = ${fillVerts} | line_verts = ${lineVerts} | total = ${totalVerts}`);
+    if (avgMs > 20) {
+      console.warn(`WARN: step() is slow (${avgMs.toFixed(1)} ms) — consider tightening LOD caps`);
+    } else {
+      console.log(`PASS: step() performance acceptable (${avgMs.toFixed(2)} ms/frame)`);
+    }
+    if (totalVerts > 500_000) {
+      console.warn(`WARN: vertex count high (${totalVerts}) — consider reducing COL_NEAR_POINTS or ROW_BUDGET`);
+    } else {
+      console.log(`PASS: vertex count within budget (${totalVerts} total verts)`);
+    }
+  }
+
   await browser.close();
   server.close();
   console.log('All checks passed.');

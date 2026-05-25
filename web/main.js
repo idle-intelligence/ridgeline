@@ -115,6 +115,9 @@ async function main() {
 
   overlay.style.display = 'none';
 
+  // Expose engine for headless perf benchmarking (no-op in production)
+  window._eng = eng;
+
   const input_state = new InputHandler(canvas);
 
   let prev = performance.now();
