@@ -49,15 +49,22 @@ in float v_strength;
 in float v_elev;
 out vec4 out_color;
 void main() {
-  // Brightness ramp: ocean rings dim, land glows. Gamma-lift low elevations so even
-  // modest land (a few hundred m) reads clearly bright against the dim ocean wireframe.
-  float e = pow(clamp(v_elev, 0.0, 1.0), 0.4);
-  float bright = mix(0.30, 1.25, e);
-  // Whisper of warmth at peaks: slight amber nudge.
-  float warmR = mix(0.0, 0.06, e);
-  float warmG = mix(0.0, 0.02, e);
+  // Ocean (v_elev==0) is VERY faint — just enough to suggest the sphere.
+  // Any land jumps to a bright floor, then gamma-lifts so low coastal land still reads,
+  // peaks glow near-white. Continent SHAPES emerge as bright landmasses on a dim globe.
+  float ev = clamp(v_elev, 0.0, 1.0);
+  float isLand = step(0.0008, ev);                 // ocean is exactly 0
+  float e = pow(ev, 0.35);                          // gamma-lift low land
+  float landBright = mix(0.85, 1.45, e);            // land: bright floor → glowing peaks
+  float oceanBright = 0.12;                         // ocean: near-background
+  float bright = mix(oceanBright, landBright, isLand);
+  // Also fade ocean alpha down so it reads as a dim ghost of the sphere.
+  float alphaMul = mix(0.45, 1.0, isLand);
+  // Whisper of warmth at peaks: slight amber nudge (land only).
+  float warmR = mix(0.0, 0.07, e) * isLand;
+  float warmG = mix(0.0, 0.025, e) * isLand;
   vec3 col = clamp(u_color.rgb * bright + vec3(warmR, warmG, 0.0), 0.0, 1.0);
-  out_color = vec4(col, u_color.a * v_strength);
+  out_color = vec4(col, u_color.a * v_strength * alphaMul);
 }
 `;
 
