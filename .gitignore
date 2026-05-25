@@ -6,6 +6,11 @@
 /core/pkg
 /web/pkg
 
+# JS dev deps and test artifacts
+/web/node_modules
+/web/package-lock.json
+/web/test-screenshot.png
+
 # Python
 __pycache__/
 *.pyc
