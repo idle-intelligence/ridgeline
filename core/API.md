@@ -56,7 +56,7 @@ Mouse drives freelook only (`set_look`); flight controls are keyboard-only.
 
 ## Camera (third-person chase)
 The camera is positioned behind and above the ship in ship-local space:
-`cam_pos = ship_pos + ship_orientation * (0, CHASE_UP=5, CHASE_BACK=25)`.
+`cam_pos = ship_pos + ship_orientation * (0, CHASE_UP=8, CHASE_BACK=35)`.
 View direction = ship orientation + freelook offset (`set_look`). Flight physics
 (`phys.position`, `phys.orientation`) are the **ship** transform; the camera
 offset is view-only.
@@ -70,7 +70,7 @@ offset is view-only.
 - `eng.model_matrix()` → `Float32Array` length 16, **column-major**.
   = `translate(ship_pos) * rotate(ship_orientation)`. No scale baked in.
   Pass as the model matrix; multiply `view_proj * model_matrix` in JS to get MVP.
-- `eng.aircraft_scale()` → `f32` = 8.0. Scale to apply to the normalized aircraft
+- `eng.aircraft_scale()` → `f32` = 3.5. Scale to apply to the normalized aircraft
   mesh (nose-to-tail ≈ 1 wu) to reach world units. Web applies this when uploading
   vertex positions from `aircraft.json`.
 

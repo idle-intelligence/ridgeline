@@ -18,12 +18,13 @@ const ASPECT_DEFAULT: f32 = 16.0 / 9.0;
 
 // --- Chase camera offsets (ship-local space) ---
 // Camera sits behind (+z = back) and above (+y) the ship.
-const CHASE_UP: f32 = 5.0;     // world units above ship
-const CHASE_BACK: f32 = 25.0;  // world units behind ship (along +z body axis)
+const CHASE_UP: f32 = 8.0;     // world units above ship
+const CHASE_BACK: f32 = 35.0;  // world units behind ship (along +z body axis)
 
 /// Scale to apply to the normalized aircraft model (length ≈ 1.0) in world units.
-/// A value of 8.0 makes the craft ~8 wu tip-to-tail, clearly visible at chase distance.
-pub const AIRCRAFT_SCALE: f32 = 8.0;
+/// At VE=20, Mont Saint Clair renders ~38 wu tall; 3.5 wu makes the craft read as a
+/// small few-meter vessel dwarfed even by the coastal hill at spawn.
+pub const AIRCRAFT_SCALE: f32 = 3.5;
 
 /// Spawn placement: in the Mediterranean just south of Sète (43.40 N, 3.70 E),
 /// flying north toward the coast. Geographic point is mapped through the bbox.

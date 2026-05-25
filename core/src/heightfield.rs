@@ -6,9 +6,10 @@
 //   111_000 m. For the smoke-test that is ~156 km EW × 222 km NS, but since the bbox is
 //   passed at construction we compute exact scale factors from it dynamically.
 //
-// Vertical exaggeration: VE = 3.0
-//   Alps run 181–4459 m → raw range ~4.3 km. At 1:1 that is tiny vs. the ~200 km footprint.
-//   VE 3 makes the Alps read dramatically without looking like spikes.
+// Vertical exaggeration: VE = 20.0
+//   France full grid spans ~10° lat × ~12° lon (~1100 km × ~925 km). Horizontal scale
+//   ≈ 0.0108 wu/m → Mont Saint Clair (175 m) renders ~38 wu; Mont Blanc (4672 m) ~1009 wu.
+//   VE 20 ensures even modest coastal hills read dramatically from chase camera height.
 //
 // The world box is centered at (0, 0, 0).
 //   x: longitude, west = negative, east = positive
@@ -17,7 +18,7 @@
 //      extent is ~[-0.5, 0.5] on each axis.  We pick WORLD_HALF = 2000.0 world units so
 //      the terrain sits in a ±2000 box in x/z, and elevation is in [0, ~860] world units.
 
-pub const VE: f32 = 3.0;
+pub const VE: f32 = 20.0;
 // Half-width of the world box in world units
 pub const WORLD_HALF: f32 = 6000.0;
 

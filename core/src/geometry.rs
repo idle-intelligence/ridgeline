@@ -18,14 +18,14 @@
 //   Always includes the last column so strips close.
 //
 // Distance bands → (row_stride, col_stride):
-//   [0,      300)    → (4,   64)    near: dense rows + columns
-//   [300,    800)    → (8,   128)
-//   [800,    2000)   → (16,  256)
-//   [2000,   4500)   → (32,  512)
-//   [4500,   8000)   → (64,  1024)
-//   [8000,   14000)  → (128, 2048)  base far band
-//   [14000,  22000)  → (256, 4096)  high-altitude extension
-//   [22000,  FAR)    → (512, 8192)  very-high-altitude extension
+//   [0,      200)    → (4,   32)    ultra-near: only within 200wu (craft docked/landed)
+//   [200,    1400)   → (8,   64)    near: primary near band, wide to reduce pop frequency
+//   [1400,   3500)   → (16,  128)
+//   [3500,   7000)   → (32,  256)
+//   [7000,   11000)  → (64,  512)
+//   [11000,  17000)  → (128, 1024)  base far band
+//   [17000,  25000)  → (256, 2048)  high-altitude extension
+//   [25000,  FAR)    → (512, 4096)  very-high-altitude extension
 //
 // Hard far-cull beyond far_cull (computed from camera altitude each frame).
 //
@@ -38,30 +38,44 @@ use crate::heightfield::Heightfield;
 use glam::Vec3;
 
 // ── Distance bands (world units from camera z) ────────────────────────────────
+//
+// Band thresholds are pushed outward and spread wider than the minimum needed so
+// that LOD transitions happen far from the camera (sub-pixel / low-contrast) and
+// the camera can travel farther before any band boundary crosses a visible row.
+// Wider bands = fewer transitions per unit of travel = less wavefront popping.
+//
+// With VE=20 and terrain up to ~1000 wu tall, near terrain is dense and dramatic;
+// far terrain benefit from aggressive culling.
 
 /// Band thresholds (ascending). Each band index maps to a stride pair below.
 /// The world is ±6000 wu with 8192 grid rows/cols, so ~1.46 wu per cell.
-const BANDS: [f32; 8] = [300.0, 800.0, 2_000.0, 4_500.0, 8_000.0, 14_000.0, 22_000.0, f32::MAX];
+///
+/// LOD wavefront mitigation: eliminating the finest row_stride=4 band reduces the
+/// most visible pop (new rows appearing between existing ones at the near transition).
+/// stride=8 near terrain at VE=20 still gives dense, dramatic ridgelines (every ~11 wu),
+/// while the furthest band transitions happen in the distance where they are imperceptible.
+/// Bands are widely-spaced so the camera travels a long way before any transition fires.
+const BANDS: [f32; 8] = [200.0, 1_400.0, 3_500.0, 7_000.0, 11_000.0, 17_000.0, 25_000.0, f32::MAX];
 
 /// (row_stride, col_stride) per band index (power-of-two, index-aligned).
 /// col_stride is relative to the 8192-column grid.
-///   near  (<300wu):  every 4th row, every 64th col
-///   mid1  (<800wu):  every 8th row, every 128th col
-///   mid2  (<2000wu): every 16th row, every 256th col
-///   mid3  (<4500wu): every 32nd row, every 512th col
-///   mid4  (<8000wu): every 64th row, every 1024th col
-///   far   (<14000):  every 128th row, every 2048th col
-///   xfar  (<22000):  every 256th row, every 4096th col  — high-altitude extension
-///   xxfar (beyond):  every 512th row, every 8192th col  — very-high-altitude extension
+///   ultra (<200wu):   every 4th row, every 32nd col  — only within 200wu (rare in normal flight)
+///   near  (<1400wu):  every 8th row, every 64th col  — primary near band, wide threshold
+///   mid1  (<3500wu):  every 16th row, every 128th col
+///   mid2  (<7000wu):  every 32nd row, every 256th col
+///   mid3  (<11000wu): every 64th row, every 512th col
+///   far   (<17000):   every 128th row, every 1024th col
+///   xfar  (<25000):   every 256th row, every 2048th col — high-altitude extension
+///   xxfar (beyond):   every 512th row, every 4096th col — very-high-altitude extension
 const STRIDES: [(u32, u32); 8] = [
-    (4,   64),
-    (8,   128),
-    (16,  256),
-    (32,  512),
-    (64,  1024),
-    (128, 2048),
-    (256, 4096),
-    (512, 8192),
+    (4,   32),
+    (8,   64),
+    (16,  128),
+    (32,  256),
+    (64,  512),
+    (128, 1024),
+    (256, 2048),
+    (512, 4096),
 ];
 
 // ── Altitude-driven far-cull ─────────────────────────────────────────────────
@@ -100,7 +114,9 @@ pub struct GeometryBuffers {
 }
 
 pub fn generate(hf: &Heightfield, cam_pos: Vec3, cam_fwd: Vec3) -> GeometryBuffers {
-    let baseline_y = hf.elev_world_min - 5.0;
+    // Pull baseline well below terrain minimum so fill polygons fully occlude
+    // each other; gap scales with VE (VE=20 → terrain ~10x taller → need deeper baseline).
+    let baseline_y = hf.elev_world_min - 50.0;
     let cam_fwd_n = cam_fwd.normalize_or_zero();
 
     // Altitude-driven far-cull: camera y is world-space (sea = 0).
