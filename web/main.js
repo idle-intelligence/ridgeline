@@ -137,7 +137,11 @@ async function main() {
     // HUD
     const spd = eng.speed().toFixed(0);
     const alt = eng.altitude().toFixed(0);
-    hud.textContent = `SPD ${spd}   ALT ${alt}m`;
+    const ll = eng.lat_lon();
+    const latVal = ll[0], lonVal = ll[1];
+    const latStr = `${Math.abs(latVal).toFixed(1)}°${latVal >= 0 ? 'N' : 'S'}`;
+    const lonStr = `${Math.abs(lonVal).toFixed(1)}°${lonVal >= 0 ? 'E' : 'W'}`;
+    hud.textContent = `SPD ${spd}   ALT ${alt}m   ${latStr} ${lonStr}`;
 
     requestAnimationFrame(frame);
   }

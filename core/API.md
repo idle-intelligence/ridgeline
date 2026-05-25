@@ -111,6 +111,10 @@ Back-to-front painter's order (guaranteed by core) is required for correct compo
 ## Debug getters (optional, for HUD)
 - `eng.altitude()` → f32 (meters above local baseline)
 - `eng.speed()` → f32 (world units/sec)
+- `eng.lat_lon()` → `Float32Array` length 2 `[lat, lon]` — ship geographic position in decimal
+  degrees. Computed by inverse-mapping `phys.position` through the stored bbox bounds:
+  `lon = lon_min + (pos.x - hf.x_min) / (hf.x_max - hf.x_min) * (lon_max - lon_min)`,
+  `lat = lat_min + (pos.z - hf.z_min) / (hf.z_max - hf.z_min) * (lat_max - lat_min)`.
 
 ## Rendering contract (web side)
 - Enable depth test; draw all fill strips back-to-front, then the ridge lines (LEQUAL or a

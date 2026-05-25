@@ -83,6 +83,11 @@ pub struct Engine {
     i_roll: f32,
     i_boost: f32,
     i_ftl: bool,
+    // geographic bbox (degrees)
+    lat_min: f32,
+    lat_max: f32,
+    lon_min: f32,
+    lon_max: f32,
 }
 
 #[wasm_bindgen]
@@ -142,6 +147,10 @@ impl Engine {
             i_roll: 0.0,
             i_boost: 0.0,
             i_ftl: false,
+            lat_min,
+            lat_max,
+            lon_min,
+            lon_max,
         }
     }
 
@@ -315,5 +324,23 @@ impl Engine {
     /// Current speed (world units/sec).
     pub fn speed(&self) -> f32 {
         self.phys.speed
+    }
+
+    /// Ship geographic position `[lat, lon]` in decimal degrees.
+    ///
+    /// Computed by inverse-mapping `phys.position` through the stored bbox:
+    /// - `lon = lon_min + (pos.x - hf.x_min) / (hf.x_max - hf.x_min) * (lon_max - lon_min)`
+    /// - `lat = lat_min + (pos.z - hf.z_min) / (hf.z_max - hf.z_min) * (lat_max - lat_min)`
+    pub fn lat_lon(&self) -> Float32Array {
+        let pos = self.phys.position;
+        let lon = self.lon_min
+            + (pos.x - self.hf.x_min) / (self.hf.x_max - self.hf.x_min)
+                * (self.lon_max - self.lon_min);
+        let lat = self.lat_min
+            + (pos.z - self.hf.z_min) / (self.hf.z_max - self.hf.z_min)
+                * (self.lat_max - self.lat_min);
+        let arr = Float32Array::new_with_length(2);
+        arr.copy_from(&[lat, lon]);
+        arr
     }
 }

@@ -2,7 +2,7 @@
 // Matches Engine API exactly per core/API.md so the WebGL2 pipeline can be
 // verified visually in headless Chromium without the real wasm present.
 
-export function makeMockEngine(width, height, _hf, _wm, _elevMin, _elevMax, _latMin, _latMax, _lonMin, _lonMax) {
+export function makeMockEngine(width, height, _hf, _wm, _elevMin, _elevMax, latMin, latMax, lonMin, lonMax) {
   const worldW = 10.0;
   const worldD = 10.0;
 
@@ -166,6 +166,10 @@ export function makeMockEngine(width, height, _hf, _wm, _elevMin, _elevMax, _lat
       camZ += velZ * dt;
     },
 
+    lat_lon() {
+      // Mock: return center of bbox as fixed position
+      return new Float32Array([(latMin + latMax) * 0.5, (lonMin + lonMax) * 0.5]);
+    },
     free() {},
   };
 }
