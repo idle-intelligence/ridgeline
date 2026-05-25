@@ -18,14 +18,19 @@
 //   Always includes the last column so strips close.
 //
 // Distance bands → (row_stride, col_stride):
-//   [0,      BAND1)  → (1,  2)    very near: every row, dense columns
-//   [BAND1,  BAND2)  → (2,  4)
-//   [BAND2,  BAND3)  → (4,  8)
-//   [BAND3,  BAND4)  → (8,  16)
-//   [BAND4,  BAND5)  → (16, 32)
-//   [BAND5,  FAR)    → (32, 64)   far: thin rows, coarse columns
+//   [0,      300)    → (4,   64)    near: dense rows + columns
+//   [300,    800)    → (8,   128)
+//   [800,    2000)   → (16,  256)
+//   [2000,   4500)   → (32,  512)
+//   [4500,   8000)   → (64,  1024)
+//   [8000,   14000)  → (128, 2048)  base far band
+//   [14000,  22000)  → (256, 4096)  high-altitude extension
+//   [22000,  FAR)    → (512, 8192)  very-high-altitude extension
 //
-// Hard far-cull beyond FAR_CULL_Z.
+// Hard far-cull beyond far_cull (computed from camera altitude each frame).
+//
+// Earth curvature: each emitted vertex has y reduced by d²/(2R) where d is horizontal
+// (XZ-plane) distance from the camera and R = CURVE_R world units.
 //
 // Output order: farthest row first (back-to-front painter's order).
 
@@ -34,29 +39,56 @@ use glam::Vec3;
 
 // ── Distance bands (world units from camera z) ────────────────────────────────
 
-/// Hard far-cull distance.
-const FAR_CULL_Z: f32 = 14_000.0;
-
 /// Band thresholds (ascending). Each band index maps to a stride pair below.
 /// The world is ±6000 wu with 8192 grid rows/cols, so ~1.46 wu per cell.
-const BANDS: [f32; 6] = [300.0, 800.0, 2_000.0, 4_500.0, 8_000.0, FAR_CULL_Z];
+const BANDS: [f32; 8] = [300.0, 800.0, 2_000.0, 4_500.0, 8_000.0, 14_000.0, 22_000.0, f32::MAX];
 
 /// (row_stride, col_stride) per band index (power-of-two, index-aligned).
 /// col_stride is relative to the 8192-column grid.
-///   near  (<300wu):  every 4th row, every 64th col  → ~200 rows, 128 cols  = ~25k fill verts
-///   mid1  (<800wu):  every 8th row, every 128th col → sparse but smooth
+///   near  (<300wu):  every 4th row, every 64th col
+///   mid1  (<800wu):  every 8th row, every 128th col
 ///   mid2  (<2000wu): every 16th row, every 256th col
 ///   mid3  (<4500wu): every 32nd row, every 512th col
 ///   mid4  (<8000wu): every 64th row, every 1024th col
-///   far   (< cull):  every 128th row, every 2048th col
-const STRIDES: [(u32, u32); 6] = [
+///   far   (<14000):  every 128th row, every 2048th col
+///   xfar  (<22000):  every 256th row, every 4096th col  — high-altitude extension
+///   xxfar (beyond):  every 512th row, every 8192th col  — very-high-altitude extension
+const STRIDES: [(u32, u32); 8] = [
     (4,   64),
     (8,   128),
     (16,  256),
     (32,  512),
     (64,  1024),
     (128, 2048),
+    (256, 4096),
+    (512, 8192),
 ];
+
+// ── Altitude-driven far-cull ─────────────────────────────────────────────────
+/// Baseline far-cull at sea level (world units).
+const FAR_CULL_BASE: f32 = 14_000.0;
+/// Far-cull increase per world unit of altitude (linear gain).
+/// At altitude 500 wu → cull ~19k wu; at 2000 wu → cull ~30k wu.
+const FAR_CULL_ALT_GAIN: f32 = 10.0;
+/// Minimum far-cull (applied even when underground).
+const FAR_CULL_MIN: f32 = 8_000.0;
+/// Maximum far-cull regardless of altitude.
+const FAR_CULL_MAX: f32 = 30_000.0;
+
+/// Compute per-frame far-cull distance from camera altitude (world-space y, sea = 0).
+#[inline]
+fn far_cull(cam_y: f32) -> f32 {
+    let altitude = cam_y.max(0.0);
+    (FAR_CULL_BASE + FAR_CULL_ALT_GAIN * altitude).clamp(FAR_CULL_MIN, FAR_CULL_MAX)
+}
+
+// ── Earth curvature ───────────────────────────────────────────────────────────
+/// Effective planet radius in world units.
+/// Real Earth 6371 km; scale is ~10.3 wu/km → R ≈ 65600 wu.
+/// Tuned to 55000 wu for a visibly curved horizon at high altitude without
+/// a noticeable warp up close.
+const CURVE_R: f32 = 55_000.0;
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -71,6 +103,9 @@ pub fn generate(hf: &Heightfield, cam_pos: Vec3, cam_fwd: Vec3) -> GeometryBuffe
     let baseline_y = hf.elev_world_min - 5.0;
     let cam_fwd_n = cam_fwd.normalize_or_zero();
 
+    // Altitude-driven far-cull: camera y is world-space (sea = 0).
+    let far_cull_dist = far_cull(cam_pos.y);
+
     // ── Collect visible rows (back-to-front) ──────────────────────────────────
     // We need painter's order: sort by forward projection, farthest first.
     // Collect eligible rows first, then sort.
@@ -80,7 +115,7 @@ pub fn generate(hf: &Heightfield, cam_pos: Vec3, cam_fwd: Vec3) -> GeometryBuffe
         let world_z = hf.row_z(row);
         let dist_z = (world_z - cam_pos.z).abs();
 
-        if dist_z > FAR_CULL_Z {
+        if dist_z > far_cull_dist {
             continue;
         }
 
@@ -108,7 +143,7 @@ pub fn generate(hf: &Heightfield, cam_pos: Vec3, cam_fwd: Vec3) -> GeometryBuffe
 
     // ── Emit geometry ─────────────────────────────────────────────────────────
     let est_rows = visible.len();
-    // conservative per-row: max columns at coarsest col_stride=2 for near, up to width/2
+    // conservative per-row: max columns at coarsest col_stride for near, up to width/2
     let col_cap = (hf.width / 2 + 2) as usize;
     let cap = est_rows * col_cap * 2 * 3;
     let mut fill_verts: Vec<f32> = Vec::with_capacity(cap);
@@ -124,7 +159,7 @@ pub fn generate(hf: &Heightfield, cam_pos: Vec3, cam_fwd: Vec3) -> GeometryBuffe
         // Fill strip
         let fill_start = (fill_verts.len() / 3) as u32;
         let fill_before = fill_verts.len();
-        emit_row(hf, *row, world_z, col_stride, baseline_y, &mut fill_verts, true);
+        emit_row(hf, *row, world_z, col_stride, baseline_y, cam_pos, &mut fill_verts, true);
         let fill_count = ((fill_verts.len() - fill_before) / 3) as u32;
         if fill_count > 0 {
             fill_draws.push(fill_start);
@@ -134,7 +169,7 @@ pub fn generate(hf: &Heightfield, cam_pos: Vec3, cam_fwd: Vec3) -> GeometryBuffe
         // Line strip
         let line_start = (line_verts.len() / 3) as u32;
         let line_before = line_verts.len();
-        emit_row(hf, *row, world_z, col_stride, baseline_y, &mut line_verts, false);
+        emit_row(hf, *row, world_z, col_stride, baseline_y, cam_pos, &mut line_verts, false);
         let line_count = ((line_verts.len() - line_before) / 3) as u32;
         if line_count > 0 {
             line_draws.push(line_start);
@@ -161,27 +196,39 @@ fn band_of(dist_z: f32) -> usize {
 /// Emit vertices for one row into `out`.
 /// fill=true: alternating (baseline, top) pairs for TRIANGLE_STRIP.
 /// fill=false: top-only for LINE_STRIP.
+///
+/// Earth curvature: each vertex's y is reduced by d²/(2·CURVE_R) where d is the
+/// horizontal (XZ-plane) distance from cam_pos. The baseline vertex gets the same
+/// drop so fill strips don't open gaps at the bottom.
+#[allow(clippy::too_many_arguments)]
 fn emit_row(
     hf: &Heightfield,
     row: u32,
     world_z: f32,
     stride: u32,
     baseline_y: f32,
+    cam_pos: Vec3,
     out: &mut Vec<f32>,
     fill: bool,
 ) {
     let last_col = hf.width - 1;
     let mut col = 0u32;
+    let dz = world_z - cam_pos.z;
     loop {
         let c = col.min(last_col);
         let x = hf.col_x(c);
         let y_top = hf.sample(row, c);
 
+        // Horizontal distance from camera for curvature drop.
+        let dx = x - cam_pos.x;
+        let d2 = dx * dx + dz * dz;
+        let drop = d2 / (2.0 * CURVE_R);
+
         if fill {
-            out.extend_from_slice(&[x, baseline_y, world_z]);
-            out.extend_from_slice(&[x, y_top, world_z]);
+            out.extend_from_slice(&[x, baseline_y - drop, world_z]);
+            out.extend_from_slice(&[x, y_top - drop, world_z]);
         } else {
-            out.extend_from_slice(&[x, y_top, world_z]);
+            out.extend_from_slice(&[x, y_top - drop, world_z]);
         }
 
         if c == last_col {

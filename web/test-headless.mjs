@@ -221,8 +221,7 @@ async function run() {
     const snapB_draws = eng.line_draws();
     const rowsB = rowSamples(snapB_verts, snapB_draws);
 
-    // Build lookup: z-rounded → row data from B
-    const EPS_Z = 0.5; // world units — rows are on fixed grid so this should be tiny
+    // Build lookup: z-rounded → row data from B (rows on fixed grid, round to 0.1wu)
     const mapB = new Map();
     for (const r of rowsB) {
       mapB.set(Math.round(r.z * 10), r);
