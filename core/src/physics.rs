@@ -1,25 +1,27 @@
-// Throttle + momentum flight physics.
+// Throttle + momentum flight physics (planet scale).
 //
 // State: orientation (Quat), position (Vec3), throttle (0..1), speed (wu/s).
 // Throttle is a gas pedal — thrust input raises/lowers it over time (THROTTLE_RATE).
 // Engine thrust drives speed forward; linear drag opposes it.
-// Terminal speeds (WORLD_HALF=40000, world spans 80000 wu ≈ 1000 km):
-//   Cruise (full throttle, no boost): ~1200 wu/s  → ~67 s to cross 80 km at scale
-//   Boost  (Shift):                   ~3500 wu/s  → fast hop
-//   FTL    (Space):                   ~15000 wu/s → cross country in ~5 s
+//
+// Planet scale: R_world = 6000 wu, m_per_wu ≈ 1062 m/wu (Earth radius / R_world).
+// Terminal speeds:
+//   Cruise (full throttle):  ~300 wu/s  ≈ 1.15M km/h  (orbital sightseeing pace)
+//   Boost  (Shift):          ~900 wu/s
+//   FTL    (Space):          ~4500 wu/s → circumnavigate fast
 //
 // Rotation rates (rad/s):
 //   PITCH_RATE = 1.6, YAW_RATE = 1.6, ROLL_RATE = 2.5
 
 use glam::{Mat3, Mat4, Quat, Vec3};
 
-const MAX_THRUST: f32 = 2_400.0; // wu/s² at full throttle
-const DRAG: f32 = 2.0;           // s⁻¹  — terminal cruise = MAX_THRUST/DRAG = 1200
+const MAX_THRUST: f32 = 600.0;   // wu/s² at full throttle
+const DRAG: f32 = 2.0;           // s⁻¹  — terminal cruise = MAX_THRUST/DRAG = 300
 const THROTTLE_RATE: f32 = 2.0;  // s⁻¹  — lag to reach target throttle
 const IDLE_THROTTLE: f32 = 0.1;  // minimum throttle when no thrust input
 
-const BOOST_SCALE: f32 = 2.9;    // terminal ~3500 wu/s
-const FTL_SCALE: f32 = 12.5;     // terminal ~15000 wu/s
+const BOOST_SCALE: f32 = 3.0;    // terminal ~900 wu/s
+const FTL_SCALE: f32 = 15.0;     // terminal ~4500 wu/s
 
 const PITCH_RATE: f32 = 1.6;
 const YAW_RATE: f32 = 1.6;
