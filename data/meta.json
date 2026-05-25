@@ -1,0 +1,18 @@
+{
+  "bbox": {
+    "lat_min": 44.5,
+    "lat_max": 46.5,
+    "lon_min": 5.5,
+    "lon_max": 7.5
+  },
+  "width": 256,
+  "height": 256,
+  "elev_min": 181,
+  "elev_max": 4459,
+  "dtype": "int16",
+  "byte_order": "little",
+  "row_order": "north_to_south",
+  "col_order": "west_to_east",
+  "nodata_fill": "nearest_valid_edt",
+  "source": "SRTM3"
+}

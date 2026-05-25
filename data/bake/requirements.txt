@@ -1,0 +1,6 @@
+numpy
+srtm.py
+Pillow
+# scipy is optional: enables fast EDT nearest-valid void fill; a numpy
+# dilation fallback is used if it's absent.
+scipy
