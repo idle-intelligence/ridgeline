@@ -3,8 +3,8 @@
 // Keyboard flies the plane (set_input); mouse drives camera freelook (set_look).
 //
 // Control mapping (event.code = physical position, layout-independent):
-//   KeyW / ArrowUp    → pitch nose up
-//   KeyS / ArrowDown  → pitch nose down
+//   KeyW / ArrowUp    → pitch nose DOWN
+//   KeyS / ArrowDown  → pitch nose UP
 //   KeyA / ArrowLeft  → roll left
 //   KeyD / ArrowRight → roll right
 //   KeyQ              → yaw left  (rudder)
@@ -62,9 +62,9 @@ export class InputHandler {
     const thrust = ((k.has('ShiftLeft') || k.has('ShiftRight'))   ? 1 : 0)
                  - ((k.has('ControlLeft') || k.has('ControlRight')) ? 1 : 0);
 
-    // Pitch: KeyW = nose up, KeyS = nose down; arrows mirror
-    const pitch = ((k.has('KeyW') || k.has('ArrowUp'))   ? KEY_PITCH_RATE : 0)
-                - ((k.has('KeyS') || k.has('ArrowDown'))  ? KEY_PITCH_RATE : 0);
+    // Pitch: KeyW = nose DOWN, KeyS = nose UP; arrows mirror
+    const pitch = ((k.has('KeyS') || k.has('ArrowDown')) ?  KEY_PITCH_RATE : 0)
+                - ((k.has('KeyW') || k.has('ArrowUp'))   ?  KEY_PITCH_RATE : 0);
 
     // Yaw: KeyQ = left, KeyE = right (inverted relative to old build)
     const yaw = ((k.has('KeyQ')) ? -RUDDER_RATE : 0)

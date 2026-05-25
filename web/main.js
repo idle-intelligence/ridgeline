@@ -89,12 +89,13 @@ async function main() {
   overlay.innerHTML = '<p>Loading terrain…</p>';
   overlay.style.display = 'flex';
 
-  let meta, hfBytes, wmBytes;
+  let meta, hfBytes, wmBytes, aircraftJson;
   try {
-    [meta, hfBytes, wmBytes] = await Promise.all([
+    [meta, hfBytes, wmBytes, aircraftJson] = await Promise.all([
       fetchJson('../data/meta.json'),
       fetchBinary('../data/heightfield.bin'),
       fetchBinary('../data/water_mask.bin'),
+      fetchJson('../data/aircraft.json'),
     ]);
   } catch (e) {
     fatal('Failed to load terrain data.', e.message);
@@ -107,6 +108,10 @@ async function main() {
     fatal('Engine init failed.', e.message);
   }
   eng.set_aspect(canvas.width / canvas.height);
+
+  // Upload aircraft wireframe geometry (static, uploaded once).
+  const aircraftScale = eng.aircraft_scale();
+  renderer.uploadAircraft(aircraftJson, aircraftScale);
 
   overlay.style.display = 'none';
 

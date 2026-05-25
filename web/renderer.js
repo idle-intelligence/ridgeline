@@ -34,9 +34,10 @@ void main() {
 // Sky: very deep blue-black. Fill: slightly lighter, warm-tinted dark grey-blue.
 // Ridge line: cool off-white, slightly warm.
 export const PALETTE = {
-  sky:  [0.04, 0.04, 0.08, 1.0],          // near-black deep blue
-  fill: [0.07, 0.07, 0.12, 1.0],          // dark blue-grey fill body
-  line: [0.88, 0.86, 0.82, 1.0],          // warm off-white ridge line
+  sky:      [0.04, 0.04, 0.08, 1.0],      // near-black deep blue
+  fill:     [0.07, 0.07, 0.12, 1.0],      // dark blue-grey fill body
+  line:     [0.88, 0.86, 0.82, 1.0],      // warm off-white ridge line
+  aircraft: [0.97, 0.96, 0.93, 1.0],      // near-pure warm white — ship reads distinct
 };
 
 function compileShader(gl, type, src) {
@@ -104,12 +105,54 @@ export class Renderer {
     gl.vertexAttribPointer(this.linePos, 3, gl.FLOAT, false, 0, 0);
     gl.bindVertexArray(null);
 
+    // VAO + VBO for aircraft wireframe (static geometry, uploaded once)
+    this.aircraftVAO       = gl.createVertexArray();
+    this.aircraftVBO       = gl.createBuffer();
+    this.aircraftIBO       = gl.createBuffer(); // index buffer for gl.LINES
+    this.aircraftLineCount = 0; // number of indices
+    gl.bindVertexArray(this.aircraftVAO);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.aircraftVBO);
+    gl.enableVertexAttribArray(this.linePos); // reuse same attrib layout
+    gl.vertexAttribPointer(this.linePos, 3, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.aircraftIBO);
+    gl.bindVertexArray(null);
+
     gl.enable(gl.DEPTH_TEST);
     gl.depthFunc(gl.LEQUAL);
   }
 
   resize(w, h) {
     this.gl.viewport(0, 0, w, h);
+  }
+
+  // Upload the aircraft wireframe once. aircraftJson: {positions, lines}, scale: world units.
+  uploadAircraft(aircraftJson, scale) {
+    const gl = this.gl;
+    const pos = aircraftJson.positions;
+    const segs = aircraftJson.lines;
+
+    // Flatten positions, applying scale
+    const verts = new Float32Array(pos.length * 3);
+    for (let i = 0; i < pos.length; i++) {
+      verts[i * 3]     = pos[i][0] * scale;
+      verts[i * 3 + 1] = pos[i][1] * scale;
+      verts[i * 3 + 2] = pos[i][2] * scale;
+    }
+
+    // Flatten line segments into index pairs
+    const indices = new Uint32Array(segs.length * 2);
+    for (let i = 0; i < segs.length; i++) {
+      indices[i * 2]     = segs[i][0];
+      indices[i * 2 + 1] = segs[i][1];
+    }
+    this.aircraftLineCount = indices.length;
+
+    gl.bindVertexArray(this.aircraftVAO);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.aircraftVBO);
+    gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.aircraftIBO);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
+    gl.bindVertexArray(null);
   }
 
   draw(eng) {
@@ -152,6 +195,34 @@ export class Renderer {
       gl.drawArrays(gl.LINE_STRIP, lineDraws[i], lineDraws[i + 1]);
     }
 
+    // --- aircraft pass ---
+    if (this.aircraftLineCount > 0) {
+      const modelMat  = eng.model_matrix();          // Float32Array(16), col-major
+      const aircraftMvp = mat4Mul(mvp, modelMat);    // view_proj * model_matrix
+
+      gl.useProgram(this.lineProg);
+      gl.uniformMatrix4fv(this.lineMvp, false, aircraftMvp);
+      gl.uniform4fv(this.lineColor, PALETTE.aircraft);
+
+      gl.bindVertexArray(this.aircraftVAO);
+      gl.drawElements(gl.LINES, this.aircraftLineCount, gl.UNSIGNED_INT, 0);
+    }
+
     gl.bindVertexArray(null);
   }
+}
+
+// Multiply two column-major 4x4 matrices (Float32Array(16) each). Returns new Float32Array(16).
+function mat4Mul(a, b) {
+  const out = new Float32Array(16);
+  for (let col = 0; col < 4; col++) {
+    for (let row = 0; row < 4; row++) {
+      let v = 0;
+      for (let k = 0; k < 4; k++) {
+        v += a[k * 4 + row] * b[col * 4 + k];
+      }
+      out[col * 4 + row] = v;
+    }
+  }
+  return out;
 }
