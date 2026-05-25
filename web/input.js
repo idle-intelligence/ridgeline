@@ -1,24 +1,39 @@
-// Input handler: keyboard (AZERTY + QWERTY + arrows) + pointer-lock mouse-look.
-// Produces the 8 args for eng.set_input() per API.md:
-//   thrust, strafe(0), lift(0), pitch, yaw, roll, boost, ftl
+// Input handler: keyboard (AZERTY + QWERTY + arrows) + pointer-lock freelook.
+//
+// Keyboard flies the plane (set_input); mouse drives camera freelook (set_look).
+//
+// Control mapping (event.code = physical position, layout-independent):
+//   KeyW / ArrowUp    → pitch nose up
+//   KeyS / ArrowDown  → pitch nose down
+//   KeyA / ArrowLeft  → roll left
+//   KeyD / ArrowRight → roll right
+//   KeyQ              → yaw left  (rudder)
+//   KeyE              → yaw right (rudder)
+//   ShiftLeft/Right   → throttle up
+//   CtrlLeft/Right    → throttle down
+//   Space (held)      → afterburner
+//   Mouse X/Y         → freelook yaw/pitch (set_look, view-only)
 
-// Mouse-look accumulates deltas each frame and resets them; core integrates rates.
-const MOUSE_SENSITIVITY = 0.006; // radians per pixel
-const KEY_TURN_RATE = 1.2;       // radians/sec for roll
-const RUDDER_RATE = 0.35;        // radians/sec for slow key yaw (Q/E)
+const MOUSE_SENSITIVITY = 0.003; // radians per pixel
+const KEY_PITCH_RATE = 1.6;      // rad/s
+const KEY_ROLL_RATE  = 2.5;      // rad/s
+const RUDDER_RATE    = 0.5;      // rad/s for yaw keys
 
 export class InputHandler {
   constructor(canvas) {
     this.canvas = canvas;
     this.keys = new Set();
-    this._dX = 0;  // accumulated mouse delta this frame
+    this._dX = 0;
     this._dY = 0;
     this._locked = false;
 
     window.addEventListener('keydown', e => {
       this.keys.add(e.code);
-      // request pointer lock on first action key
-      if (!this._locked && !['Escape'].includes(e.code)) {
+      // Prevent browser from hijacking Ctrl and Shift
+      if (e.code.startsWith('Control') || e.code.startsWith('Shift')) {
+        e.preventDefault();
+      }
+      if (!this._locked && e.code !== 'Escape') {
         canvas.requestPointerLock();
       }
     });
@@ -33,53 +48,45 @@ export class InputHandler {
       this._dY += e.movementY;
     });
 
-    // Click on canvas also requests pointer lock
     canvas.addEventListener('click', () => {
       if (!this._locked) canvas.requestPointerLock();
     });
   }
 
-  // Returns the 8-arg tuple; call this once per frame before eng.set_input().
-  // Keyboard mapping (event.code = physical key position, layout-independent):
-  //   KeyW / ArrowUp    → thrust +1  (Z on AZERTY, W on QWERTY)
-  //   KeyS / ArrowDown  → thrust -1
-  //   KeyA / ArrowLeft  → roll left  (Q on AZERTY, A on QWERTY)
-  //   KeyD / ArrowRight → roll right
-  //   KeyQ / KeyE       → slow yaw left / right (rudder)
-  //   Mouse X           → yaw, Mouse Y → pitch
-  //   ShiftLeft/Right   → boost, Space → FTL
+  // Returns [thrust, 0, 0, pitch, yaw, roll, 0, afterburner] for eng.set_input().
+  // Call once per frame before eng.set_input().
   sample() {
     const k = this.keys;
 
-    // Throttle: W/S + arrow up/down mirrors
-    const thrust = (k.has('KeyW') || k.has('ArrowUp')    ? 1 : 0)
-                 - (k.has('KeyS') || k.has('ArrowDown')   ? 1 : 0);
+    // Throttle: Shift = up, Ctrl = down
+    const thrust = ((k.has('ShiftLeft') || k.has('ShiftRight'))   ? 1 : 0)
+                 - ((k.has('ControlLeft') || k.has('ControlRight')) ? 1 : 0);
 
-    // pitch: mouse Y (negated — mouse up = nose up / look up, original feel)
-    // pre-9516005 behavior: mouse-up pitches nose down; restore that by negating dY.
-    const mousePitch = -this._dY * MOUSE_SENSITIVITY;
-    const pitch = mousePitch;
+    // Pitch: KeyW = nose up, KeyS = nose down; arrows mirror
+    const pitch = ((k.has('KeyW') || k.has('ArrowUp'))   ? KEY_PITCH_RATE : 0)
+                - ((k.has('KeyS') || k.has('ArrowDown'))  ? KEY_PITCH_RATE : 0);
 
-    // yaw: mouse X (negated — mouse right = turn right)
-    const mouseYaw = -this._dX * MOUSE_SENSITIVITY;
-    // rudder: KeyQ = yaw left, KeyE = yaw right (slow rate)
-    const rudder = (k.has('KeyE') ? RUDDER_RATE : 0) - (k.has('KeyQ') ? RUDDER_RATE : 0);
-    const yaw = mouseYaw + rudder;
+    // Yaw: KeyQ = left, KeyE = right (inverted relative to old build)
+    const yaw = ((k.has('KeyQ')) ? -RUDDER_RATE : 0)
+              + ((k.has('KeyE')) ?  RUDDER_RATE : 0);
 
-    // roll: KeyA/ArrowLeft = roll left, KeyD/ArrowRight = roll right
-    const roll = (k.has('KeyD') || k.has('ArrowRight') ? KEY_TURN_RATE : 0)
-               - (k.has('KeyA') || k.has('ArrowLeft')  ? KEY_TURN_RATE : 0);
+    // Roll: KeyA/ArrowLeft = left, KeyD/ArrowRight = right
+    const roll = ((k.has('KeyD') || k.has('ArrowRight')) ? KEY_ROLL_RATE : 0)
+               - ((k.has('KeyA') || k.has('ArrowLeft'))  ? KEY_ROLL_RATE : 0);
 
-    // boost: Shift
-    const boost = (k.has('ShiftLeft') || k.has('ShiftRight')) ? 1.0 : 0.0;
+    // Afterburner: Space held
+    const afterburner = k.has('Space');
 
-    // ftl: Space held
-    const ftl = k.has('Space');
-
-    // reset accumulated mouse deltas
+    // Consume mouse deltas — returned separately for set_look
+    const dX = this._dX;
+    const dY = this._dY;
     this._dX = 0;
     this._dY = 0;
 
-    return [thrust, 0, 0, pitch, yaw, roll, boost, ftl];
+    return {
+      input: [thrust, 0, 0, pitch, yaw, roll, 0, afterburner],
+      lookDX:  dX * MOUSE_SENSITIVITY,   // positive = look right
+      lookDY: -dY * MOUSE_SENSITIVITY,   // positive = look up (inverted Y)
+    };
   }
 }

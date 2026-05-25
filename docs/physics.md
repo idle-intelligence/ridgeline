@@ -28,8 +28,7 @@ throttle += (throttle_target - throttle) * THROTTLE_RATE * dt
 
 `THROTTLE_RATE = 2.0 s⁻¹` — throttle reaches ~86% of its target in 1 second.
 
-The **throttle ceiling** is normally 1.0. With Shift (boost), the ceiling stays 1.0 but
-the terminal speed is higher (see below). FTL multiplies the effective thrust directly.
+The **throttle ceiling** is normally 1.0. Afterburner (Space) multiplies effective thrust directly.
 
 ## Speed dynamics (thrust + drag)
 
@@ -53,8 +52,7 @@ Constants and derived terminal speeds:
 | `THROTTLE_RATE` | 2.0 s⁻¹ | Throttle lag |
 | `IDLE_THROTTLE` | 0.1 | Minimum throttle when no input |
 | Terminal (cruise) | ~250 wu/s | `MAX_THRUST / DRAG` |
-| Boost scale | 2.8× | Terminal → ~700 wu/s |
-| FTL scale | 10× | Terminal → ~2500 wu/s |
+| Afterburner scale | 10× | Terminal → ~2500 wu/s (Space held) |
 
 When the player releases the throttle the effective input is `IDLE_THROTTLE` (not zero),
 so the plane decays gently to a low idle speed (~50 wu/s) rather than stopping abruptly.
@@ -71,9 +69,13 @@ position += (orientation * body_velocity) * dt
 
 Rotation is integrated in body space each step (yaw → pitch → roll) and normalised.
 
-## Boost and FTL easing
+## Throttle and afterburner inputs
 
-Boost and FTL are passed as inputs each frame. Their effect on thrust is applied
-multiplicatively to `MAX_THRUST`. Because speed builds via the thrust/drag equation
-(not by setting speed directly), acceleration and deceleration always ease in and out
-naturally with the drag time-constant τ = 1 / DRAG = 0.5 s.
+Throttle is driven by `ShiftLeft/Right` (+1) and `CtrlLeft/Right` (-1) on the keyboard.
+Afterburner (`Space` held) multiplies thrust by `FTL_SCALE = 10×` each frame.
+Because speed builds via the thrust/drag equation (not by setting speed directly),
+acceleration and deceleration always ease in and out naturally with the drag
+time-constant τ = 1 / DRAG = 0.5 s.
+
+Mouse no longer affects flight. Pointer-lock deltas are fed to `eng.set_look()` for
+cockpit freelook (view-only, does not alter `orientation` or `velocity`).

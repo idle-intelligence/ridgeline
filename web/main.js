@@ -110,7 +110,7 @@ async function main() {
 
   overlay.style.display = 'none';
 
-  const input = new InputHandler(canvas);
+  const input_state = new InputHandler(canvas);
 
   let prev = performance.now();
 
@@ -118,7 +118,9 @@ async function main() {
     const dt = Math.min((now - prev) / 1000, 0.05); // cap at 50ms
     prev = now;
 
-    const [thrust, strafe, lift, pitch, yaw, roll, boost, ftl] = input.sample();
+    const { input, lookDX, lookDY } = input_state.sample();
+    const [thrust, strafe, lift, pitch, yaw, roll, boost, ftl] = input;
+    eng.set_look(lookDX, lookDY);
     eng.set_input(thrust, strafe, lift, pitch, yaw, roll, boost, ftl);
     eng.step(dt);
 
