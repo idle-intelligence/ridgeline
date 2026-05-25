@@ -178,6 +178,45 @@ impl Engine {
             compute_view_proj(&self.phys, self.look_yaw, self.look_pitch, self.aspect);
     }
 
+    /// Debug/test helper: teleport the ship to the radial through (lat,lon) at `dist` wu
+    /// from center, oriented to look at the globe center. Regenerates geometry. Used by the
+    /// headless multi-angle recognizability test to orbit the camera around the globe.
+    pub fn debug_place(&mut self, lat: f32, lon: f32, dist: f32) {
+        let radial = Heightfield::sphere_point(lat, lon, 0.0).normalize();
+        let pos = radial * (dist - CHASE_BACK);
+        let look = -radial;
+        self.phys = Physics::new(pos, look);
+        self.look_yaw = 0.0;
+        self.look_pitch = 0.0;
+        let cam_pos = chase_cam_pos(&self.phys);
+        let cam_fwd = self.phys.orientation * Vec3::NEG_Z;
+        self.geom = geometry::generate(&self.hf, cam_pos, cam_fwd);
+        self.view_proj_mat = compute_view_proj(&self.phys, 0.0, 0.0, self.aspect);
+    }
+
+    /// Debug/test helper: place at (lat,lon,dist) but orient to look toward the surface
+    /// point (look_lat,look_lon) — for a tangential "skimming over terrain" framing.
+    pub fn debug_place_look(
+        &mut self,
+        lat: f32,
+        lon: f32,
+        dist: f32,
+        look_lat: f32,
+        look_lon: f32,
+    ) {
+        let radial = Heightfield::sphere_point(lat, lon, 0.0).normalize();
+        let pos = radial * (dist - CHASE_BACK);
+        let target = Heightfield::sphere_point(look_lat, look_lon, 0.0);
+        let look = (target - pos).normalize();
+        self.phys = Physics::new(pos, look);
+        self.look_yaw = 0.0;
+        self.look_pitch = 0.0;
+        let cam_pos = chase_cam_pos(&self.phys);
+        let cam_fwd = self.phys.orientation * Vec3::NEG_Z;
+        self.geom = geometry::generate(&self.hf, cam_pos, cam_fwd);
+        self.view_proj_mat = compute_view_proj(&self.phys, 0.0, 0.0, self.aspect);
+    }
+
     pub fn set_aspect(&mut self, aspect: f32) {
         self.aspect = aspect;
         self.view_proj_mat =
