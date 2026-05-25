@@ -68,6 +68,66 @@ void main() {
 }
 `;
 
+// Starfield: a full-screen background. A fullscreen triangle is emitted directly in clip
+// space at the far plane (z=w → depth 1.0). The fragment shader reconstructs the world-space
+// view ray (via the inverse view-projection) so stars are fixed in WORLD space — they parallax
+// correctly as the camera orbits, reading as a real sky. A 3D hash over a quantized direction
+// grid scatters dim, slightly-varied white/grey points on the near-black background.
+// Drawn FIRST with depth-write OFF; the globe/terrain (depth < 1) always draws over it.
+const STAR_VERT_SRC = `#version 300 es
+precision highp float;
+out vec2 v_ndc;
+void main() {
+  // Oversized triangle covering the screen; positions chosen so the clip-space xy = ndc.
+  vec2 p = vec2((gl_VertexID == 2) ? 3.0 : -1.0, (gl_VertexID == 1) ? 3.0 : -1.0);
+  v_ndc = p;
+  gl_Position = vec4(p, 1.0, 1.0); // z=w=1 → depth 1.0 (far plane)
+}
+`;
+
+const STAR_FRAG_SRC = `#version 300 es
+precision highp float;
+uniform mat4 u_invVP;   // inverse(view_proj)
+in vec2 v_ndc;
+out vec4 out_color;
+
+// cheap 3D hash → [0,1)
+float hash13(vec3 p) {
+  p = fract(p * 0.1031);
+  p += dot(p, p.yzx + 33.33);
+  return fract((p.x + p.y) * p.z);
+}
+
+void main() {
+  // Reconstruct a world-space ray direction for this pixel through the inverse VP.
+  vec4 nearH = u_invVP * vec4(v_ndc, -1.0, 1.0);
+  vec4 farH  = u_invVP * vec4(v_ndc,  1.0, 1.0);
+  vec3 dir = normalize(farH.xyz / farH.w - nearH.xyz / nearH.w);
+
+  // Quantize the direction into a grid of cells; one candidate star per cell.
+  const float CELLS = 220.0;       // angular density of the star grid
+  vec3 cell = floor(dir * CELLS);
+  float h = hash13(cell);
+
+  // Only a small fraction of cells contain a star (keeps it restrained / sparse).
+  float star = step(0.982, h);
+
+  // Per-star pseudo-random brightness, biased dim. Sub-cell position lets us make a
+  // tight point rather than filling the whole cell.
+  float hb = hash13(cell + 7.0);
+  vec3 sub = vec3(hash13(cell + 1.0), hash13(cell + 2.0), hash13(cell + 3.0)) - 0.5;
+  vec3 starDir = normalize((cell + 0.5 + sub) / CELLS);
+  float d = distance(dir, starDir) * CELLS;
+  float point = smoothstep(0.6, 0.0, d);   // tight round-ish point
+
+  float bright = (0.30 + 0.55 * hb) * point * star;   // dim, varied
+  // Very slight cool/warm tint variation, kept near-grey (no color noise).
+  float tint = hash13(cell + 5.0);
+  vec3 col = mix(vec3(0.78, 0.82, 0.90), vec3(0.92, 0.90, 0.84), tint) * bright;
+  out_color = vec4(col, 1.0);
+}
+`;
+
 // Aircraft uses a fixed-alpha shader (no per-vertex strength needed).
 const AIRCRAFT_VERT_SRC = `#version 300 es
 precision highp float;
@@ -131,6 +191,10 @@ export class Renderer {
     const gl = canvas.getContext('webgl2', { antialias: false, alpha: false });
     if (!gl) throw new Error('WebGL2 not available in this browser.');
     this.gl = gl;
+
+    this.starProg     = linkProgram(gl, STAR_VERT_SRC, STAR_FRAG_SRC);
+    this.starInvVP    = gl.getUniformLocation(this.starProg, 'u_invVP');
+    this.starVAO      = gl.createVertexArray(); // attribute-less (gl_VertexID)
 
     this.fillProg     = linkProgram(gl, VERT_SRC, FILL_FRAG_SRC);
     this.lineProg     = linkProgram(gl, VERT_SRC, LINE_FRAG_SRC);
@@ -251,6 +315,17 @@ export class Renderer {
 
     const mvp = eng.view_proj();
 
+    // --- starfield pass (drawn first, depth-write OFF; globe draws over it) ---
+    const invVP = mat4Invert(mvp);
+    if (invVP) {
+      gl.useProgram(this.starProg);
+      gl.uniformMatrix4fv(this.starInvVP, false, invVP);
+      gl.depthMask(false);
+      gl.bindVertexArray(this.starVAO);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.depthMask(true);
+    }
+
     // --- fill pass ---
     const fillVerts      = eng.fill_vertices();
     const fillDraws      = eng.fill_draws();
@@ -325,4 +400,48 @@ function mat4Mul(a, b) {
     }
   }
   return out;
+}
+
+// Invert a column-major 4x4 matrix. Returns Float32Array(16) or null if singular.
+function mat4Invert(m) {
+  const inv = new Float32Array(16);
+  const a00 = m[0],  a01 = m[1],  a02 = m[2],  a03 = m[3];
+  const a10 = m[4],  a11 = m[5],  a12 = m[6],  a13 = m[7];
+  const a20 = m[8],  a21 = m[9],  a22 = m[10], a23 = m[11];
+  const a30 = m[12], a31 = m[13], a32 = m[14], a33 = m[15];
+
+  const b00 = a00 * a11 - a01 * a10;
+  const b01 = a00 * a12 - a02 * a10;
+  const b02 = a00 * a13 - a03 * a10;
+  const b03 = a01 * a12 - a02 * a11;
+  const b04 = a01 * a13 - a03 * a11;
+  const b05 = a02 * a13 - a03 * a12;
+  const b06 = a20 * a31 - a21 * a30;
+  const b07 = a20 * a32 - a22 * a30;
+  const b08 = a20 * a33 - a23 * a30;
+  const b09 = a21 * a32 - a22 * a31;
+  const b10 = a21 * a33 - a23 * a31;
+  const b11 = a22 * a33 - a23 * a32;
+
+  let det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
+  if (!det) return null;
+  det = 1.0 / det;
+
+  inv[0]  = (a11 * b11 - a12 * b10 + a13 * b09) * det;
+  inv[1]  = (a02 * b10 - a01 * b11 - a03 * b09) * det;
+  inv[2]  = (a31 * b05 - a32 * b04 + a33 * b03) * det;
+  inv[3]  = (a22 * b04 - a21 * b05 - a23 * b03) * det;
+  inv[4]  = (a12 * b08 - a10 * b11 - a13 * b07) * det;
+  inv[5]  = (a00 * b11 - a02 * b08 + a03 * b07) * det;
+  inv[6]  = (a32 * b02 - a30 * b05 - a33 * b01) * det;
+  inv[7]  = (a20 * b05 - a22 * b02 + a23 * b01) * det;
+  inv[8]  = (a10 * b10 - a11 * b08 + a13 * b06) * det;
+  inv[9]  = (a01 * b08 - a00 * b10 - a03 * b06) * det;
+  inv[10] = (a30 * b04 - a31 * b02 + a33 * b00) * det;
+  inv[11] = (a21 * b02 - a20 * b04 - a23 * b00) * det;
+  inv[12] = (a11 * b07 - a10 * b09 - a12 * b06) * det;
+  inv[13] = (a00 * b09 - a01 * b07 + a02 * b06) * det;
+  inv[14] = (a31 * b01 - a30 * b03 - a32 * b00) * det;
+  inv[15] = (a20 * b03 - a21 * b01 + a22 * b00) * det;
+  return inv;
 }
