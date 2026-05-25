@@ -6,22 +6,22 @@
 //
 // Planet scale: R_world = 6000 wu, m_per_wu ≈ 1062 m/wu (Earth radius / R_world).
 // Terminal speeds:
-//   Cruise (full throttle):  ~300 wu/s  ≈ 1.15M km/h  (orbital sightseeing pace)
-//   Boost  (Shift):          ~900 wu/s
-//   FTL    (Space):          ~4500 wu/s → circumnavigate fast
+//   Cruise (full throttle):  ~1000 wu/s  (orbit globe ≈ 38 s near surface)
+//   Boost  (Shift):          ~3000 wu/s
+//   FTL    (Space):          ~9000 wu/s → circumnavigate in a few seconds
 //
 // Rotation rates (rad/s):
 //   PITCH_RATE = 1.6, YAW_RATE = 1.6, ROLL_RATE = 2.5
 
 use glam::{Mat3, Mat4, Quat, Vec3};
 
-const MAX_THRUST: f32 = 600.0;   // wu/s² at full throttle
-const DRAG: f32 = 2.0;           // s⁻¹  — terminal cruise = MAX_THRUST/DRAG = 300
-const THROTTLE_RATE: f32 = 2.0;  // s⁻¹  — lag to reach target throttle
+const MAX_THRUST: f32 = 2200.0;  // wu/s² at full throttle
+const DRAG: f32 = 2.2;           // s⁻¹  — terminal cruise = MAX_THRUST/DRAG ≈ 1000
+const THROTTLE_RATE: f32 = 2.5;  // s⁻¹  — lag to reach target throttle
 const IDLE_THROTTLE: f32 = 0.1;  // minimum throttle when no thrust input
 
-const BOOST_SCALE: f32 = 3.0;    // terminal ~900 wu/s
-const FTL_SCALE: f32 = 15.0;     // terminal ~4500 wu/s
+const BOOST_SCALE: f32 = 3.0;    // terminal ~3000 wu/s
+const FTL_SCALE: f32 = 9.0;      // terminal ~9000 wu/s — circumnavigate in a few s
 
 const PITCH_RATE: f32 = 1.6;
 const YAW_RATE: f32 = 1.6;
