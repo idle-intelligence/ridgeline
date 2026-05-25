@@ -1,9 +1,9 @@
 // Quaternion flight physics.
 //
 // Speed constants (world units / sec):
-//   BASE_SPEED   =  60   (~normal cruise, covers terrain in ~8–16 seconds)
-//   BOOST_SPEED  = 180   (Shift held)
-//   FTL_SPEED    = 900   (Space-hold; streak across the whole field in ~1 s)
+//   BASE_SPEED   = 250   (~cruise, crosses terrain in ~4 s)
+//   BOOST_SPEED  = 700   (Shift held; ~1.4 s)
+//   FTL_SPEED    = 2500  (Space-hold; streaks across in <0.5 s)
 //
 // Rotation rates (rad/s, before input clamp):
 //   PITCH_RATE = 1.6, YAW_RATE = 1.6, ROLL_RATE = 2.5
@@ -11,11 +11,11 @@
 // The input values pitch/yaw/roll are in rad/s (JS converts pointer deltas).
 // We clamp them to ±PITCH_RATE etc.
 
-use glam::{Quat, Vec3};
+use glam::{Mat3, Mat4, Quat, Vec3};
 
-pub const BASE_SPEED: f32 = 60.0;
-pub const BOOST_SPEED: f32 = 180.0;
-pub const FTL_SPEED: f32 = 900.0;
+pub const BASE_SPEED: f32 = 250.0;
+pub const BOOST_SPEED: f32 = 700.0;
+pub const FTL_SPEED: f32 = 2500.0;
 
 const PITCH_RATE: f32 = 1.6;
 const YAW_RATE: f32 = 1.6;
@@ -29,10 +29,11 @@ pub struct Physics {
 impl Physics {
     pub fn new(spawn_pos: Vec3, spawn_look: Vec3) -> Self {
         let fwd = spawn_look.normalize();
-        // Build orientation from look direction: right = Y × fwd, up = fwd × right
-        let right = Vec3::Y.cross(fwd).normalize();
-        let up = fwd.cross(right);
-        let orientation = Quat::from_mat3(&glam::Mat3::from_cols(right, up, -fwd)).normalize();
+        // Build orientation from look direction using the view matrix inverse.
+        // look_to_rh gives the world→view rotation R; the body→world orientation is R^T.
+        let view = Mat4::look_to_rh(Vec3::ZERO, fwd, Vec3::Y);
+        let rot3 = Mat3::from_mat4(view).transpose();
+        let orientation = Quat::from_mat3(&rot3).normalize();
         Self {
             orientation,
             position: spawn_pos,
