@@ -79,7 +79,7 @@ async function run() {
 
   // Check that the HUD has non-empty text (means step() + getters work)
   const hudText = await page.$eval('#hud', el => el.textContent.trim());
-  if (hudText && (hudText.includes('SPD') || hudText.includes('u/s'))) {
+  if (hudText && hudText.includes('km/h') && hudText.includes('ALT')) {
     console.log(`PASS: HUD populated — "${hudText}"`);
   } else {
     console.error(`FAIL: HUD text unexpected: "${hudText}"`);

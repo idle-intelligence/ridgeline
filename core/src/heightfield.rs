@@ -37,6 +37,8 @@ pub struct Heightfield {
     pub x_max: f32,  // east
     pub z_min: f32,  // south (lat_min)
     pub z_max: f32,  // north (lat_max)
+    // horizontal scale: world-units per meter (wu/m). Inverse = meters per wu.
+    pub horiz_scale: f32,
 }
 
 impl Heightfield {
@@ -101,6 +103,7 @@ impl Heightfield {
             x_max,
             z_min,
             z_max,
+            horiz_scale,
         }
     }
 

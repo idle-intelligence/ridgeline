@@ -109,8 +109,12 @@ Indices in `fill_draws`/`line_draws` are VERTEX indices into the respective vert
 Back-to-front painter's order (guaranteed by core) is required for correct compositing.
 
 ## Debug getters (optional, for HUD)
-- `eng.altitude()` → f32 (meters above local baseline)
+- `eng.altitude()` → f32 (world units above local baseline; raw, includes VE and horiz_scale)
+- `eng.altitude_m()` → f32 (real meters above local baseline) = `altitude() / (VE × horiz_scale)`
 - `eng.speed()` → f32 (world units/sec)
+- `eng.speed_kmh()` → f32 (km/h) = `speed() / horiz_scale × 3.6` where `horiz_scale` (wu/m)
+  is stored on the `Heightfield` (computed from the bbox; ≈ 0.0726 wu/m for the France grid →
+  ≈ 13.8 m/wu). Use this for the HUD; `speed()` is kept for internal/debug use.
 - `eng.lat_lon()` → `Float32Array` length 2 `[lat, lon]` — ship geographic position in decimal
   degrees. Computed by inverse-mapping `phys.position` through the stored bbox bounds:
   `lon = lon_min + (pos.x - hf.x_min) / (hf.x_max - hf.x_min) * (lon_max - lon_min)`,

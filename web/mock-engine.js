@@ -129,7 +129,9 @@ export function makeMockEngine(width, height, _hf, _wm, _elevMin, _elevMax, latM
     line_draws()     { return geo.lineD; },
     line_strengths() { return geo.lineStr; },
     altitude()      { return camY * 100; },
+    altitude_m()    { return camY * 10; },
     speed()         { return Math.sqrt(velX*velX + velZ*velZ) * 100; },
+    speed_kmh()     { return Math.sqrt(velX*velX + velZ*velZ) * 360; },
     camera_position() { return new Float32Array([camX, camY, camZ]); },
 
     view_proj() {

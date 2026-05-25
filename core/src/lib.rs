@@ -7,7 +7,7 @@ use js_sys::{Float32Array, Uint32Array};
 use wasm_bindgen::prelude::*;
 
 use geometry::GeometryBuffers;
-use heightfield::Heightfield;
+use heightfield::{Heightfield, VE};
 use physics::Physics;
 
 // --- Camera projection constants ---
@@ -324,6 +324,21 @@ impl Engine {
     /// Current speed (world units/sec).
     pub fn speed(&self) -> f32 {
         self.phys.speed
+    }
+
+    /// Current speed in km/h.
+    ///
+    /// Converts wu/s → m/s (dividing by horiz_scale) → km/h (× 3.6).
+    pub fn speed_kmh(&self) -> f32 {
+        self.phys.speed / self.hf.horiz_scale * 3.6
+    }
+
+    /// Altitude above terrain baseline in real meters.
+    ///
+    /// altitude() returns world units (meters × VE × horiz_scale);
+    /// this divides out both factors to recover true meters.
+    pub fn altitude_m(&self) -> f32 {
+        self.altitude() / (VE * self.hf.horiz_scale)
     }
 
     /// Ship geographic position `[lat, lon]` in decimal degrees.
