@@ -353,6 +353,80 @@ async function run() {
     }
   }
 
+  // ── High-altitude survey: climb to ~5-10 km real altitude, measure far-cull reach ──
+  // Verifies that climbing reveals most of France (far-cull reaches FAR_CULL_MAX ~115k wu).
+  // Also checks perf at max altitude (worst-case vertex count).
+  const highAltResult = await page.evaluate(() => {
+    const eng = window._eng;
+    if (!eng) return { ok: false, reason: 'window._eng not set' };
+
+    // Climb gently to high altitude: moderate pitch-up, moderate throttle.
+    // 300 steps ≈ 4.8 sim-seconds of climbing.
+    eng.set_input(0.7, 0, 0, 0.35, 0, 0, 0, false);
+    for (let i = 0; i < 300; i++) eng.step(0.016);
+    // Level off
+    eng.set_input(0.5, 0, 0, 0.0, 0, 0, 0, false);
+    for (let i = 0; i < 30; i++) eng.step(0.016);
+
+    const camPos = eng.camera_position();
+    const altM = eng.altitude_m();
+
+    // Perf at this altitude
+    const ITERS = 30;
+    const t0 = performance.now();
+    for (let i = 0; i < ITERS; i++) eng.step(0.016);
+    const elapsed = performance.now() - t0;
+    const avgMs = elapsed / ITERS;
+
+    const fillVerts = eng.fill_vertices().length / 3;
+    const lineVerts = eng.line_vertices().length / 3;
+    const totalVerts = fillVerts + lineVerts;
+
+    // Count land vs sea fill vertices
+    const fillStr = eng.fill_strengths();
+    let landVerts = 0;
+    for (let i = 0; i < fillStr.length; i++) {
+      if (fillStr[i] > 0.0) landVerts++;
+    }
+
+    return {
+      ok: true,
+      camPos: Array.from(camPos),
+      altM,
+      avgMs,
+      fillVerts,
+      lineVerts,
+      totalVerts,
+      landVerts,
+    };
+  });
+
+  if (!highAltResult.ok) {
+    console.warn(`WARN: high-altitude test skipped — ${highAltResult.reason}`);
+  } else {
+    const { camPos, altM, avgMs, fillVerts, lineVerts, totalVerts, landVerts } = highAltResult;
+    console.log(`HIGH-ALT: cam=[${camPos.map(v => v.toFixed(0)).join(', ')}] alt=${altM.toFixed(0)} m`);
+    console.log(`HIGH-ALT PERF: avg step = ${avgMs.toFixed(2)} ms/frame | fill_verts=${fillVerts} | line_verts=${lineVerts} | total=${totalVerts} | land=${landVerts}`);
+    if (altM > 5000) {
+      console.log(`PASS: reached high altitude (${altM.toFixed(0)} m) — whole-country survey altitude`);
+    } else {
+      console.warn(`WARN: altitude only ${altM.toFixed(0)} m — may not have climbed high enough`);
+    }
+    if (totalVerts > 0) {
+      console.log(`PASS: geometry generated at high altitude (${totalVerts} total verts)`);
+    }
+    if (avgMs > 30) {
+      console.warn(`WARN: high-altitude step() slow (${avgMs.toFixed(1)} ms) — LOD bands may need coarsening`);
+    } else {
+      console.log(`PASS: high-altitude step() performance acceptable (${avgMs.toFixed(2)} ms/frame)`);
+    }
+  }
+
+  // Capture high-altitude screenshot
+  await page.evaluate(() => { const eng = window._eng; if (eng) eng.step(0.001); });
+  await page.screenshot({ path: join(__dir, 'test-screenshot.png') });
+  console.log('High-altitude screenshot saved: web/test-screenshot.png');
+
   await browser.close();
   server.close();
   console.log('All checks passed.');

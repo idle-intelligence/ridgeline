@@ -26,7 +26,8 @@
 //   [28000,   45000)  → (32,  256)
 //   [45000,   65000)  → (64,  512)
 //   [65000,   90000)  → (128, 1024)
-//   [90000,   FAR)    → (256, 2048)
+//   [90000,   110000) → (256, 2048)
+//   [110000,  FAR)    → (512, 4096)  ultra-far: whole-country survey at high altitude
 //
 // Per-vertex strength (0..1):
 //   Each vertex gets a "strength" in [0..1] that drives alpha blending in the renderer.
@@ -48,12 +49,13 @@ use glam::Vec3;
 
 // ── Distance bands (world units from camera z) ────────────────────────────────
 //
-// WORLD_HALF=40000 → world spans ±40000 wu. Far-cull peaks ~70000 wu at altitude.
+// WORLD_HALF=40000 → world spans ±40000 wu. Far-cull peaks ~115000 wu at altitude
+// (covers the full France diagonal ~113k wu). Bands extended to cover new MAX.
 // Bands are spaced so transitions happen far from camera (sub-pixel at distance)
 // and the camera travels a long way before any band boundary crosses a visible row.
 
 /// Band thresholds (ascending). Each band index maps to a stride pair below.
-const BANDS: [f32; 9] = [
+const BANDS: [f32; 10] = [
       800.0,
     2_500.0,
     6_000.0,
@@ -62,11 +64,12 @@ const BANDS: [f32; 9] = [
     45_000.0,
     65_000.0,
     90_000.0,
+    110_000.0,
     f32::MAX,
 ];
 
 /// (row_stride, col_stride) per band index (power-of-two, index-aligned).
-const STRIDES: [(u32, u32); 9] = [
+const STRIDES: [(u32, u32); 10] = [
     (1,    4),
     (2,    8),
     (4,   16),
@@ -76,21 +79,23 @@ const STRIDES: [(u32, u32); 9] = [
     (64,  512),
     (128, 1024),
     (256, 2048),
+    (512, 4096),
 ];
 
 // ── Altitude-driven far-cull ─────────────────────────────────────────────────
-/// Baseline far-cull at sea level (world units).
+/// Baseline far-cull at sea level (world units): local/vast, edge of France hidden.
 const FAR_CULL_BASE: f32 = 18_000.0;
 /// Far-cull increase per world unit of altitude (linear gain).
-/// At altitude 1000 wu → cull ~28k wu; at 5000 wu → cull ~68k wu.
-const FAR_CULL_ALT_GAIN: f32 = 10.0;
+/// At altitude 0 wu → cull 18k wu (local); at ~1000 wu (~2.3 km real) → cull ~68k wu;
+/// at ~2000 wu (~4.6 km real) → cull 118k → clamped to MAX (whole country visible).
+const FAR_CULL_ALT_GAIN: f32 = 50.0;
 /// Minimum far-cull.
 const FAR_CULL_MIN: f32 = 12_000.0;
-/// Maximum far-cull regardless of altitude (80000 wu world span; keep below that).
-const FAR_CULL_MAX: f32 = 70_000.0;
+/// Maximum far-cull: covers the France world diagonal ~113k wu (sqrt(2)*80k).
+const FAR_CULL_MAX: f32 = 115_000.0;
 
 /// Strength fade begins this far before the hard cull boundary.
-const FAR_FADE_MARGIN: f32 = 6_000.0;
+const FAR_FADE_MARGIN: f32 = 8_000.0;
 
 /// Elevation epsilon (world units): vertices at or below this are treated as sea and hidden.
 /// Sea was clamped to exactly 0 m in the bake, so any world-space elev <= EPS is open ocean.
