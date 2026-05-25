@@ -18,6 +18,7 @@ const MIME = {
   '.js':   'text/javascript',
   '.json': 'application/json',
   '.bin':  'application/octet-stream',
+  '.wasm': 'application/wasm',
 };
 
 // Minimal static server rooted at repo root (so ../data/ paths resolve correctly)

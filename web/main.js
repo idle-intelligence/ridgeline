@@ -1,8 +1,8 @@
 // ridgeline — main bootstrap.
 // Toggle USE_MOCK to false once web/pkg/ is built by the core agent.
-const USE_MOCK = true;
+const USE_MOCK = false;
 
-import { Renderer, PALETTE } from './renderer.js';
+import { Renderer } from './renderer.js';
 import { InputHandler } from './input.js';
 
 const canvas  = document.getElementById('c');
@@ -56,7 +56,7 @@ async function buildEngine(meta, hfBytes, wmBytes) {
     fatal('WASM init failed.', e.message);
   }
   const { bbox } = meta;
-  return Engine.new(
+  return new Engine(
     meta.width, meta.height,
     hfBytes, wmBytes,
     meta.elev_min, meta.elev_max,
@@ -67,15 +67,17 @@ async function buildEngine(meta, hfBytes, wmBytes) {
 // --- main ---
 
 async function main() {
+  let renderer, eng;
+
   // Resize canvas to fill window
   function resize() {
     canvas.width  = window.innerWidth;
     canvas.height = window.innerHeight;
     if (renderer) renderer.resize(canvas.width, canvas.height);
+    if (eng) eng.set_aspect(canvas.width / canvas.height);
   }
   window.addEventListener('resize', resize);
 
-  let renderer;
   try {
     renderer = new Renderer(canvas);
   } catch (e) {
@@ -98,13 +100,13 @@ async function main() {
     fatal('Failed to load terrain data.', e.message);
   }
 
-  let eng;
   try {
     eng = await buildEngine(meta, hfBytes, wmBytes);
   } catch (e) {
     // fatal() already called inside buildEngine for wasm errors; re-throw others
     fatal('Engine init failed.', e.message);
   }
+  eng.set_aspect(canvas.width / canvas.height);
 
   overlay.style.display = 'none';
 
