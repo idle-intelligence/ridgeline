@@ -25,20 +25,23 @@ const CHASE_BACK: f32 = 25.0;  // world units behind ship (along +z body axis)
 /// A value of 8.0 makes the craft ~8 wu tip-to-tail, clearly visible at chase distance.
 pub const AIRCRAFT_SCALE: f32 = 8.0;
 
-/// Spawn camera placement:
-///   - Near south edge of terrain, above max elevation + 100 wu.
-///   - Looking toward the center-north so the Alps fill the horizon.
-fn spawn_position(hf: &Heightfield) -> Vec3 {
-    let z = hf.z_min + (hf.z_max - hf.z_min) * 0.1;
-    let y = hf.elev_world_max + 100.0;
-    Vec3::new(0.0, y, z)
+/// Spawn placement: in the Mediterranean just south of Sète (43.40 N, 3.70 E),
+/// flying north toward the coast. Geographic point is mapped through the bbox.
+const SPAWN_LAT: f32 = 43.28; // a little south of Sète, out at sea
+const SPAWN_LON: f32 = 3.70;
+const SPAWN_ALT: f32 = 40.0; // world units above sea level (y = 0)
+
+fn spawn_position(hf: &Heightfield, lat_min: f32, lat_max: f32, lon_min: f32, lon_max: f32) -> Vec3 {
+    let tx = (SPAWN_LON - lon_min) / (lon_max - lon_min);
+    let tz = (SPAWN_LAT - lat_min) / (lat_max - lat_min);
+    let x = hf.x_min + tx * (hf.x_max - hf.x_min);
+    let z = hf.z_min + tz * (hf.z_max - hf.z_min);
+    Vec3::new(x, SPAWN_ALT, z)
 }
 
-fn spawn_look(hf: &Heightfield) -> Vec3 {
-    let pos = spawn_position(hf);
-    let mid_elev = hf.elev_world_min + (hf.elev_world_max - hf.elev_world_min) * 0.5;
-    let target = Vec3::new(0.0, mid_elev, hf.z_max * 0.8);
-    (target - pos).normalize()
+/// Forward = north (+z), pitched slightly down so the coastline reads ahead.
+fn spawn_look() -> Vec3 {
+    Vec3::new(0.0, -0.12, 1.0).normalize()
 }
 
 // Freelook clamps (radians)
@@ -112,8 +115,8 @@ impl Engine {
             lat_min, lat_max, lon_min, lon_max,
         );
 
-        let pos = spawn_position(&hf);
-        let look = spawn_look(&hf);
+        let pos = spawn_position(&hf, lat_min, lat_max, lon_min, lon_max);
+        let look = spawn_look();
         let phys = Physics::new(pos, look);
         let view_proj_mat = compute_view_proj(&phys, 0.0, 0.0, ASPECT_DEFAULT);
 

@@ -31,6 +31,7 @@ pub struct Heightfield {
     pub water: Vec<u8>,
     // world-space range of elevation
     pub elev_world_min: f32,
+    #[allow(dead_code)]
     pub elev_world_max: f32,
     // world-space extents
     pub x_min: f32,  // west
