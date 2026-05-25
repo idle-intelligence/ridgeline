@@ -17,7 +17,7 @@
 //   y: elevation in world units (meters × VE × horiz_scale). WORLD_HALF=40000 → ±40000
 //      box in x/z; craft/camera/cull distances are small vs the 80000 wu world span.
 
-pub const VE: f32 = 4.0;
+pub const VE: f32 = 6.0;
 // Half-width of the world box in world units
 pub const WORLD_HALF: f32 = 40_000.0;
 
@@ -26,12 +26,10 @@ pub struct Heightfield {
     pub height: u32,
     // elevation in world-units, row 0 = north (z_max), stored row-major
     pub elev: Vec<f32>,
-    // 1 = water (stored for future water-shading pass)
-    #[allow(dead_code)]
+    // 1 = water
     pub water: Vec<u8>,
     // world-space range of elevation
     pub elev_world_min: f32,
-    #[allow(dead_code)]
     pub elev_world_max: f32,
     // world-space extents
     pub x_min: f32,  // west
@@ -124,5 +122,21 @@ impl Heightfield {
     #[inline]
     pub fn sample(&self, row: u32, col: u32) -> f32 {
         self.elev[(row * self.width + col) as usize]
+    }
+
+    /// True if (row, col) is marked as water.
+    #[inline]
+    pub fn is_water(&self, row: u32, col: u32) -> bool {
+        self.water[(row * self.width + col) as usize] != 0
+    }
+
+    /// Normalized elevation in [0,1] for (row, col), clamped.
+    /// 0 = sea level, 1 = highest peak.
+    #[inline]
+    pub fn elev_norm(&self, row: u32, col: u32) -> f32 {
+        if self.elev_world_max <= 0.0 {
+            return 0.0;
+        }
+        (self.sample(row, col) / self.elev_world_max).clamp(0.0, 1.0)
     }
 }

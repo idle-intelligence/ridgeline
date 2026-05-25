@@ -258,10 +258,19 @@ impl Engine {
     /// Per-vertex strength for fill geometry (one f32 per vertex, parallel to fill_vertices).
     /// Values in [0..1]; multiply fill color alpha by this in the fragment shader.
     /// Ramps to 0 near the far-cull boundary and at each LOD band's outer edge,
-    /// eliminating pop-in and diagonal density seams.
+    /// eliminating pop-in and diagonal density seams. Water cells have strength = 0.
     pub fn fill_strengths(&self) -> Float32Array {
         let arr = Float32Array::new_with_length(self.geom.fill_strengths.len() as u32);
         arr.copy_from(&self.geom.fill_strengths);
+        arr
+    }
+
+    /// Per-vertex normalized elevation for fill geometry (one f32 per vertex, parallel to
+    /// fill_vertices). Values in [0..1] = elev_world / elev_world_max (clamped).
+    /// 0 = sea level, 1 = highest peak in dataset.
+    pub fn fill_elevations(&self) -> Float32Array {
+        let arr = Float32Array::new_with_length(self.geom.fill_elevations.len() as u32);
+        arr.copy_from(&self.geom.fill_elevations);
         arr
     }
 
@@ -282,9 +291,19 @@ impl Engine {
     /// Per-vertex strength for line geometry (one f32 per vertex, parallel to line_vertices).
     /// Values in [0..1]; multiply line color alpha by this in the fragment shader.
     /// Ramps to 0 near the far-cull boundary and at each LOD band's outer edge.
+    /// Water cells have strength = 0.
     pub fn line_strengths(&self) -> Float32Array {
         let arr = Float32Array::new_with_length(self.geom.line_strengths.len() as u32);
         arr.copy_from(&self.geom.line_strengths);
+        arr
+    }
+
+    /// Per-vertex normalized elevation for line geometry (one f32 per vertex, parallel to
+    /// line_vertices). Values in [0..1] = elev_world / elev_world_max (clamped).
+    /// 0 = sea level, 1 = highest peak in dataset.
+    pub fn line_elevations(&self) -> Float32Array {
+        let arr = Float32Array::new_with_length(self.geom.line_elevations.len() as u32);
+        arr.copy_from(&self.geom.line_elevations);
         arr
     }
 

@@ -18,14 +18,15 @@
 //   Always includes the last column so strips close.
 //
 // Distance bands → (row_stride, col_stride):
-//   [0,       1500)   → (4,   32)    ultra-near
-//   [1500,    6000)   → (8,   64)    near
-//   [6000,    15000)  → (16,  128)
-//   [15000,   28000)  → (32,  256)
-//   [28000,   45000)  → (64,  512)
-//   [45000,   65000)  → (128, 1024)
-//   [65000,   90000)  → (256, 2048)
-//   [90000,   FAR)    → (512, 4096)
+//   [0,       800)    → (1,    4)    ultra-near  (very fine: calanques/coast readable)
+//   [800,     2500)   → (2,    8)    near-fine
+//   [2500,    6000)   → (4,   16)    near
+//   [6000,    15000)  → (8,   64)
+//   [15000,   28000)  → (16,  128)
+//   [28000,   45000)  → (32,  256)
+//   [45000,   65000)  → (64,  512)
+//   [65000,   90000)  → (128, 1024)
+//   [90000,   FAR)    → (256, 2048)
 //
 // Per-vertex strength (0..1):
 //   Each vertex gets a "strength" in [0..1] that drives alpha blending in the renderer.
@@ -52,8 +53,9 @@ use glam::Vec3;
 // and the camera travels a long way before any band boundary crosses a visible row.
 
 /// Band thresholds (ascending). Each band index maps to a stride pair below.
-const BANDS: [f32; 8] = [
-    1_500.0,
+const BANDS: [f32; 9] = [
+      800.0,
+    2_500.0,
     6_000.0,
     15_000.0,
     28_000.0,
@@ -64,15 +66,16 @@ const BANDS: [f32; 8] = [
 ];
 
 /// (row_stride, col_stride) per band index (power-of-two, index-aligned).
-const STRIDES: [(u32, u32); 8] = [
-    (4,   32),
+const STRIDES: [(u32, u32); 9] = [
+    (1,    4),
+    (2,    8),
+    (4,   16),
     (8,   64),
     (16,  128),
     (32,  256),
     (64,  512),
     (128, 1024),
     (256, 2048),
-    (512, 4096),
 ];
 
 // ── Altitude-driven far-cull ─────────────────────────────────────────────────
@@ -113,9 +116,11 @@ pub struct GeometryBuffers {
     pub fill_verts: Vec<f32>,
     pub fill_draws: Vec<u32>,
     pub fill_strengths: Vec<f32>,
+    pub fill_elevations: Vec<f32>,
     pub line_verts: Vec<f32>,
     pub line_draws: Vec<u32>,
     pub line_strengths: Vec<f32>,
+    pub line_elevations: Vec<f32>,
 }
 
 pub fn generate(hf: &Heightfield, cam_pos: Vec3, cam_fwd: Vec3) -> GeometryBuffers {
@@ -161,14 +166,19 @@ pub fn generate(hf: &Heightfield, cam_pos: Vec3, cam_fwd: Vec3) -> GeometryBuffe
 
     // ── Emit geometry ─────────────────────────────────────────────────────────
     let est_rows = visible.len();
-    let col_cap = (hf.width / 32 + 2) as usize;
+    let col_cap = (hf.width / 4 + 2) as usize;
     let cap = est_rows * col_cap * 2 * 3;
     let mut fill_verts: Vec<f32> = Vec::with_capacity(cap);
     let mut fill_draws: Vec<u32> = Vec::with_capacity(est_rows * 2);
     let mut fill_strengths: Vec<f32> = Vec::with_capacity(cap / 3);
+    let mut fill_elevations: Vec<f32> = Vec::with_capacity(cap / 3);
     let mut line_verts: Vec<f32> = Vec::with_capacity(cap / 2);
     let mut line_draws: Vec<u32> = Vec::with_capacity(est_rows * 2);
     let mut line_strengths: Vec<f32> = Vec::with_capacity(cap / 6);
+    let mut line_elevations: Vec<f32> = Vec::with_capacity(cap / 6);
+
+    // Scratch buffer for per-vertex water flags + elevations from emit_row_ex.
+    let mut col_buf: Vec<(bool, f32)> = Vec::new();
 
     for (row, dist_z, _) in &visible {
         let world_z = hf.row_z(*row);
@@ -176,42 +186,57 @@ pub fn generate(hf: &Heightfield, cam_pos: Vec3, cam_fwd: Vec3) -> GeometryBuffe
         let col_stride = STRIDES[band].1;
 
         // Compute per-row strength (0..1): fades near far-cull AND at band outer edge.
-        let strength = row_strength(*dist_z, band, far_cull_dist);
+        let row_str = row_strength(*dist_z, band, far_cull_dist);
 
         // Fill strip
+        col_buf.clear();
         let fill_start = (fill_verts.len() / 3) as u32;
         let fill_before = fill_verts.len();
-        emit_row(hf, *row, world_z, col_stride, baseline_y, cam_pos, &mut fill_verts, true);
+        emit_row_ex(hf, *row, world_z, col_stride, baseline_y, cam_pos,
+                    &mut fill_verts, true, &mut col_buf);
         let fill_count = ((fill_verts.len() - fill_before) / 3) as u32;
         if fill_count > 0 {
             fill_draws.push(fill_start);
             fill_draws.push(fill_count);
-            // Two vertices per column (baseline + top) in fill strip.
-            for _ in 0..fill_count {
-                fill_strengths.push(strength);
+            // col_buf has one entry per column; fill emits 2 verts per col (baseline+top).
+            for &(is_water, en) in &col_buf {
+                let s = if is_water { 0.0 } else { row_str };
+                // baseline vertex
+                fill_strengths.push(s);
+                fill_elevations.push(en);
+                // top vertex
+                fill_strengths.push(s);
+                fill_elevations.push(en);
             }
         }
 
         // Line strip
+        col_buf.clear();
         let line_start = (line_verts.len() / 3) as u32;
         let line_before = line_verts.len();
-        emit_row(hf, *row, world_z, col_stride, baseline_y, cam_pos, &mut line_verts, false);
+        emit_row_ex(hf, *row, world_z, col_stride, baseline_y, cam_pos,
+                    &mut line_verts, false, &mut col_buf);
         let line_count = ((line_verts.len() - line_before) / 3) as u32;
         if line_count > 0 {
             line_draws.push(line_start);
             line_draws.push(line_count);
-            for _ in 0..line_count {
-                line_strengths.push(strength);
+            for &(is_water, en) in &col_buf {
+                let s = if is_water { 0.0 } else { row_str };
+                line_strengths.push(s);
+                line_elevations.push(en);
             }
         }
     }
 
-    GeometryBuffers { fill_verts, fill_draws, fill_strengths, line_verts, line_draws, line_strengths }
+    GeometryBuffers {
+        fill_verts, fill_draws, fill_strengths, fill_elevations,
+        line_verts, line_draws, line_strengths, line_elevations,
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Map a distance to a band index.
+/// Map a distance to a band index (works for any BANDS length).
 #[inline]
 fn band_of(dist_z: f32) -> usize {
     for (i, &t) in BANDS.iter().enumerate() {
@@ -245,6 +270,7 @@ fn row_strength(dist_z: f32, band: usize, far_cull_dist: f32) -> f32 {
     // Band outer-fade: rows near the outer boundary of their band fade toward 0
     // so they blend with the next coarser band that takes over beyond this threshold.
     let band_outer = BANDS[band]; // outer threshold for this band (except last)
+    #[allow(clippy::float_cmp)]
     let band_outer_fade_strength = if band == BANDS.len() - 1 || band_outer == f32::MAX {
         // Last (infinite) band: no outer fade (hard cull handles it via far_strength).
         1.0
@@ -260,15 +286,15 @@ fn row_strength(dist_z: f32, band: usize, far_cull_dist: f32) -> f32 {
     far_strength.min(band_outer_fade_strength).clamp(0.0, 1.0)
 }
 
-/// Emit vertices for one row into `out`.
-/// fill=true: alternating (baseline, top) pairs for TRIANGLE_STRIP.
-/// fill=false: top-only for LINE_STRIP.
+/// Emit vertices for one row into `out`, recording per-column (is_water, elev_norm) in `col_buf`.
+/// fill=true: alternating (baseline, top) pairs for TRIANGLE_STRIP — 1 col_buf entry per pair.
+/// fill=false: top-only for LINE_STRIP — 1 col_buf entry per vertex.
 ///
 /// Earth curvature: each vertex's y is reduced by d²/(2·CURVE_R) where d is the
 /// horizontal (XZ-plane) distance from cam_pos. The baseline vertex gets the same
 /// drop so fill strips don't open gaps at the bottom.
 #[allow(clippy::too_many_arguments)]
-fn emit_row(
+fn emit_row_ex(
     hf: &Heightfield,
     row: u32,
     world_z: f32,
@@ -277,6 +303,7 @@ fn emit_row(
     cam_pos: Vec3,
     out: &mut Vec<f32>,
     fill: bool,
+    col_buf: &mut Vec<(bool, f32)>,
 ) {
     let last_col = hf.width - 1;
     let mut col = 0u32;
@@ -285,6 +312,8 @@ fn emit_row(
         let c = col.min(last_col);
         let x = hf.col_x(c);
         let y_top = hf.sample(row, c);
+        let is_water = hf.is_water(row, c);
+        let en = hf.elev_norm(row, c);
 
         // Horizontal distance from camera for curvature drop.
         let dx = x - cam_pos.x;
@@ -297,6 +326,7 @@ fn emit_row(
         } else {
             out.extend_from_slice(&[x, y_top - drop, world_z]);
         }
+        col_buf.push((is_water, en));
 
         if c == last_col {
             break;
