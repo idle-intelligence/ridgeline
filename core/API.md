@@ -10,8 +10,9 @@ Both sides build against THIS document. If you need to change it, change it here
 
 ## Coordinate system (core owns world-space mapping)
 - World axes: **x = longitude (west→east), z = latitude, y = elevation (up).**
-- Core maps the heightfield grid into a centered world box and applies a vertical
-  exaggeration so terrain reads dramatically. Exact constants are core's choice; document them.
+- Core maps the heightfield grid into a centered world box (WORLD_HALF=40000 wu) and applies
+  vertical exaggeration VE=6 so terrain reads dramatically. horiz_scale ≈ 0.0726 wu/m →
+  Mont Blanc (4672 m) renders ~2036 wu, coastal hills are clearly visible.
 - North (lat_max, row 0) maps to one z extreme consistently; camera spawns positioned to SEE
   the terrain (elevated, above the field, looking across it) with a satisfying horizon.
 
@@ -85,13 +86,19 @@ algorithm yields the layered ridge occlusion.
 - `eng.fill_strengths()` → `Float32Array`, one f32 per vertex, parallel to `fill_vertices()`.
   Values in [0..1]. Multiply fill color alpha by this in the fragment shader.
   Ramps to 0 near the far-cull boundary (eliminates far speckle pop-in) and near each LOD
-  band's outer edge (eliminates the diagonal density seam). Requires alpha blending enabled.
+  band's outer edge (eliminates the diagonal density seam). Water cells have strength = 0
+  (sea renders blank). Requires alpha blending enabled.
+- `eng.fill_elevations()` → `Float32Array`, one f32 per vertex, parallel to `fill_vertices()`.
+  Values in [0..1] = elev_world / elev_world_max (clamped). 0 = sea level, 1 = highest peak.
+  Use to drive elevation→brightness in the fragment shader.
 - `eng.line_vertices()` → `Float32Array`, packed `[x,y,z, ...]`. The bright ridge polyline
   (top profile only) per visible row.
 - `eng.line_draws()` → `Uint32Array`, flat pairs `[start,count, ...]`, back-to-front. JS issues
   `gl.drawArrays(gl.LINE_STRIP, start, count)` per pair.
 - `eng.line_strengths()` → `Float32Array`, one f32 per vertex, parallel to `line_vertices()`.
-  Same fade semantics as `fill_strengths()`. Apply to ridge line alpha.
+  Same fade semantics as `fill_strengths()`. Water cells have strength = 0. Apply to ridge line alpha.
+- `eng.line_elevations()` → `Float32Array`, one f32 per vertex, parallel to `line_vertices()`.
+  Values in [0..1] = elev_world / elev_world_max (clamped). Same semantics as `fill_elevations()`.
 
 Indices in `fill_draws`/`line_draws` are VERTEX indices into the respective vertex array
 (not byte offsets). Returned typed arrays are copies; valid until the next `step`.
