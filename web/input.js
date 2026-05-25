@@ -66,9 +66,9 @@ export class InputHandler {
     const pitch = ((k.has('KeyS') || k.has('ArrowDown')) ?  KEY_PITCH_RATE : 0)
                 - ((k.has('KeyW') || k.has('ArrowUp'))   ?  KEY_PITCH_RATE : 0);
 
-    // Yaw: KeyQ = left, KeyE = right (inverted relative to old build)
-    const yaw = ((k.has('KeyQ')) ? -RUDDER_RATE : 0)
-              + ((k.has('KeyE')) ?  RUDDER_RATE : 0);
+    // Yaw: KeyQ = left, KeyE = right
+    const yaw = ((k.has('KeyQ')) ?  RUDDER_RATE : 0)
+              + ((k.has('KeyE')) ? -RUDDER_RATE : 0);
 
     // Roll: KeyA/ArrowLeft = left, KeyD/ArrowRight = right
     const roll = ((k.has('KeyD') || k.has('ArrowRight')) ? KEY_ROLL_RATE : 0)
@@ -85,7 +85,7 @@ export class InputHandler {
 
     return {
       input: [thrust, 0, 0, pitch, yaw, roll, 0, afterburner],
-      lookDX:  dX * MOUSE_SENSITIVITY,   // positive = look right
+      lookDX: -dX * MOUSE_SENSITIVITY,   // positive = look right
       lookDY: -dY * MOUSE_SENSITIVITY,   // positive = look up (inverted Y)
     };
   }
