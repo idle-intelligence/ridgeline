@@ -49,12 +49,13 @@ in float v_strength;
 in float v_elev;
 out vec4 out_color;
 void main() {
-  // Brightness ramp: dim at low land (0.55x), full at peaks (1.0x).
-  // Low land stays clearly visible but subdued; peaks are full off-white.
-  float bright = mix(0.55, 1.0, v_elev);
+  // Brightness ramp: ocean rings dim, land glows. Gamma-lift low elevations so even
+  // modest land (a few hundred m) reads clearly bright against the dim ocean wireframe.
+  float e = pow(clamp(v_elev, 0.0, 1.0), 0.4);
+  float bright = mix(0.30, 1.25, e);
   // Whisper of warmth at peaks: slight amber nudge.
-  float warmR = mix(0.0, 0.06, v_elev);
-  float warmG = mix(0.0, 0.02, v_elev);
+  float warmR = mix(0.0, 0.06, e);
+  float warmG = mix(0.0, 0.02, e);
   vec3 col = clamp(u_color.rgb * bright + vec3(warmR, warmG, 0.0), 0.0, 1.0);
   out_color = vec4(col, u_color.a * v_strength);
 }

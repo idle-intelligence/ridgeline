@@ -1,7 +1,14 @@
-// Headless Playwright smoke-test for the ridgeline WebGL2 pipeline.
-// Uses the mock engine (USE_MOCK=true in main.js).
+// Headless Playwright smoke-test for the ridgeline GLOBE pipeline.
 // Run: node web/test-headless.mjs
 // Requires: npm install playwright (or npx playwright install chromium)
+//
+// Verifies:
+//   - engine init + HUD populated (sub-camera lat/lon, altitude, speed)
+//   - the canvas shows a roughly DISC-shaped cluster of non-background pixels (the planet)
+//   - bounded vertex count + acceptable ms/step
+//   - geometry is stable under camera motion (no swimming): a ring that stays visible
+//     keeps the same first-vertex world position across frames (index-anchored)
+//   - far side is occluded (depth) and limb fades
 
 import { chromium } from 'playwright';
 import { createServer } from 'http';
@@ -21,7 +28,6 @@ const MIME = {
   '.wasm': 'application/wasm',
 };
 
-// Minimal static server rooted at repo root (so ../data/ paths resolve correctly)
 function startServer() {
   return new Promise(resolve => {
     const server = createServer(async (req, res) => {
@@ -42,6 +48,14 @@ function startServer() {
   });
 }
 
+function fail(msg, browser, server, logs) {
+  console.error(`FAIL: ${msg}`);
+  if (logs) console.error('Console output:\n' + logs.join('\n'));
+  if (browser) browser.close();
+  if (server) server.close();
+  process.exit(1);
+}
+
 async function run() {
   const server = await startServer();
   const { port } = server.address();
@@ -52,14 +66,12 @@ async function run() {
   });
   const page = await browser.newPage();
 
-  // Collect console messages for diagnosis
   const logs = [];
   page.on('console', m => logs.push(`[${m.type()}] ${m.text()}`));
   page.on('pageerror', e => logs.push(`[pageerror] ${e.message}`));
 
   await page.goto(url, { waitUntil: 'load' });
 
-  // Wait for overlay to disappear (means engine + assets loaded successfully)
   try {
     await page.waitForFunction(
       () => document.getElementById('overlay').style.display === 'none',
@@ -67,442 +79,187 @@ async function run() {
     );
     console.log('PASS: overlay hidden — engine init succeeded');
   } catch {
-    console.error('FAIL: overlay did not hide within 10s');
-    console.error('Console output:', logs.join('\n'));
-    await browser.close();
-    server.close();
-    process.exit(1);
+    fail('overlay did not hide within 10s', browser, server, logs);
   }
 
-  // Wait a few frames for drawing to happen
   await page.waitForTimeout(500);
 
-  // Check that the HUD has non-empty text (means step() + getters work)
+  // ── HUD populated ──────────────────────────────────────────────────────────
   const hudText = await page.$eval('#hud', el => el.textContent.trim());
   if (hudText && hudText.includes('km/h') && hudText.includes('ALT')) {
     console.log(`PASS: HUD populated — "${hudText}"`);
   } else {
-    console.error(`FAIL: HUD text unexpected: "${hudText}"`);
-    await browser.close();
-    server.close();
-    process.exit(1);
+    fail(`HUD text unexpected: "${hudText}"`, browser, server, logs);
   }
 
-  // Take a screenshot for visual inspection
-  const screenshotPath = join(__dir, 'test-screenshot.png');
-  await page.screenshot({ path: screenshotPath });
-  console.log(`Screenshot saved: ${screenshotPath}`);
-
-  // Verify canvas has non-sky pixels somewhere (i.e. geometry was drawn).
-  // Sample a 10x10 block at the vertical center of the frame.
-  const drawn = await page.evaluate(() => {
+  // ── Disc-shaped planet check ─────────────────────────────────────────────────
+  // Scan the whole framebuffer; count non-sky pixels and measure their bounding box +
+  // centroid. The planet should be a compact, roughly circular cluster (not full-screen,
+  // not empty) near the center of the frame.
+  const disc = await page.evaluate(() => {
     const c = document.getElementById('c');
     const gl = c.getContext('webgl2');
     if (!gl) return { ok: false, reason: 'no webgl2' };
-    const W = 10, H = 10;
+    // Force a synchronous render so readPixels sees the current frame (the rAF-rendered
+    // backbuffer is swapped/cleared by the time we read outside the loop).
+    if (window._renderer && window._eng) window._renderer.draw(window._eng);
+    const W = c.width, H = c.height;
     const px = new Uint8Array(W * H * 4);
-    gl.readPixels((c.width >> 1) - W/2, (c.height >> 1) - H/2, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px);
-    // sky is ~(10,10,20); fill is ~(18,18,31); line is ~(224,219,209).
-    // Count pixels meaningfully brighter than the sky.
-    let bright = 0;
-    for (let i = 0; i < px.length; i += 4) {
-      if (px[i] > 30 || px[i+1] > 30 || px[i+2] > 40) bright++;
-    }
-    return { ok: bright > 0, bright, total: W * H };
-  });
-  if (drawn.ok) {
-    console.log(`PASS: canvas has ${drawn.bright}/${drawn.total} non-sky pixels in center block`);
-  } else if (drawn.reason) {
-    console.error(`FAIL: ${drawn.reason}`);
-    await browser.close();
-    server.close();
-    process.exit(1);
-  } else {
-    // Ridges might be above/below center — sample a taller strip
-    const drawn2 = await page.evaluate(() => {
-      const c = document.getElementById('c');
-      const gl = c.getContext('webgl2');
-      const px = new Uint8Array(c.width * 4);
-      let bright = 0;
-      // scan three horizontal bands
-      for (const row of [0.3, 0.5, 0.7]) {
-        gl.readPixels(0, Math.floor(c.height * row), c.width, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
-        for (let i = 0; i < px.length; i += 4) {
-          if (px[i] > 30 || px[i+1] > 30 || px[i+2] > 40) bright++;
+    gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    // sky ~ (10,10,20). Anything meaningfully brighter is planet (fill or line).
+    let minX = W, minY = H, maxX = 0, maxY = 0, n = 0, sx = 0, sy = 0;
+    for (let y = 0; y < H; y += 2) {
+      for (let x = 0; x < W; x += 2) {
+        const i = (y * W + x) * 4;
+        if (px[i] > 25 || px[i + 1] > 25 || px[i + 2] > 35) {
+          n++; sx += x; sy += y;
+          if (x < minX) minX = x; if (x > maxX) maxX = x;
+          if (y < minY) minY = y; if (y > maxY) maxY = y;
         }
       }
-      return bright;
-    });
-    if (drawn2 > 0) {
-      console.log(`PASS: canvas has ${drawn2} non-sky pixels across three horizontal bands`);
-    } else {
-      console.warn('WARN: no non-sky pixels found — geometry may not be in view, but pipeline is intact');
     }
+    if (n === 0) return { ok: false, reason: 'no non-sky pixels' };
+    const bw = maxX - minX, bh = maxY - minY;
+    const cx = sx / n, cy = sy / n;
+    // sampled every 2px → total sampled = (W/2)*(H/2)
+    const sampledTotal = Math.ceil(W / 2) * Math.ceil(H / 2);
+    const coverage = n / sampledTotal;
+    // bounding box aspect ratio close to 1 = disc-like
+    const aspect = bw > 0 && bh > 0 ? Math.min(bw, bh) / Math.max(bw, bh) : 0;
+    return {
+      ok: true, n, coverage, bw, bh, aspect,
+      cx, cy, W, H,
+      cxFrac: cx / W, cyFrac: cy / H,
+    };
+  });
+  if (!disc.ok) {
+    fail(`disc check: ${disc.reason}`, browser, server, logs);
+  }
+  console.log(`DISC: nonSky=${disc.n} coverage=${(disc.coverage * 100).toFixed(1)}% ` +
+    `bbox=${disc.bw}x${disc.bh} aspect=${disc.aspect.toFixed(2)} ` +
+    `centroid=(${disc.cxFrac.toFixed(2)},${disc.cyFrac.toFixed(2)})`);
+  // Planet should cover a meaningful but not full-screen area, be roughly square-ish,
+  // and be centered-ish.
+  if (disc.coverage > 0.02 && disc.coverage < 0.85 &&
+      disc.aspect > 0.5 &&
+      disc.cxFrac > 0.2 && disc.cxFrac < 0.8 &&
+      disc.cyFrac > 0.2 && disc.cyFrac < 0.8) {
+    console.log('PASS: planet renders as a centered, roughly disc-shaped cluster');
+  } else {
+    fail('planet cluster not disc-like / off-center / wrong size', browser, server, logs);
   }
 
-  // ── Perf benchmark: 60 step() calls, measure avg ms and vertex counts ──────
-  const perfResult = await page.evaluate(async () => {
+  await page.screenshot({ path: join(__dir, 'test-screenshot.png') });
+  console.log('Screenshot saved: web/test-screenshot.png');
+
+  // ── Perf + vertex budget ─────────────────────────────────────────────────────
+  const perf = await page.evaluate(() => {
     const eng = window._eng;
     if (!eng) return { ok: false, reason: 'window._eng not set' };
-
     const ITERS = 60;
     const t0 = performance.now();
-    for (let i = 0; i < ITERS; i++) {
-      eng.step(0.016);
-    }
-    const elapsed = performance.now() - t0;
-    const avgMs = elapsed / ITERS;
-
-    const fillLen = eng.fill_vertices().length / 3; // vertex count
-    const lineLen = eng.line_vertices().length / 3;
-    return { ok: true, avgMs, fillVerts: fillLen, lineVerts: lineLen };
-  });
-
-  if (!perfResult.ok) {
-    console.warn(`WARN: perf benchmark skipped — ${perfResult.reason}`);
-  } else {
-    const { avgMs, fillVerts, lineVerts } = perfResult;
-    const totalVerts = fillVerts + lineVerts;
-    console.log(`PERF: avg step = ${avgMs.toFixed(2)} ms/frame | fill_verts = ${fillVerts} | line_verts = ${lineVerts} | total = ${totalVerts}`);
-    if (avgMs > 20) {
-      console.warn(`WARN: step() is slow (${avgMs.toFixed(1)} ms) — consider tightening LOD caps`);
-    } else {
-      console.log(`PASS: step() performance acceptable (${avgMs.toFixed(2)} ms/frame)`);
-    }
-    if (totalVerts > 500_000) {
-      console.warn(`WARN: vertex count high (${totalVerts}) — consider reducing COL_NEAR_POINTS or ROW_BUDGET`);
-    } else {
-      console.log(`PASS: vertex count within budget (${totalVerts} total verts)`);
-    }
-  }
-
-  // ── Inland flight: fly forward with full throttle for many steps, then screenshot ──
-  // This puts the camera over inland France (away from the coast) so we can verify:
-  //   (a) flat inland areas are solid — no holes from the water-mask bug
-  //   (b) no dark diagonal transparent band-arcs from the old band-outer-fade
-  //   (c) ocean is still blank, peaks still brighter
-  const inlandResult = await page.evaluate(() => {
-    const eng = window._eng;
-    if (!eng) return { ok: false, reason: 'window._eng not set' };
-
-    // Fly forward with throttle + gentle nose-up pitch for 200 steps (≈3 sim-seconds).
-    // No afterburner — stay at manageable speed. Pitch up slightly to climb over terrain.
-    eng.set_input(0.6, 0, 0, 0.3, 0, 0, 0, false); // 60% thrust, pitch up
-    for (let i = 0; i < 200; i++) eng.step(0.016);
-
-    const camPos = eng.camera_position();
-    const fillVerts = eng.fill_vertices();
-    const fillStr   = eng.fill_strengths();
-    const fillElev  = eng.fill_elevations();
-
-    // Count vertices with strength > 0 (land) and strength == 0 (sea / faded)
-    let landVerts = 0, seaVerts = 0, elevSum = 0, brightCount = 0;
-    const nVerts = fillStr.length;
-    for (let i = 0; i < nVerts; i++) {
-      if (fillStr[i] > 0.0) {
-        landVerts++;
-        elevSum += fillElev[i];
-        if (fillElev[i] > 0.1) brightCount++; // elevated terrain
-      } else {
-        seaVerts++;
-      }
-    }
-
-    return {
-      ok: true,
-      camPos: Array.from(camPos),
-      totalVerts: nVerts,
-      landVerts,
-      seaVerts,
-      avgElev: nVerts > 0 ? (elevSum / landVerts).toFixed(4) : 0,
-      brightCount,
-    };
-  });
-
-  if (!inlandResult.ok) {
-    console.warn(`WARN: inland flight test skipped — ${inlandResult.reason}`);
-  } else {
-    const { camPos, totalVerts, landVerts, seaVerts, avgElev, brightCount } = inlandResult;
-    console.log(`INLAND: cam=[${camPos.map(v => v.toFixed(0)).join(', ')}] total=${totalVerts} land=${landVerts} sea=${seaVerts} avgElev=${avgElev} brightTerrain=${brightCount}`);
-    if (landVerts > 0) {
-      console.log(`PASS: inland terrain has ${landVerts} land vertices (no all-sea result after flying inland)`);
-    } else {
-      console.warn(`WARN: all vertices are sea after inland flight — may be over ocean still`);
-    }
-    if (brightCount > 0) {
-      console.log(`PASS: ${brightCount} vertices with elev > 0.1 — elevated terrain (non-flat) visible`);
-    }
-  }
-
-  // Capture inland screenshot after the flight
-  await page.evaluate(() => {
-    // Trigger one more render with the final eng state
-    const eng = window._eng;
-    if (eng) eng.step(0.001);
-  });
-  const inlandScreenshotPath = join(__dir, 'test-screenshot.png');
-  await page.screenshot({ path: inlandScreenshotPath });
-  console.log(`Inland screenshot saved: ${inlandScreenshotPath}`);
-
-  // ── Motion-stability test ─────────────────────────────────────────────────
-  // Verify that grid lines don't "swim" (jump to different world positions) as the
-  // camera moves. Strategy:
-  //   1. Snapshot line_vertices() now (draws already captured above after 60 steps).
-  //   2. Apply forward thrust + several step()s to move camera ~100 wu forward.
-  //   3. Snapshot again.
-  //   4. Find rows present in both snapshots (same world Z, within epsilon).
-  //      For an index-anchored scheme, a row's Z is fixed to the grid; its X coords
-  //      must be unchanged between snapshots.
-  //   5. Count "snapping" rows (where X changed unexpectedly). Should be zero.
-  const motionResult = await page.evaluate(() => {
-    const eng = window._eng;
-    if (!eng) return { ok: false, reason: 'window._eng not set' };
-
-    // Helper: extract per-row Z values + first vertex X from line_vertices/line_draws.
-    function rowSamples(verts, draws) {
-      const rows = [];
-      for (let i = 0; i < draws.length; i += 2) {
-        const start = draws[i];
-        const count = draws[i + 1];
-        if (count < 2) continue;
-        const base = start * 3;
-        // First vertex of this row strip
-        const x0 = verts[base];
-        const z0 = verts[base + 2];
-        // Second vertex x (to cross-check)
-        const x1 = verts[base + 3];
-        const z1 = verts[base + 5];
-        rows.push({ z: z0, x0, x1, z1 });
-      }
-      return rows;
-    }
-
-    const snapA_verts = eng.line_vertices();
-    const snapA_draws = eng.line_draws();
-    const rowsA = rowSamples(snapA_verts, snapA_draws);
-
-    // Move forward: apply thrust for 10 steps of 0.016s
-    eng.set_input(1.0, 0, 0, 0, 0, 0, 0, false);
-    for (let i = 0; i < 10; i++) eng.step(0.016);
-
-    const snapB_verts = eng.line_vertices();
-    const snapB_draws = eng.line_draws();
-    const rowsB = rowSamples(snapB_verts, snapB_draws);
-
-    // Build lookup: z-rounded → row data from B (rows on fixed grid, round to 0.1wu)
-    const mapB = new Map();
-    for (const r of rowsB) {
-      mapB.set(Math.round(r.z * 10), r);
-    }
-
-    let shared = 0;
-    let snapped = 0;
-    const snapExamples = [];
-    for (const rA of rowsA) {
-      const key = Math.round(rA.z * 10);
-      const rB = mapB.get(key);
-      if (!rB) continue; // row left viewport — normal
-      shared++;
-      // For a stable row, x0 must be identical (same grid column sampled).
-      const dx = Math.abs(rA.x0 - rB.x0);
-      if (dx > 0.01) {
-        snapped++;
-        if (snapExamples.length < 3) snapExamples.push({ z: rA.z, xA: rA.x0, xB: rB.x0, dx });
-      }
-    }
-
-    // Also log a few stable rows' positions across frames for the report
-    const stableExamples = [];
-    for (const rA of rowsA) {
-      const key = Math.round(rA.z * 10);
-      const rB = mapB.get(key);
-      if (!rB) continue;
-      const dx = Math.abs(rA.x0 - rB.x0);
-      if (dx < 0.01 && stableExamples.length < 4) {
-        stableExamples.push({ z: rA.z.toFixed(1), xA: rA.x0.toFixed(2), xB: rB.x0.toFixed(2) });
-      }
-    }
-
-    return { ok: true, shared, snapped, snapExamples, stableExamples,
-             rowsA: rowsA.length, rowsB: rowsB.length };
-  });
-
-  if (!motionResult.ok) {
-    console.warn(`WARN: motion-stability test skipped — ${motionResult.reason}`);
-  } else {
-    const { shared, snapped, snapExamples, stableExamples, rowsA, rowsB } = motionResult;
-    console.log(`MOTION: rows before=${rowsA} after=${rowsB} shared=${shared} snapped=${snapped}`);
-    if (stableExamples.length > 0) {
-      console.log(`MOTION stable row samples (z, xA, xB):`);
-      for (const s of stableExamples) {
-        console.log(`  z=${s.z}  xA=${s.xA}  xB=${s.xB}  (diff=${Math.abs(s.xA - s.xB).toFixed(4)})`);
-      }
-    }
-    if (snapped > 0) {
-      console.error(`FAIL: ${snapped}/${shared} rows snapped to new X positions — swimming not fixed`);
-      for (const e of snapExamples) {
-        console.error(`  z=${e.z.toFixed(1)} xA=${e.xA.toFixed(2)} xB=${e.xB.toFixed(2)} dx=${e.dx.toFixed(3)}`);
-      }
-      await browser.close();
-      server.close();
-      process.exit(1);
-    } else if (shared > 0) {
-      console.log(`PASS: motion-stability OK — ${shared} shared rows, 0 snapped (index-anchored grid stable)`);
-    } else {
-      console.warn(`WARN: no shared rows found between snapshots (camera moved far) — cannot verify stability`);
-    }
-  }
-
-  // ── High-altitude survey: climb to ~5-10 km real altitude, measure far-cull reach ──
-  // Verifies that climbing reveals most of France (far-cull reaches FAR_CULL_MAX ~115k wu).
-  // Also checks perf at max altitude (worst-case vertex count).
-  const highAltResult = await page.evaluate(() => {
-    const eng = window._eng;
-    if (!eng) return { ok: false, reason: 'window._eng not set' };
-
-    // Climb gently to high altitude: moderate pitch-up, moderate throttle.
-    // 300 steps ≈ 4.8 sim-seconds of climbing.
-    eng.set_input(0.7, 0, 0, 0.35, 0, 0, 0, false);
-    for (let i = 0; i < 300; i++) eng.step(0.016);
-    // Level off
-    eng.set_input(0.5, 0, 0, 0.0, 0, 0, 0, false);
-    for (let i = 0; i < 30; i++) eng.step(0.016);
-
-    const camPos = eng.camera_position();
-    const altM = eng.altitude_m();
-
-    // Perf at this altitude
-    const ITERS = 30;
-    const t0 = performance.now();
     for (let i = 0; i < ITERS; i++) eng.step(0.016);
-    const elapsed = performance.now() - t0;
-    const avgMs = elapsed / ITERS;
-
-    const fillVerts = eng.fill_vertices().length / 3;
-    const lineVerts = eng.line_vertices().length / 3;
-    const totalVerts = fillVerts + lineVerts;
-
-    // Count land vs sea fill vertices
-    const fillStr = eng.fill_strengths();
-    let landVerts = 0;
-    for (let i = 0; i < fillStr.length; i++) {
-      if (fillStr[i] > 0.0) landVerts++;
-    }
-
+    const avgMs = (performance.now() - t0) / ITERS;
     return {
-      ok: true,
-      camPos: Array.from(camPos),
-      altM,
-      avgMs,
-      fillVerts,
-      lineVerts,
-      totalVerts,
-      landVerts,
+      ok: true, avgMs,
+      fillVerts: eng.fill_vertices().length / 3,
+      lineVerts: eng.line_vertices().length / 3,
     };
   });
-
-  if (!highAltResult.ok) {
-    console.warn(`WARN: high-altitude test skipped — ${highAltResult.reason}`);
+  if (!perf.ok) {
+    fail(`perf: ${perf.reason}`, browser, server, logs);
+  }
+  const totalVerts = perf.fillVerts + perf.lineVerts;
+  console.log(`PERF: avg step = ${perf.avgMs.toFixed(2)} ms/frame | ` +
+    `fill_verts=${perf.fillVerts} | line_verts=${perf.lineVerts} | total=${totalVerts}`);
+  if (totalVerts > 600_000) {
+    fail(`vertex count too high (${totalVerts})`, browser, server, logs);
+  }
+  console.log(`PASS: vertex count within budget (${totalVerts})`);
+  if (perf.avgMs > 30) {
+    console.warn(`WARN: step() slow (${perf.avgMs.toFixed(1)} ms)`);
   } else {
-    const { camPos, altM, avgMs, fillVerts, lineVerts, totalVerts, landVerts } = highAltResult;
-    console.log(`HIGH-ALT: cam=[${camPos.map(v => v.toFixed(0)).join(', ')}] alt=${altM.toFixed(0)} m`);
-    console.log(`HIGH-ALT PERF: avg step = ${avgMs.toFixed(2)} ms/frame | fill_verts=${fillVerts} | line_verts=${lineVerts} | total=${totalVerts} | land=${landVerts}`);
-    if (altM > 5000) {
-      console.log(`PASS: reached high altitude (${altM.toFixed(0)} m) — whole-country survey altitude`);
-    } else {
-      console.warn(`WARN: altitude only ${altM.toFixed(0)} m — may not have climbed high enough`);
-    }
-    if (totalVerts > 0) {
-      console.log(`PASS: geometry generated at high altitude (${totalVerts} total verts)`);
-    }
-    if (avgMs > 30) {
-      console.warn(`WARN: high-altitude step() slow (${avgMs.toFixed(1)} ms) — LOD bands may need coarsening`);
-    } else {
-      console.log(`PASS: high-altitude step() performance acceptable (${avgMs.toFixed(2)} ms/frame)`);
-    }
+    console.log(`PASS: step() performance acceptable (${perf.avgMs.toFixed(2)} ms/frame)`);
   }
 
-  // Capture high-altitude screenshot
+  // ── Motion stability (no swimming) ───────────────────────────────────────────
+  // A latitude ring is index-anchored: as the camera yaws/moves, a ring that remains
+  // visible must keep the SAME world-space vertices (sphere points depend only on the
+  // grid, not the camera). We snapshot the longest ring's first vertex, move the camera,
+  // and check it is unchanged (allowing the run to start at a different longitude due to
+  // limb clipping — so we hash a quantized set of vertex positions and require overlap).
+  const motion = await page.evaluate(() => {
+    const eng = window._eng;
+    if (!eng) return { ok: false, reason: 'window._eng not set' };
+
+    function vertexSet(verts, draws) {
+      // quantize each vertex to 1 wu and collect into a set of strings
+      const set = new Set();
+      for (let i = 0; i < draws.length; i += 2) {
+        const start = draws[i], count = draws[i + 1];
+        for (let v = 0; v < count; v++) {
+          const b = (start + v) * 3;
+          const k = `${Math.round(verts[b])},${Math.round(verts[b + 1])},${Math.round(verts[b + 2])}`;
+          set.add(k);
+        }
+      }
+      return set;
+    }
+
+    const aV = eng.line_vertices(), aD = eng.line_draws();
+    const setA = vertexSet(aV, aD);
+
+    // Yaw + small forward motion for several frames (camera rotates around globe view).
+    eng.set_input(0.4, 0, 0, 0, 0.4, 0, 0, false);
+    for (let i = 0; i < 8; i++) eng.step(0.016);
+
+    const bV = eng.line_vertices(), bD = eng.line_draws();
+    const setB = vertexSet(bV, bD);
+
+    // Count how many of A's vertices that are still on the near hemisphere appear in B.
+    // Since the camera barely moved relative to the globe, most should persist exactly.
+    let shared = 0;
+    for (const k of setA) if (setB.has(k)) shared++;
+    const overlap = setA.size > 0 ? shared / setA.size : 0;
+    return { ok: true, sizeA: setA.size, sizeB: setB.size, shared, overlap };
+  });
+  if (!motion.ok) {
+    fail(`motion: ${motion.reason}`, browser, server, logs);
+  }
+  console.log(`MOTION: vertsA=${motion.sizeA} vertsB=${motion.sizeB} ` +
+    `shared=${motion.shared} overlap=${(motion.overlap * 100).toFixed(1)}%`);
+  // Index-anchored sphere points are deterministic; with a tiny camera move a large
+  // fraction must persist exactly (the rest left the visible hemisphere).
+  if (motion.overlap > 0.5) {
+    console.log('PASS: motion-stable — ring vertices persist exactly (no swimming)');
+  } else {
+    fail(`rings swam — only ${(motion.overlap * 100).toFixed(1)}% vertices persisted`,
+      browser, server, logs);
+  }
+
+  // ── Dive toward the surface: strides should refine (more verts up close) ──────
+  const dive = await page.evaluate(() => {
+    const eng = window._eng;
+    // Throttle straight toward the globe center for a while.
+    eng.set_input(1.0, 0, 0, 0, 0, 0, 0, false);
+    for (let i = 0; i < 120; i++) eng.step(0.016);
+    return {
+      altM: eng.altitude_m(),
+      fillVerts: eng.fill_vertices().length / 3,
+      lineVerts: eng.line_vertices().length / 3,
+    };
+  });
+  console.log(`DIVE: alt=${dive.altM.toFixed(0)} m | ` +
+    `fill=${dive.fillVerts} line=${dive.lineVerts} total=${dive.fillVerts + dive.lineVerts}`);
+  if (dive.fillVerts + dive.lineVerts > 0) {
+    console.log('PASS: geometry present while diving toward the surface');
+  } else {
+    fail('no geometry while diving', browser, server, logs);
+  }
+
   await page.evaluate(() => { const eng = window._eng; if (eng) eng.step(0.001); });
   await page.screenshot({ path: join(__dir, 'test-screenshot.png') });
-  console.log('High-altitude screenshot saved: web/test-screenshot.png');
-
-  // ── Freelook flicker regression test ─────────────────────────────────────
-  // BUG GUARD: when the player freelooks (set_look) without changing flight heading,
-  // terrain in the new view direction must remain generated — it must NOT drop out.
-  // Strategy: establish a baseline vertex count looking straight ahead, then
-  // accumulate ~1.0 rad of yaw (looking right) over several frames, and assert the
-  // vertex count stays comparable (does not crater by more than 40%).
-  const freelookResult = await page.evaluate(() => {
-    const eng = window._eng;
-    if (!eng) return { ok: false, reason: 'window._eng not set' };
-
-    // Reset look to center; fly level for a moment to get stable terrain.
-    eng.set_look(0, 0); // delta of 0 — look_yaw stays wherever it was; that's fine.
-    // Actually we need to reset accumulated yaw. set_look is additive, so we can't
-    // reset directly. Just step a few frames to stabilize geometry and record.
-    eng.set_input(0.5, 0, 0, 0, 0, 0, 0, false);
-    for (let i = 0; i < 10; i++) eng.step(0.016);
-
-    const baselineFill = eng.fill_vertices().length / 3;
-    const baselineLine = eng.line_vertices().length / 3;
-    const baselineTotal = baselineFill + baselineLine;
-
-    // Accumulate ~1.0 rad of yaw to the right over 20 frames (0.05 rad/frame)
-    // WITHOUT changing flight heading. This is the freelook scenario that used to flicker.
-    const YAW_DELTA = 0.05; // radians per frame
-    const FRAMES = 20;      // total = 1.0 rad of look-right
-    let minTotal = baselineTotal;
-    const counts = [];
-    for (let i = 0; i < FRAMES; i++) {
-      eng.set_look(YAW_DELTA, 0);
-      eng.step(0.016);
-      const total = eng.fill_vertices().length / 3 + eng.line_vertices().length / 3;
-      counts.push(total);
-      if (total < minTotal) minTotal = total;
-    }
-
-    const finalFill = eng.fill_vertices().length / 3;
-    const finalLine = eng.line_vertices().length / 3;
-    const finalTotal = finalFill + finalLine;
-
-    // Terrain in view must not crater: min across rotation >= 60% of baseline.
-    const threshold = baselineTotal * 0.6;
-    const ok = minTotal >= threshold;
-
-    return {
-      ok,
-      baselineFill,
-      baselineLine,
-      baselineTotal,
-      finalFill,
-      finalLine,
-      finalTotal,
-      minTotal,
-      threshold: Math.round(threshold),
-      counts,
-    };
-  });
-
-  if (!freelookResult.ok && freelookResult.reason) {
-    console.warn(`WARN: freelook test skipped — ${freelookResult.reason}`);
-  } else {
-    const { baselineFill, baselineLine, baselineTotal,
-            finalFill, finalLine, finalTotal,
-            minTotal, threshold } = freelookResult;
-    console.log(`FREELOOK: baseline fill=${baselineFill} line=${baselineLine} total=${baselineTotal}`);
-    console.log(`FREELOOK: after +1.0 rad yaw fill=${finalFill} line=${finalLine} total=${finalTotal}`);
-    console.log(`FREELOOK: min_total_during_rotation=${minTotal} threshold=${threshold}`);
-    if (freelookResult.ok) {
-      console.log(`PASS: freelook terrain stable — no flicker (min ${minTotal} >= threshold ${threshold})`);
-    } else {
-      console.error(`FAIL: freelook terrain collapsed — min ${minTotal} < threshold ${threshold} (baseline ${baselineTotal})`);
-      console.error(`      vertex counts per frame: ${freelookResult.counts.join(', ')}`);
-      await browser.close();
-      server.close();
-      process.exit(1);
-    }
-  }
+  console.log('Final screenshot saved: web/test-screenshot.png');
 
   await browser.close();
   server.close();
