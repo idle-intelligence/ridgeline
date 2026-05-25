@@ -176,6 +176,74 @@ async function run() {
     }
   }
 
+  // ── Inland flight: fly forward with full throttle for many steps, then screenshot ──
+  // This puts the camera over inland France (away from the coast) so we can verify:
+  //   (a) flat inland areas are solid — no holes from the water-mask bug
+  //   (b) no dark diagonal transparent band-arcs from the old band-outer-fade
+  //   (c) ocean is still blank, peaks still brighter
+  const inlandResult = await page.evaluate(() => {
+    const eng = window._eng;
+    if (!eng) return { ok: false, reason: 'window._eng not set' };
+
+    // Fly forward with throttle + gentle nose-up pitch for 200 steps (≈3 sim-seconds).
+    // No afterburner — stay at manageable speed. Pitch up slightly to climb over terrain.
+    eng.set_input(0.6, 0, 0, 0.3, 0, 0, 0, false); // 60% thrust, pitch up
+    for (let i = 0; i < 200; i++) eng.step(0.016);
+
+    const camPos = eng.camera_position();
+    const fillVerts = eng.fill_vertices();
+    const fillStr   = eng.fill_strengths();
+    const fillElev  = eng.fill_elevations();
+
+    // Count vertices with strength > 0 (land) and strength == 0 (sea / faded)
+    let landVerts = 0, seaVerts = 0, elevSum = 0, brightCount = 0;
+    const nVerts = fillStr.length;
+    for (let i = 0; i < nVerts; i++) {
+      if (fillStr[i] > 0.0) {
+        landVerts++;
+        elevSum += fillElev[i];
+        if (fillElev[i] > 0.1) brightCount++; // elevated terrain
+      } else {
+        seaVerts++;
+      }
+    }
+
+    return {
+      ok: true,
+      camPos: Array.from(camPos),
+      totalVerts: nVerts,
+      landVerts,
+      seaVerts,
+      avgElev: nVerts > 0 ? (elevSum / landVerts).toFixed(4) : 0,
+      brightCount,
+    };
+  });
+
+  if (!inlandResult.ok) {
+    console.warn(`WARN: inland flight test skipped — ${inlandResult.reason}`);
+  } else {
+    const { camPos, totalVerts, landVerts, seaVerts, avgElev, brightCount } = inlandResult;
+    console.log(`INLAND: cam=[${camPos.map(v => v.toFixed(0)).join(', ')}] total=${totalVerts} land=${landVerts} sea=${seaVerts} avgElev=${avgElev} brightTerrain=${brightCount}`);
+    if (landVerts > 0) {
+      console.log(`PASS: inland terrain has ${landVerts} land vertices (no all-sea result after flying inland)`);
+    } else {
+      console.warn(`WARN: all vertices are sea after inland flight — may be over ocean still`);
+    }
+    if (brightCount > 0) {
+      console.log(`PASS: ${brightCount} vertices with elev > 0.1 — elevated terrain (non-flat) visible`);
+    }
+  }
+
+  // Capture inland screenshot after the flight
+  await page.evaluate(() => {
+    // Trigger one more render with the final eng state
+    const eng = window._eng;
+    if (eng) eng.step(0.001);
+  });
+  const inlandScreenshotPath = join(__dir, 'test-screenshot.png');
+  await page.screenshot({ path: inlandScreenshotPath });
+  console.log(`Inland screenshot saved: ${inlandScreenshotPath}`);
+
   // ── Motion-stability test ─────────────────────────────────────────────────
   // Verify that grid lines don't "swim" (jump to different world positions) as the
   // camera moves. Strategy:

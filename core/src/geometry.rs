@@ -92,9 +92,9 @@ const FAR_CULL_MAX: f32 = 70_000.0;
 /// Strength fade begins this far before the hard cull boundary.
 const FAR_FADE_MARGIN: f32 = 6_000.0;
 
-/// Each LOD band's outer edge fades its rows over this width (world units).
-/// Softens the seam where a coarser band takes over from a finer one.
-const BAND_OUTER_FADE: f32 = 2_000.0;
+/// Elevation epsilon (world units): vertices at or below this are treated as sea and hidden.
+/// Sea was clamped to exactly 0 m in the bake, so any world-space elev <= EPS is open ocean.
+const SEA_EPS: f32 = 0.01;
 
 /// Compute per-frame far-cull distance from camera altitude (world-space y, sea = 0).
 #[inline]
@@ -177,7 +177,8 @@ pub fn generate(hf: &Heightfield, cam_pos: Vec3, cam_fwd: Vec3) -> GeometryBuffe
     let mut line_strengths: Vec<f32> = Vec::with_capacity(cap / 6);
     let mut line_elevations: Vec<f32> = Vec::with_capacity(cap / 6);
 
-    // Scratch buffer for per-vertex water flags + elevations from emit_row_ex.
+    // Scratch buffer for per-vertex (is_sea, elev_norm) from emit_row_ex.
+    // is_sea = true when elevation <= SEA_EPS (open ocean clamped to 0 in the bake).
     let mut col_buf: Vec<(bool, f32)> = Vec::new();
 
     for (row, dist_z, _) in &visible {
@@ -185,7 +186,7 @@ pub fn generate(hf: &Heightfield, cam_pos: Vec3, cam_fwd: Vec3) -> GeometryBuffe
         let band = band_of(*dist_z);
         let col_stride = STRIDES[band].1;
 
-        // Compute per-row strength (0..1): fades near far-cull AND at band outer edge.
+        // Compute per-row strength (0..1): fades only near the far-cull horizon.
         let row_str = row_strength(*dist_z, band, far_cull_dist);
 
         // Fill strip
@@ -199,8 +200,9 @@ pub fn generate(hf: &Heightfield, cam_pos: Vec3, cam_fwd: Vec3) -> GeometryBuffe
             fill_draws.push(fill_start);
             fill_draws.push(fill_count);
             // col_buf has one entry per column; fill emits 2 verts per col (baseline+top).
-            for &(is_water, en) in &col_buf {
-                let s = if is_water { 0.0 } else { row_str };
+            for &(is_sea, en) in &col_buf {
+                // Sea (elev ≈ 0) is hidden; flat LAND (elev > SEA_EPS) renders normally.
+                let s = if is_sea { 0.0 } else { row_str };
                 // baseline vertex
                 fill_strengths.push(s);
                 fill_elevations.push(en);
@@ -220,8 +222,8 @@ pub fn generate(hf: &Heightfield, cam_pos: Vec3, cam_fwd: Vec3) -> GeometryBuffe
         if line_count > 0 {
             line_draws.push(line_start);
             line_draws.push(line_count);
-            for &(is_water, en) in &col_buf {
-                let s = if is_water { 0.0 } else { row_str };
+            for &(is_sea, en) in &col_buf {
+                let s = if is_sea { 0.0 } else { row_str };
                 line_strengths.push(s);
                 line_elevations.push(en);
             }
@@ -249,46 +251,34 @@ fn band_of(dist_z: f32) -> usize {
 
 /// Compute per-row strength in [0..1].
 ///
-/// Fades toward 0 at:
-///   (a) the far-cull boundary (FAR_FADE_MARGIN before it)
-///   (b) the outer edge of this row's band (BAND_OUTER_FADE wide ramp)
+/// Fades toward 0 near the far-cull boundary (FAR_FADE_MARGIN before it),
+/// so the distant horizon dissolves into the sky instead of popping out.
 ///
-/// This eliminates the rushing far-edge pop (far-fade) and the diagonal density
-/// seam where coarser bands take over from finer ones (band outer-fade).
+/// Band-boundary fading is intentionally NOT applied here: the index-anchored
+/// power-of-two stride scheme means coarser-band rows are a subset of finer-band
+/// rows, so transitions are stable with at most a subtle LOD pop — no transparent
+/// arc artifacts.
 #[inline]
-fn row_strength(dist_z: f32, band: usize, far_cull_dist: f32) -> f32 {
+fn row_strength(dist_z: f32, _band: usize, far_cull_dist: f32) -> f32 {
     // Far-fade: linear ramp from 1→0 over FAR_FADE_MARGIN before hard cull.
     let far_fade_start = (far_cull_dist - FAR_FADE_MARGIN).max(0.0);
-    let far_strength = if dist_z >= far_cull_dist {
+    if dist_z >= far_cull_dist {
         0.0
     } else if dist_z > far_fade_start {
-        1.0 - (dist_z - far_fade_start) / FAR_FADE_MARGIN
+        (1.0 - (dist_z - far_fade_start) / FAR_FADE_MARGIN).clamp(0.0, 1.0)
     } else {
         1.0
-    };
-
-    // Band outer-fade: rows near the outer boundary of their band fade toward 0
-    // so they blend with the next coarser band that takes over beyond this threshold.
-    let band_outer = BANDS[band]; // outer threshold for this band (except last)
-    #[allow(clippy::float_cmp)]
-    let band_outer_fade_strength = if band == BANDS.len() - 1 || band_outer == f32::MAX {
-        // Last (infinite) band: no outer fade (hard cull handles it via far_strength).
-        1.0
-    } else {
-        let fade_start = (band_outer - BAND_OUTER_FADE).max(0.0);
-        if dist_z > fade_start {
-            1.0 - (dist_z - fade_start) / BAND_OUTER_FADE
-        } else {
-            1.0
-        }
-    };
-
-    far_strength.min(band_outer_fade_strength).clamp(0.0, 1.0)
+    }
 }
 
-/// Emit vertices for one row into `out`, recording per-column (is_water, elev_norm) in `col_buf`.
+/// Emit vertices for one row into `out`, recording per-column (is_sea, elev_norm) in `col_buf`.
 /// fill=true: alternating (baseline, top) pairs for TRIANGLE_STRIP — 1 col_buf entry per pair.
 /// fill=false: top-only for LINE_STRIP — 1 col_buf entry per vertex.
+///
+/// is_sea is determined by elevation only (elev_world <= SEA_EPS), NOT the water mask.
+/// The water mask is unreliable for land/sea classification (it also flags flat plains,
+/// river valleys, and lagoons). Sea was clamped to exactly 0 m in the bake, so elevation
+/// is the authoritative signal.
 ///
 /// Earth curvature: each vertex's y is reduced by d²/(2·CURVE_R) where d is the
 /// horizontal (XZ-plane) distance from cam_pos. The baseline vertex gets the same
@@ -312,7 +302,10 @@ fn emit_row_ex(
         let c = col.min(last_col);
         let x = hf.col_x(c);
         let y_top = hf.sample(row, c);
-        let is_water = hf.is_water(row, c);
+        // Sea detection: elevation only. SEA_EPS guards against floating-point noise at
+        // the bake's 0 m clamp. Flat LAND (plains, valleys, lagoons) has elev > 0 and
+        // will NOT be hidden — only genuine open ocean renders blank.
+        let is_sea = y_top <= SEA_EPS;
         let en = hf.elev_norm(row, c);
 
         // Horizontal distance from camera for curvature drop.
@@ -326,7 +319,7 @@ fn emit_row_ex(
         } else {
             out.extend_from_slice(&[x, y_top - drop, world_z]);
         }
-        col_buf.push((is_water, en));
+        col_buf.push((is_sea, en));
 
         if c == last_col {
             break;

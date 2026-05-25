@@ -85,9 +85,11 @@ algorithm yields the layered ridge occlusion.
   back-to-front order. JS issues `gl.drawArrays(gl.TRIANGLE_STRIP, start, count)` per pair.
 - `eng.fill_strengths()` → `Float32Array`, one f32 per vertex, parallel to `fill_vertices()`.
   Values in [0..1]. Multiply fill color alpha by this in the fragment shader.
-  Ramps to 0 near the far-cull boundary (eliminates far speckle pop-in) and near each LOD
-  band's outer edge (eliminates the diagonal density seam). Water cells have strength = 0
-  (sea renders blank). Requires alpha blending enabled.
+  Ramps to 0 near the far-cull boundary (eliminates far speckle pop-in). No band-boundary
+  fade — the index-anchored stride scheme makes band transitions stable without it.
+  Sea vertices (elevation ≤ ~0 m, clamped to 0 in the bake) have strength = 0 (blank ocean).
+  Flat land (plains, valleys, lagoons) renders normally — only elevation determines sea.
+  Requires alpha blending enabled.
 - `eng.fill_elevations()` → `Float32Array`, one f32 per vertex, parallel to `fill_vertices()`.
   Values in [0..1] = elev_world / elev_world_max (clamped). 0 = sea level, 1 = highest peak.
   Use to drive elevation→brightness in the fragment shader.
@@ -96,7 +98,7 @@ algorithm yields the layered ridge occlusion.
 - `eng.line_draws()` → `Uint32Array`, flat pairs `[start,count, ...]`, back-to-front. JS issues
   `gl.drawArrays(gl.LINE_STRIP, start, count)` per pair.
 - `eng.line_strengths()` → `Float32Array`, one f32 per vertex, parallel to `line_vertices()`.
-  Same fade semantics as `fill_strengths()`. Water cells have strength = 0. Apply to ridge line alpha.
+  Same fade semantics as `fill_strengths()`. Sea vertices have strength = 0. Apply to ridge line alpha.
 - `eng.line_elevations()` → `Float32Array`, one f32 per vertex, parallel to `line_vertices()`.
   Values in [0..1] = elev_world / elev_world_max (clamped). Same semantics as `fill_elevations()`.
 

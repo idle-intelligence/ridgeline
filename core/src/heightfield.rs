@@ -26,7 +26,8 @@ pub struct Heightfield {
     pub height: u32,
     // elevation in world-units, row 0 = north (z_max), stored row-major
     pub elev: Vec<f32>,
-    // 1 = water
+    // 1 = water (retained for potential future use; not used for sea-hiding — see geometry.rs)
+    #[allow(dead_code)]
     pub water: Vec<u8>,
     // world-space range of elevation
     pub elev_world_min: f32,
@@ -125,6 +126,8 @@ impl Heightfield {
     }
 
     /// True if (row, col) is marked as water.
+    /// NOTE: not used for sea-hiding (see geometry.rs SEA_EPS logic).
+    #[allow(dead_code)]
     #[inline]
     pub fn is_water(&self, row: u32, col: u32) -> bool {
         self.water[(row * self.width + col) as usize] != 0
