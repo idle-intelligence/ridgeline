@@ -13,21 +13,32 @@ precision highp float;
 uniform mat4 u_mvp;
 in vec3 a_pos;
 in float a_strength;
+in float a_elev;
 out float v_strength;
+out float v_elev;
 void main() {
   gl_Position = u_mvp * vec4(a_pos, 1.0);
   v_strength = a_strength;
+  v_elev = a_elev;
 }
 `;
 
-// Fill shader: background-tinted color * strength alpha.
+// Elevation → brightness constants.
+// Low land is dim (matches dark palette), peaks are bright near-white.
+// A whisper of warmth at very high elevations (slight amber tint at elev≈1).
 const FILL_FRAG_SRC = `#version 300 es
 precision mediump float;
 uniform vec4 u_color;
 in float v_strength;
+in float v_elev;
 out vec4 out_color;
 void main() {
-  out_color = vec4(u_color.rgb, u_color.a * v_strength);
+  // Brightness ramp: low land 1.0x (base fill), peaks up to 1.6x.
+  float bright = mix(1.0, 1.6, v_elev);
+  // Subtle warmth at high elev: tiny lift to R channel only.
+  float warmR = mix(0.0, 0.04, v_elev);
+  vec3 col = clamp(u_color.rgb * bright + vec3(warmR, 0.0, 0.0), 0.0, 1.0);
+  out_color = vec4(col, u_color.a * v_strength);
 }
 `;
 
@@ -35,9 +46,17 @@ const LINE_FRAG_SRC = `#version 300 es
 precision mediump float;
 uniform vec4 u_color;
 in float v_strength;
+in float v_elev;
 out vec4 out_color;
 void main() {
-  out_color = vec4(u_color.rgb, u_color.a * v_strength);
+  // Brightness ramp: dim at low land (0.55x), full at peaks (1.0x).
+  // Low land stays clearly visible but subdued; peaks are full off-white.
+  float bright = mix(0.55, 1.0, v_elev);
+  // Whisper of warmth at peaks: slight amber nudge.
+  float warmR = mix(0.0, 0.06, v_elev);
+  float warmG = mix(0.0, 0.02, v_elev);
+  vec3 col = clamp(u_color.rgb * bright + vec3(warmR, warmG, 0.0), 0.0, 1.0);
+  out_color = vec4(col, u_color.a * v_strength);
 }
 `;
 
@@ -114,22 +133,24 @@ export class Renderer {
     this.fillColor    = gl.getUniformLocation(this.fillProg, 'u_color');
     this.fillPos      = gl.getAttribLocation(this.fillProg,  'a_pos');
     this.fillStrength = gl.getAttribLocation(this.fillProg,  'a_strength');
+    this.fillElev     = gl.getAttribLocation(this.fillProg,  'a_elev');
 
     this.lineMvp      = gl.getUniformLocation(this.lineProg, 'u_mvp');
     this.lineColor    = gl.getUniformLocation(this.lineProg, 'u_color');
     this.linePos      = gl.getAttribLocation(this.lineProg,  'a_pos');
     this.lineStrength = gl.getAttribLocation(this.lineProg,  'a_strength');
+    this.lineElev     = gl.getAttribLocation(this.lineProg,  'a_elev');
 
     // aircraft program
     this.aircraftMvp   = gl.getUniformLocation(this.aircraftProg, 'u_mvp');
     this.aircraftColor = gl.getUniformLocation(this.aircraftProg, 'u_color');
     this.aircraftPos   = gl.getAttribLocation(this.aircraftProg,  'a_pos');
 
-    // VAOs + VBOs for fill geometry (pos + strength, interleaved per-vertex)
-    // Layout: pos VBO (float32 xyz) + separate strength VBO (float32)
+    // VAOs + VBOs for fill geometry: pos VBO + strength VBO + elev VBO (all separate)
     this.fillVAO      = gl.createVertexArray();
     this.fillVBO      = gl.createBuffer();
     this.fillStrVBO   = gl.createBuffer();
+    this.fillElevVBO  = gl.createBuffer();
     gl.bindVertexArray(this.fillVAO);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.fillVBO);
     gl.enableVertexAttribArray(this.fillPos);
@@ -137,12 +158,16 @@ export class Renderer {
     gl.bindBuffer(gl.ARRAY_BUFFER, this.fillStrVBO);
     gl.enableVertexAttribArray(this.fillStrength);
     gl.vertexAttribPointer(this.fillStrength, 1, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.fillElevVBO);
+    gl.enableVertexAttribArray(this.fillElev);
+    gl.vertexAttribPointer(this.fillElev, 1, gl.FLOAT, false, 0, 0);
     gl.bindVertexArray(null);
 
     // VAOs + VBOs for line geometry
     this.lineVAO      = gl.createVertexArray();
     this.lineVBO      = gl.createBuffer();
     this.lineStrVBO   = gl.createBuffer();
+    this.lineElevVBO  = gl.createBuffer();
     gl.bindVertexArray(this.lineVAO);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.lineVBO);
     gl.enableVertexAttribArray(this.linePos);
@@ -150,6 +175,9 @@ export class Renderer {
     gl.bindBuffer(gl.ARRAY_BUFFER, this.lineStrVBO);
     gl.enableVertexAttribArray(this.lineStrength);
     gl.vertexAttribPointer(this.lineStrength, 1, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.lineElevVBO);
+    gl.enableVertexAttribArray(this.lineElev);
+    gl.vertexAttribPointer(this.lineElev, 1, gl.FLOAT, false, 0, 0);
     gl.bindVertexArray(null);
 
     // VAO + VBO for aircraft wireframe (static geometry, uploaded once)
@@ -216,9 +244,10 @@ export class Renderer {
     const mvp = eng.view_proj();
 
     // --- fill pass ---
-    const fillVerts     = eng.fill_vertices();
-    const fillDraws     = eng.fill_draws();
-    const fillStrengths = eng.fill_strengths();
+    const fillVerts      = eng.fill_vertices();
+    const fillDraws      = eng.fill_draws();
+    const fillStrengths  = eng.fill_strengths();
+    const fillElevations = eng.fill_elevations();
 
     gl.useProgram(this.fillProg);
     gl.uniformMatrix4fv(this.fillMvp, false, mvp);
@@ -229,15 +258,18 @@ export class Renderer {
     gl.bufferData(gl.ARRAY_BUFFER, fillVerts, gl.DYNAMIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.fillStrVBO);
     gl.bufferData(gl.ARRAY_BUFFER, fillStrengths, gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.fillElevVBO);
+    gl.bufferData(gl.ARRAY_BUFFER, fillElevations, gl.DYNAMIC_DRAW);
 
     for (let i = 0; i < fillDraws.length; i += 2) {
       gl.drawArrays(gl.TRIANGLE_STRIP, fillDraws[i], fillDraws[i + 1]);
     }
 
     // --- line pass (LEQUAL so lines win over their own fill at same depth) ---
-    const lineVerts     = eng.line_vertices();
-    const lineDraws     = eng.line_draws();
-    const lineStrengths = eng.line_strengths();
+    const lineVerts      = eng.line_vertices();
+    const lineDraws      = eng.line_draws();
+    const lineStrengths  = eng.line_strengths();
+    const lineElevations = eng.line_elevations();
 
     gl.useProgram(this.lineProg);
     gl.uniformMatrix4fv(this.lineMvp, false, mvp);
@@ -248,6 +280,8 @@ export class Renderer {
     gl.bufferData(gl.ARRAY_BUFFER, lineVerts, gl.DYNAMIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.lineStrVBO);
     gl.bufferData(gl.ARRAY_BUFFER, lineStrengths, gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.lineElevVBO);
+    gl.bufferData(gl.ARRAY_BUFFER, lineElevations, gl.DYNAMIC_DRAW);
 
     for (let i = 0; i < lineDraws.length; i += 2) {
       gl.drawArrays(gl.LINE_STRIP, lineDraws[i], lineDraws[i + 1]);
