@@ -427,6 +427,83 @@ async function run() {
   await page.screenshot({ path: join(__dir, 'test-screenshot.png') });
   console.log('High-altitude screenshot saved: web/test-screenshot.png');
 
+  // ── Freelook flicker regression test ─────────────────────────────────────
+  // BUG GUARD: when the player freelooks (set_look) without changing flight heading,
+  // terrain in the new view direction must remain generated — it must NOT drop out.
+  // Strategy: establish a baseline vertex count looking straight ahead, then
+  // accumulate ~1.0 rad of yaw (looking right) over several frames, and assert the
+  // vertex count stays comparable (does not crater by more than 40%).
+  const freelookResult = await page.evaluate(() => {
+    const eng = window._eng;
+    if (!eng) return { ok: false, reason: 'window._eng not set' };
+
+    // Reset look to center; fly level for a moment to get stable terrain.
+    eng.set_look(0, 0); // delta of 0 — look_yaw stays wherever it was; that's fine.
+    // Actually we need to reset accumulated yaw. set_look is additive, so we can't
+    // reset directly. Just step a few frames to stabilize geometry and record.
+    eng.set_input(0.5, 0, 0, 0, 0, 0, 0, false);
+    for (let i = 0; i < 10; i++) eng.step(0.016);
+
+    const baselineFill = eng.fill_vertices().length / 3;
+    const baselineLine = eng.line_vertices().length / 3;
+    const baselineTotal = baselineFill + baselineLine;
+
+    // Accumulate ~1.0 rad of yaw to the right over 20 frames (0.05 rad/frame)
+    // WITHOUT changing flight heading. This is the freelook scenario that used to flicker.
+    const YAW_DELTA = 0.05; // radians per frame
+    const FRAMES = 20;      // total = 1.0 rad of look-right
+    let minTotal = baselineTotal;
+    const counts = [];
+    for (let i = 0; i < FRAMES; i++) {
+      eng.set_look(YAW_DELTA, 0);
+      eng.step(0.016);
+      const total = eng.fill_vertices().length / 3 + eng.line_vertices().length / 3;
+      counts.push(total);
+      if (total < minTotal) minTotal = total;
+    }
+
+    const finalFill = eng.fill_vertices().length / 3;
+    const finalLine = eng.line_vertices().length / 3;
+    const finalTotal = finalFill + finalLine;
+
+    // Terrain in view must not crater: min across rotation >= 60% of baseline.
+    const threshold = baselineTotal * 0.6;
+    const ok = minTotal >= threshold;
+
+    return {
+      ok,
+      baselineFill,
+      baselineLine,
+      baselineTotal,
+      finalFill,
+      finalLine,
+      finalTotal,
+      minTotal,
+      threshold: Math.round(threshold),
+      counts,
+    };
+  });
+
+  if (!freelookResult.ok && freelookResult.reason) {
+    console.warn(`WARN: freelook test skipped — ${freelookResult.reason}`);
+  } else {
+    const { baselineFill, baselineLine, baselineTotal,
+            finalFill, finalLine, finalTotal,
+            minTotal, threshold } = freelookResult;
+    console.log(`FREELOOK: baseline fill=${baselineFill} line=${baselineLine} total=${baselineTotal}`);
+    console.log(`FREELOOK: after +1.0 rad yaw fill=${finalFill} line=${finalLine} total=${finalTotal}`);
+    console.log(`FREELOOK: min_total_during_rotation=${minTotal} threshold=${threshold}`);
+    if (freelookResult.ok) {
+      console.log(`PASS: freelook terrain stable — no flicker (min ${minTotal} >= threshold ${threshold})`);
+    } else {
+      console.error(`FAIL: freelook terrain collapsed — min ${minTotal} < threshold ${threshold} (baseline ${baselineTotal})`);
+      console.error(`      vertex counts per frame: ${freelookResult.counts.join(', ')}`);
+      await browser.close();
+      server.close();
+      process.exit(1);
+    }
+  }
+
   await browser.close();
   server.close();
   console.log('All checks passed.');

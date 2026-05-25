@@ -127,10 +127,12 @@ impl Engine {
         let phys = Physics::new(pos, look);
         let view_proj_mat = compute_view_proj(&phys, 0.0, 0.0, ASPECT_DEFAULT);
 
-        // Generate initial geometry so getters work before first step
+        // Generate initial geometry so getters work before first step.
+        // look_yaw/look_pitch are 0 at init, so look_offset is identity — cam_fwd = ship fwd.
         let cam_offset = phys.orientation * Vec3::new(0.0, CHASE_UP, CHASE_BACK);
         let cam_pos = phys.position + cam_offset;
-        let cam_fwd = phys.orientation * Vec3::NEG_Z;
+        let look_offset = Quat::from_rotation_y(0.0) * Quat::from_rotation_x(0.0);
+        let cam_fwd = (phys.orientation * look_offset) * Vec3::NEG_Z;
         let geom = geometry::generate(&hf, cam_pos, cam_fwd);
 
         Engine {
@@ -205,7 +207,10 @@ impl Engine {
 
         let cam_offset = self.phys.orientation * Vec3::new(0.0, CHASE_UP, CHASE_BACK);
         let cam_pos = self.phys.position + cam_offset;
-        let cam_fwd = self.phys.orientation * Vec3::NEG_Z;
+        // Use the freelook-adjusted camera forward (same orientation as compute_view_proj)
+        // so the forward-cone cull matches where the camera actually points.
+        let look_offset = Quat::from_rotation_y(self.look_yaw) * Quat::from_rotation_x(self.look_pitch);
+        let cam_fwd = (self.phys.orientation * look_offset) * Vec3::NEG_Z;
         self.geom = geometry::generate(&self.hf, cam_pos, cam_fwd);
         self.view_proj_mat = compute_view_proj(&self.phys, self.look_yaw, self.look_pitch, self.aspect);
     }

@@ -147,9 +147,11 @@ pub fn generate(hf: &Heightfield, cam_pos: Vec3, cam_fwd: Vec3) -> GeometryBuffe
             continue;
         }
 
-        // Loose forward-hemisphere cull (~114° half-angle).
+        // Forward-hemisphere cull (~120° half-angle, cos(120°) = -0.5).
+        // Slightly wider than the old -0.4 (~114°) to give a safe margin against
+        // edge-row pop when the camera looks near the cull boundary.
         let to_row = Vec3::new(cam_pos.x, cam_pos.y, world_z) - cam_pos;
-        if to_row.normalize_or_zero().dot(cam_fwd_n) < -0.4 {
+        if to_row.normalize_or_zero().dot(cam_fwd_n) < -0.5 {
             continue;
         }
 
