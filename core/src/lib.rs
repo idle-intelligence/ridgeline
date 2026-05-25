@@ -13,24 +13,25 @@ use physics::Physics;
 // --- Camera projection constants ---
 const FOV_Y_RAD: f32 = std::f32::consts::FRAC_PI_4; // 45°
 const Z_NEAR: f32 = 1.0;
-const Z_FAR: f32 = 40000.0;
+const Z_FAR: f32 = 120_000.0; // far plane matches max far-cull (70k wu) with headroom
 const ASPECT_DEFAULT: f32 = 16.0 / 9.0;
 
 // --- Chase camera offsets (ship-local space) ---
 // Camera sits behind (+z = back) and above (+y) the ship.
-const CHASE_UP: f32 = 8.0;     // world units above ship
-const CHASE_BACK: f32 = 35.0;  // world units behind ship (along +z body axis)
+// At WORLD_HALF=40000, craft reads tiny against vast terrain; wider chase distance
+// so the craft is a small silhouette rather than filling the frame.
+const CHASE_UP: f32 = 30.0;    // world units above ship
+const CHASE_BACK: f32 = 120.0; // world units behind ship (along +z body axis)
 
 /// Scale to apply to the normalized aircraft model (length ≈ 1.0) in world units.
-/// At VE=20, Mont Saint Clair renders ~38 wu tall; 3.5 wu makes the craft read as a
-/// small few-meter vessel dwarfed even by the coastal hill at spawn.
-pub const AIRCRAFT_SCALE: f32 = 3.5;
+/// At WORLD_HALF=40000 and CHASE_BACK=120, ~14 wu makes the craft a tiny readable speck.
+pub const AIRCRAFT_SCALE: f32 = 14.0;
 
 /// Spawn placement: in the Mediterranean just south of Sète (43.40 N, 3.70 E),
 /// flying north toward the coast. Geographic point is mapped through the bbox.
 const SPAWN_LAT: f32 = 43.28; // a little south of Sète, out at sea
 const SPAWN_LON: f32 = 3.70;
-const SPAWN_ALT: f32 = 40.0; // world units above sea level (y = 0)
+const SPAWN_ALT: f32 = 150.0; // world units above sea level — high enough to see vast terrain
 
 fn spawn_position(hf: &Heightfield, lat_min: f32, lat_max: f32, lon_min: f32, lon_max: f32) -> Vec3 {
     let tx = (SPAWN_LON - lon_min) / (lon_max - lon_min);
@@ -254,6 +255,16 @@ impl Engine {
         arr
     }
 
+    /// Per-vertex strength for fill geometry (one f32 per vertex, parallel to fill_vertices).
+    /// Values in [0..1]; multiply fill color alpha by this in the fragment shader.
+    /// Ramps to 0 near the far-cull boundary and at each LOD band's outer edge,
+    /// eliminating pop-in and diagonal density seams.
+    pub fn fill_strengths(&self) -> Float32Array {
+        let arr = Float32Array::new_with_length(self.geom.fill_strengths.len() as u32);
+        arr.copy_from(&self.geom.fill_strengths);
+        arr
+    }
+
     /// Packed ridge line-strip vertices [x,y,z, ...].
     pub fn line_vertices(&self) -> Float32Array {
         let arr = Float32Array::new_with_length(self.geom.line_verts.len() as u32);
@@ -265,6 +276,15 @@ impl Engine {
     pub fn line_draws(&self) -> Uint32Array {
         let arr = Uint32Array::new_with_length(self.geom.line_draws.len() as u32);
         arr.copy_from(&self.geom.line_draws);
+        arr
+    }
+
+    /// Per-vertex strength for line geometry (one f32 per vertex, parallel to line_vertices).
+    /// Values in [0..1]; multiply line color alpha by this in the fragment shader.
+    /// Ramps to 0 near the far-cull boundary and at each LOD band's outer edge.
+    pub fn line_strengths(&self) -> Float32Array {
+        let arr = Float32Array::new_with_length(self.geom.line_strengths.len() as u32);
+        arr.copy_from(&self.geom.line_strengths);
         arr
     }
 

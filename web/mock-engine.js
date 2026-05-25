@@ -54,11 +54,17 @@ export function makeMockEngine(width, height, _hf, _wm, _elevMin, _elevMax, _lat
       lineDraws.push(lStart, VERTS_PER_ROW);
     }
 
+    // Per-vertex strengths: all 1.0 (mock doesn't fade).
+    const fillStr = new Float32Array(fvCount).fill(1.0);
+    const lineStr = new Float32Array(lvCount).fill(1.0);
+
     return {
       fillV: new Float32Array(fillVerts),
       fillD: new Uint32Array(fillDraws),
+      fillStr,
       lineV: new Float32Array(lineVerts),
       lineD: new Uint32Array(lineDraws),
+      lineStr,
     };
   }
 
@@ -116,10 +122,12 @@ export function makeMockEngine(width, height, _hf, _wm, _elevMin, _elevMax, _lat
   }
 
   return {
-    fill_vertices() { return geo.fillV; },
-    fill_draws()    { return geo.fillD; },
-    line_vertices() { return geo.lineV; },
-    line_draws()    { return geo.lineD; },
+    fill_vertices()  { return geo.fillV; },
+    fill_draws()     { return geo.fillD; },
+    fill_strengths() { return geo.fillStr; },
+    line_vertices()  { return geo.lineV; },
+    line_draws()     { return geo.lineD; },
+    line_strengths() { return geo.lineStr; },
     altitude()      { return camY * 100; },
     speed()         { return Math.sqrt(velX*velX + velZ*velZ) * 100; },
     camera_position() { return new Float32Array([camX, camY, camZ]); },

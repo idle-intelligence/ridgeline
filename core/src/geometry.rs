@@ -18,14 +18,22 @@
 //   Always includes the last column so strips close.
 //
 // Distance bands → (row_stride, col_stride):
-//   [0,      200)    → (4,   32)    ultra-near: only within 200wu (craft docked/landed)
-//   [200,    1400)   → (8,   64)    near: primary near band, wide to reduce pop frequency
-//   [1400,   3500)   → (16,  128)
-//   [3500,   7000)   → (32,  256)
-//   [7000,   11000)  → (64,  512)
-//   [11000,  17000)  → (128, 1024)  base far band
-//   [17000,  25000)  → (256, 2048)  high-altitude extension
-//   [25000,  FAR)    → (512, 4096)  very-high-altitude extension
+//   [0,       1500)   → (4,   32)    ultra-near
+//   [1500,    6000)   → (8,   64)    near
+//   [6000,    15000)  → (16,  128)
+//   [15000,   28000)  → (32,  256)
+//   [28000,   45000)  → (64,  512)
+//   [45000,   65000)  → (128, 1024)
+//   [65000,   90000)  → (256, 2048)
+//   [90000,   FAR)    → (512, 4096)
+//
+// Per-vertex strength (0..1):
+//   Each vertex gets a "strength" in [0..1] that drives alpha blending in the renderer.
+//   Strength is 1.0 in the interior of each band and ramps toward 0 at:
+//     (a) the far-cull distance (far-fade, hides the speckle/pop horizon)
+//     (b) the outer edge of each band (outer-fade, softens LOD seam appearance)
+//   The near edge of each band is NOT faded (rows are always 100% opaque as they enter).
+//   This eliminates the "diagonal density wall" seam and the far speckle.
 //
 // Hard far-cull beyond far_cull (computed from camera altitude each frame).
 //
@@ -39,34 +47,23 @@ use glam::Vec3;
 
 // ── Distance bands (world units from camera z) ────────────────────────────────
 //
-// Band thresholds are pushed outward and spread wider than the minimum needed so
-// that LOD transitions happen far from the camera (sub-pixel / low-contrast) and
-// the camera can travel farther before any band boundary crosses a visible row.
-// Wider bands = fewer transitions per unit of travel = less wavefront popping.
-//
-// With VE=20 and terrain up to ~1000 wu tall, near terrain is dense and dramatic;
-// far terrain benefit from aggressive culling.
+// WORLD_HALF=40000 → world spans ±40000 wu. Far-cull peaks ~70000 wu at altitude.
+// Bands are spaced so transitions happen far from camera (sub-pixel at distance)
+// and the camera travels a long way before any band boundary crosses a visible row.
 
 /// Band thresholds (ascending). Each band index maps to a stride pair below.
-/// The world is ±6000 wu with 8192 grid rows/cols, so ~1.46 wu per cell.
-///
-/// LOD wavefront mitigation: eliminating the finest row_stride=4 band reduces the
-/// most visible pop (new rows appearing between existing ones at the near transition).
-/// stride=8 near terrain at VE=20 still gives dense, dramatic ridgelines (every ~11 wu),
-/// while the furthest band transitions happen in the distance where they are imperceptible.
-/// Bands are widely-spaced so the camera travels a long way before any transition fires.
-const BANDS: [f32; 8] = [200.0, 1_400.0, 3_500.0, 7_000.0, 11_000.0, 17_000.0, 25_000.0, f32::MAX];
+const BANDS: [f32; 8] = [
+    1_500.0,
+    6_000.0,
+    15_000.0,
+    28_000.0,
+    45_000.0,
+    65_000.0,
+    90_000.0,
+    f32::MAX,
+];
 
 /// (row_stride, col_stride) per band index (power-of-two, index-aligned).
-/// col_stride is relative to the 8192-column grid.
-///   ultra (<200wu):   every 4th row, every 32nd col  — only within 200wu (rare in normal flight)
-///   near  (<1400wu):  every 8th row, every 64th col  — primary near band, wide threshold
-///   mid1  (<3500wu):  every 16th row, every 128th col
-///   mid2  (<7000wu):  every 32nd row, every 256th col
-///   mid3  (<11000wu): every 64th row, every 512th col
-///   far   (<17000):   every 128th row, every 1024th col
-///   xfar  (<25000):   every 256th row, every 2048th col — high-altitude extension
-///   xxfar (beyond):   every 512th row, every 4096th col — very-high-altitude extension
 const STRIDES: [(u32, u32); 8] = [
     (4,   32),
     (8,   64),
@@ -80,14 +77,21 @@ const STRIDES: [(u32, u32); 8] = [
 
 // ── Altitude-driven far-cull ─────────────────────────────────────────────────
 /// Baseline far-cull at sea level (world units).
-const FAR_CULL_BASE: f32 = 14_000.0;
+const FAR_CULL_BASE: f32 = 18_000.0;
 /// Far-cull increase per world unit of altitude (linear gain).
-/// At altitude 500 wu → cull ~19k wu; at 2000 wu → cull ~30k wu.
+/// At altitude 1000 wu → cull ~28k wu; at 5000 wu → cull ~68k wu.
 const FAR_CULL_ALT_GAIN: f32 = 10.0;
-/// Minimum far-cull (applied even when underground).
-const FAR_CULL_MIN: f32 = 8_000.0;
-/// Maximum far-cull regardless of altitude.
-const FAR_CULL_MAX: f32 = 30_000.0;
+/// Minimum far-cull.
+const FAR_CULL_MIN: f32 = 12_000.0;
+/// Maximum far-cull regardless of altitude (80000 wu world span; keep below that).
+const FAR_CULL_MAX: f32 = 70_000.0;
+
+/// Strength fade begins this far before the hard cull boundary.
+const FAR_FADE_MARGIN: f32 = 6_000.0;
+
+/// Each LOD band's outer edge fades its rows over this width (world units).
+/// Softens the seam where a coarser band takes over from a finer one.
+const BAND_OUTER_FADE: f32 = 2_000.0;
 
 /// Compute per-frame far-cull distance from camera altitude (world-space y, sea = 0).
 #[inline]
@@ -98,10 +102,9 @@ fn far_cull(cam_y: f32) -> f32 {
 
 // ── Earth curvature ───────────────────────────────────────────────────────────
 /// Effective planet radius in world units.
-/// Real Earth 6371 km; scale is ~10.3 wu/km → R ≈ 65600 wu.
-/// Tuned to 55000 wu for a visibly curved horizon at high altitude without
-/// a noticeable warp up close.
-const CURVE_R: f32 = 55_000.0;
+/// WORLD_HALF=40000 → world ~6x larger than before → R scales accordingly.
+/// R≈360000 gives a visibly curved horizon at high altitude without warping nearby terrain.
+const CURVE_R: f32 = 360_000.0;
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -109,22 +112,21 @@ const CURVE_R: f32 = 55_000.0;
 pub struct GeometryBuffers {
     pub fill_verts: Vec<f32>,
     pub fill_draws: Vec<u32>,
+    pub fill_strengths: Vec<f32>,
     pub line_verts: Vec<f32>,
     pub line_draws: Vec<u32>,
+    pub line_strengths: Vec<f32>,
 }
 
 pub fn generate(hf: &Heightfield, cam_pos: Vec3, cam_fwd: Vec3) -> GeometryBuffers {
-    // Pull baseline well below terrain minimum so fill polygons fully occlude
-    // each other; gap scales with VE (VE=20 → terrain ~10x taller → need deeper baseline).
-    let baseline_y = hf.elev_world_min - 50.0;
+    // Pull baseline well below terrain minimum so fill polygons fully occlude each other.
+    let baseline_y = hf.elev_world_min - 200.0;
     let cam_fwd_n = cam_fwd.normalize_or_zero();
 
     // Altitude-driven far-cull: camera y is world-space (sea = 0).
     let far_cull_dist = far_cull(cam_pos.y);
 
     // ── Collect visible rows (back-to-front) ──────────────────────────────────
-    // We need painter's order: sort by forward projection, farthest first.
-    // Collect eligible rows first, then sort.
     let mut visible: Vec<(u32, f32, f32)> = Vec::new(); // (row, dist_z, fwd_proj)
 
     for row in 0..hf.height {
@@ -159,18 +161,22 @@ pub fn generate(hf: &Heightfield, cam_pos: Vec3, cam_fwd: Vec3) -> GeometryBuffe
 
     // ── Emit geometry ─────────────────────────────────────────────────────────
     let est_rows = visible.len();
-    // conservative per-row: max columns at coarsest col_stride for near, up to width/2
-    let col_cap = (hf.width / 2 + 2) as usize;
+    let col_cap = (hf.width / 32 + 2) as usize;
     let cap = est_rows * col_cap * 2 * 3;
     let mut fill_verts: Vec<f32> = Vec::with_capacity(cap);
     let mut fill_draws: Vec<u32> = Vec::with_capacity(est_rows * 2);
+    let mut fill_strengths: Vec<f32> = Vec::with_capacity(cap / 3);
     let mut line_verts: Vec<f32> = Vec::with_capacity(cap / 2);
     let mut line_draws: Vec<u32> = Vec::with_capacity(est_rows * 2);
+    let mut line_strengths: Vec<f32> = Vec::with_capacity(cap / 6);
 
     for (row, dist_z, _) in &visible {
         let world_z = hf.row_z(*row);
         let band = band_of(*dist_z);
         let col_stride = STRIDES[band].1;
+
+        // Compute per-row strength (0..1): fades near far-cull AND at band outer edge.
+        let strength = row_strength(*dist_z, band, far_cull_dist);
 
         // Fill strip
         let fill_start = (fill_verts.len() / 3) as u32;
@@ -180,6 +186,10 @@ pub fn generate(hf: &Heightfield, cam_pos: Vec3, cam_fwd: Vec3) -> GeometryBuffe
         if fill_count > 0 {
             fill_draws.push(fill_start);
             fill_draws.push(fill_count);
+            // Two vertices per column (baseline + top) in fill strip.
+            for _ in 0..fill_count {
+                fill_strengths.push(strength);
+            }
         }
 
         // Line strip
@@ -190,10 +200,13 @@ pub fn generate(hf: &Heightfield, cam_pos: Vec3, cam_fwd: Vec3) -> GeometryBuffe
         if line_count > 0 {
             line_draws.push(line_start);
             line_draws.push(line_count);
+            for _ in 0..line_count {
+                line_strengths.push(strength);
+            }
         }
     }
 
-    GeometryBuffers { fill_verts, fill_draws, line_verts, line_draws }
+    GeometryBuffers { fill_verts, fill_draws, fill_strengths, line_verts, line_draws, line_strengths }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -207,6 +220,44 @@ fn band_of(dist_z: f32) -> usize {
         }
     }
     BANDS.len() - 1
+}
+
+/// Compute per-row strength in [0..1].
+///
+/// Fades toward 0 at:
+///   (a) the far-cull boundary (FAR_FADE_MARGIN before it)
+///   (b) the outer edge of this row's band (BAND_OUTER_FADE wide ramp)
+///
+/// This eliminates the rushing far-edge pop (far-fade) and the diagonal density
+/// seam where coarser bands take over from finer ones (band outer-fade).
+#[inline]
+fn row_strength(dist_z: f32, band: usize, far_cull_dist: f32) -> f32 {
+    // Far-fade: linear ramp from 1→0 over FAR_FADE_MARGIN before hard cull.
+    let far_fade_start = (far_cull_dist - FAR_FADE_MARGIN).max(0.0);
+    let far_strength = if dist_z >= far_cull_dist {
+        0.0
+    } else if dist_z > far_fade_start {
+        1.0 - (dist_z - far_fade_start) / FAR_FADE_MARGIN
+    } else {
+        1.0
+    };
+
+    // Band outer-fade: rows near the outer boundary of their band fade toward 0
+    // so they blend with the next coarser band that takes over beyond this threshold.
+    let band_outer = BANDS[band]; // outer threshold for this band (except last)
+    let band_outer_fade_strength = if band == BANDS.len() - 1 || band_outer == f32::MAX {
+        // Last (infinite) band: no outer fade (hard cull handles it via far_strength).
+        1.0
+    } else {
+        let fade_start = (band_outer - BAND_OUTER_FADE).max(0.0);
+        if dist_z > fade_start {
+            1.0 - (dist_z - fade_start) / BAND_OUTER_FADE
+        } else {
+            1.0
+        }
+    };
+
+    far_strength.min(band_outer_fade_strength).clamp(0.0, 1.0)
 }
 
 /// Emit vertices for one row into `out`.

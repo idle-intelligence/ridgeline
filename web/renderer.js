@@ -1,7 +1,48 @@
 // WebGL2 renderer for ridgeline Joy Division strips.
 // Receives geometry from the Engine (or mock) and draws fill strips + ridge lines.
+//
+// Per-vertex strength fading:
+//   Core emits a parallel Float32Array (fill_strengths / line_strengths) with one f32
+//   per vertex in [0..1]. The vertex shader passes it to the fragment shader, which
+//   multiplies the color alpha by strength. Alpha blending (SRC_ALPHA, ONE_MINUS_SRC_ALPHA)
+//   dissolves far terrain and band-edge seams into the background gracefully.
+//   Painter's back-to-front order (guaranteed by core) is required for correct blending.
 
 const VERT_SRC = `#version 300 es
+precision highp float;
+uniform mat4 u_mvp;
+in vec3 a_pos;
+in float a_strength;
+out float v_strength;
+void main() {
+  gl_Position = u_mvp * vec4(a_pos, 1.0);
+  v_strength = a_strength;
+}
+`;
+
+// Fill shader: background-tinted color * strength alpha.
+const FILL_FRAG_SRC = `#version 300 es
+precision mediump float;
+uniform vec4 u_color;
+in float v_strength;
+out vec4 out_color;
+void main() {
+  out_color = vec4(u_color.rgb, u_color.a * v_strength);
+}
+`;
+
+const LINE_FRAG_SRC = `#version 300 es
+precision mediump float;
+uniform vec4 u_color;
+in float v_strength;
+out vec4 out_color;
+void main() {
+  out_color = vec4(u_color.rgb, u_color.a * v_strength);
+}
+`;
+
+// Aircraft uses a fixed-alpha shader (no per-vertex strength needed).
+const AIRCRAFT_VERT_SRC = `#version 300 es
 precision highp float;
 uniform mat4 u_mvp;
 in vec3 a_pos;
@@ -10,18 +51,7 @@ void main() {
 }
 `;
 
-// Fill shader: background-tinted color for the triangle-strip bodies.
-// A very slight depth offset is baked into the fill vertices by core; JS just draws them.
-const FILL_FRAG_SRC = `#version 300 es
-precision mediump float;
-uniform vec4 u_color;
-out vec4 out_color;
-void main() {
-  out_color = u_color;
-}
-`;
-
-const LINE_FRAG_SRC = `#version 300 es
+const AIRCRAFT_FRAG_SRC = `#version 300 es
 precision mediump float;
 uniform vec4 u_color;
 out vec4 out_color;
@@ -75,50 +105,72 @@ export class Renderer {
     if (!gl) throw new Error('WebGL2 not available in this browser.');
     this.gl = gl;
 
-    this.fillProg = linkProgram(gl, VERT_SRC, FILL_FRAG_SRC);
-    this.lineProg = linkProgram(gl, VERT_SRC, LINE_FRAG_SRC);
+    this.fillProg     = linkProgram(gl, VERT_SRC, FILL_FRAG_SRC);
+    this.lineProg     = linkProgram(gl, VERT_SRC, LINE_FRAG_SRC);
+    this.aircraftProg = linkProgram(gl, AIRCRAFT_VERT_SRC, AIRCRAFT_FRAG_SRC);
 
-    // cache uniform/attrib locations
-    this.fillMvp   = gl.getUniformLocation(this.fillProg, 'u_mvp');
-    this.fillColor = gl.getUniformLocation(this.fillProg, 'u_color');
-    this.fillPos   = gl.getAttribLocation(this.fillProg,  'a_pos');
+    // cache uniform/attrib locations — terrain programs
+    this.fillMvp      = gl.getUniformLocation(this.fillProg, 'u_mvp');
+    this.fillColor    = gl.getUniformLocation(this.fillProg, 'u_color');
+    this.fillPos      = gl.getAttribLocation(this.fillProg,  'a_pos');
+    this.fillStrength = gl.getAttribLocation(this.fillProg,  'a_strength');
 
-    this.lineMvp   = gl.getUniformLocation(this.lineProg, 'u_mvp');
-    this.lineColor = gl.getUniformLocation(this.lineProg, 'u_color');
-    this.linePos   = gl.getAttribLocation(this.lineProg,  'a_pos');
+    this.lineMvp      = gl.getUniformLocation(this.lineProg, 'u_mvp');
+    this.lineColor    = gl.getUniformLocation(this.lineProg, 'u_color');
+    this.linePos      = gl.getAttribLocation(this.lineProg,  'a_pos');
+    this.lineStrength = gl.getAttribLocation(this.lineProg,  'a_strength');
 
-    // VAOs + VBOs for fill geometry
-    this.fillVAO = gl.createVertexArray();
-    this.fillVBO = gl.createBuffer();
+    // aircraft program
+    this.aircraftMvp   = gl.getUniformLocation(this.aircraftProg, 'u_mvp');
+    this.aircraftColor = gl.getUniformLocation(this.aircraftProg, 'u_color');
+    this.aircraftPos   = gl.getAttribLocation(this.aircraftProg,  'a_pos');
+
+    // VAOs + VBOs for fill geometry (pos + strength, interleaved per-vertex)
+    // Layout: pos VBO (float32 xyz) + separate strength VBO (float32)
+    this.fillVAO      = gl.createVertexArray();
+    this.fillVBO      = gl.createBuffer();
+    this.fillStrVBO   = gl.createBuffer();
     gl.bindVertexArray(this.fillVAO);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.fillVBO);
     gl.enableVertexAttribArray(this.fillPos);
     gl.vertexAttribPointer(this.fillPos, 3, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.fillStrVBO);
+    gl.enableVertexAttribArray(this.fillStrength);
+    gl.vertexAttribPointer(this.fillStrength, 1, gl.FLOAT, false, 0, 0);
     gl.bindVertexArray(null);
 
     // VAOs + VBOs for line geometry
-    this.lineVAO = gl.createVertexArray();
-    this.lineVBO = gl.createBuffer();
+    this.lineVAO      = gl.createVertexArray();
+    this.lineVBO      = gl.createBuffer();
+    this.lineStrVBO   = gl.createBuffer();
     gl.bindVertexArray(this.lineVAO);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.lineVBO);
     gl.enableVertexAttribArray(this.linePos);
     gl.vertexAttribPointer(this.linePos, 3, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.lineStrVBO);
+    gl.enableVertexAttribArray(this.lineStrength);
+    gl.vertexAttribPointer(this.lineStrength, 1, gl.FLOAT, false, 0, 0);
     gl.bindVertexArray(null);
 
     // VAO + VBO for aircraft wireframe (static geometry, uploaded once)
     this.aircraftVAO       = gl.createVertexArray();
     this.aircraftVBO       = gl.createBuffer();
-    this.aircraftIBO       = gl.createBuffer(); // index buffer for gl.LINES
-    this.aircraftLineCount = 0; // number of indices
+    this.aircraftIBO       = gl.createBuffer();
+    this.aircraftLineCount = 0;
     gl.bindVertexArray(this.aircraftVAO);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.aircraftVBO);
-    gl.enableVertexAttribArray(this.linePos); // reuse same attrib layout
-    gl.vertexAttribPointer(this.linePos, 3, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(this.aircraftPos);
+    gl.vertexAttribPointer(this.aircraftPos, 3, gl.FLOAT, false, 0, 0);
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.aircraftIBO);
     gl.bindVertexArray(null);
 
     gl.enable(gl.DEPTH_TEST);
     gl.depthFunc(gl.LEQUAL);
+
+    // Alpha blending for per-vertex strength fade.
+    // Painter's back-to-front order (guaranteed by core) ensures correct compositing.
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
   }
 
   resize(w, h) {
@@ -164,8 +216,9 @@ export class Renderer {
     const mvp = eng.view_proj();
 
     // --- fill pass ---
-    const fillVerts = eng.fill_vertices();
-    const fillDraws = eng.fill_draws();
+    const fillVerts     = eng.fill_vertices();
+    const fillDraws     = eng.fill_draws();
+    const fillStrengths = eng.fill_strengths();
 
     gl.useProgram(this.fillProg);
     gl.uniformMatrix4fv(this.fillMvp, false, mvp);
@@ -174,14 +227,17 @@ export class Renderer {
     gl.bindVertexArray(this.fillVAO);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.fillVBO);
     gl.bufferData(gl.ARRAY_BUFFER, fillVerts, gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.fillStrVBO);
+    gl.bufferData(gl.ARRAY_BUFFER, fillStrengths, gl.DYNAMIC_DRAW);
 
     for (let i = 0; i < fillDraws.length; i += 2) {
       gl.drawArrays(gl.TRIANGLE_STRIP, fillDraws[i], fillDraws[i + 1]);
     }
 
     // --- line pass (LEQUAL so lines win over their own fill at same depth) ---
-    const lineVerts = eng.line_vertices();
-    const lineDraws = eng.line_draws();
+    const lineVerts     = eng.line_vertices();
+    const lineDraws     = eng.line_draws();
+    const lineStrengths = eng.line_strengths();
 
     gl.useProgram(this.lineProg);
     gl.uniformMatrix4fv(this.lineMvp, false, mvp);
@@ -190,6 +246,8 @@ export class Renderer {
     gl.bindVertexArray(this.lineVAO);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.lineVBO);
     gl.bufferData(gl.ARRAY_BUFFER, lineVerts, gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.lineStrVBO);
+    gl.bufferData(gl.ARRAY_BUFFER, lineStrengths, gl.DYNAMIC_DRAW);
 
     for (let i = 0; i < lineDraws.length; i += 2) {
       gl.drawArrays(gl.LINE_STRIP, lineDraws[i], lineDraws[i + 1]);
@@ -197,12 +255,12 @@ export class Renderer {
 
     // --- aircraft pass ---
     if (this.aircraftLineCount > 0) {
-      const modelMat  = eng.model_matrix();          // Float32Array(16), col-major
-      const aircraftMvp = mat4Mul(mvp, modelMat);    // view_proj * model_matrix
+      const modelMat    = eng.model_matrix();
+      const aircraftMvp = mat4Mul(mvp, modelMat);
 
-      gl.useProgram(this.lineProg);
-      gl.uniformMatrix4fv(this.lineMvp, false, aircraftMvp);
-      gl.uniform4fv(this.lineColor, PALETTE.aircraft);
+      gl.useProgram(this.aircraftProg);
+      gl.uniformMatrix4fv(this.aircraftMvp, false, aircraftMvp);
+      gl.uniform4fv(this.aircraftColor, PALETTE.aircraft);
 
       gl.bindVertexArray(this.aircraftVAO);
       gl.drawElements(gl.LINES, this.aircraftLineCount, gl.UNSIGNED_INT, 0);

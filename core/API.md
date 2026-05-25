@@ -56,7 +56,7 @@ Mouse drives freelook only (`set_look`); flight controls are keyboard-only.
 
 ## Camera (third-person chase)
 The camera is positioned behind and above the ship in ship-local space:
-`cam_pos = ship_pos + ship_orientation * (0, CHASE_UP=8, CHASE_BACK=35)`.
+`cam_pos = ship_pos + ship_orientation * (0, CHASE_UP=30, CHASE_BACK=120)`.
 View direction = ship orientation + freelook offset (`set_look`). Flight physics
 (`phys.position`, `phys.orientation`) are the **ship** transform; the camera
 offset is view-only.
@@ -70,7 +70,7 @@ offset is view-only.
 - `eng.model_matrix()` → `Float32Array` length 16, **column-major**.
   = `translate(ship_pos) * rotate(ship_orientation)`. No scale baked in.
   Pass as the model matrix; multiply `view_proj * model_matrix` in JS to get MVP.
-- `eng.aircraft_scale()` → `f32` = 3.5. Scale to apply to the normalized aircraft
+- `eng.aircraft_scale()` → `f32` = 14.0. Scale to apply to the normalized aircraft
   mesh (nose-to-tail ≈ 1 wu) to reach world units. Web applies this when uploading
   vertex positions from `aircraft.json`.
 
@@ -82,13 +82,22 @@ algorithm yields the layered ridge occlusion.
   per visible row: alternating baseline vertex / profile vertex along the latitude line.
 - `eng.fill_draws()` → `Uint32Array`, flat pairs `[start0,count0, start1,count1, ...]` in
   back-to-front order. JS issues `gl.drawArrays(gl.TRIANGLE_STRIP, start, count)` per pair.
+- `eng.fill_strengths()` → `Float32Array`, one f32 per vertex, parallel to `fill_vertices()`.
+  Values in [0..1]. Multiply fill color alpha by this in the fragment shader.
+  Ramps to 0 near the far-cull boundary (eliminates far speckle pop-in) and near each LOD
+  band's outer edge (eliminates the diagonal density seam). Requires alpha blending enabled.
 - `eng.line_vertices()` → `Float32Array`, packed `[x,y,z, ...]`. The bright ridge polyline
   (top profile only) per visible row.
 - `eng.line_draws()` → `Uint32Array`, flat pairs `[start,count, ...]`, back-to-front. JS issues
   `gl.drawArrays(gl.LINE_STRIP, start, count)` per pair.
+- `eng.line_strengths()` → `Float32Array`, one f32 per vertex, parallel to `line_vertices()`.
+  Same fade semantics as `fill_strengths()`. Apply to ridge line alpha.
 
 Indices in `fill_draws`/`line_draws` are VERTEX indices into the respective vertex array
 (not byte offsets). Returned typed arrays are copies; valid until the next `step`.
+
+**Alpha blending contract**: enable `gl.BLEND` with `gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)`.
+Back-to-front painter's order (guaranteed by core) is required for correct compositing.
 
 ## Debug getters (optional, for HUD)
 - `eng.altitude()` → f32 (meters above local baseline)
