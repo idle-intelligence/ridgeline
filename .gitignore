@@ -1,0 +1,20 @@
+# Rust
+/core/target
+**/*.rs.bk
+
+# wasm-pack output (built artifact, regenerated)
+/core/pkg
+/web/pkg
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# SRTM raw download cache (we commit the baked heightfield, not raw tiles)
+/data/bake/cache/
+/data/srtm-cache/
+
+# OS
+.DS_Store
