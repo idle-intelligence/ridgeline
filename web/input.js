@@ -13,8 +13,10 @@
 //   CtrlLeft/Right    → throttle down
 //   Space (held)      → afterburner
 //   Mouse X/Y         → freelook yaw/pitch (set_look, view-only)
+//   Touch (1 finger)  → freelook yaw/pitch (set_look, view-only)
 
 const MOUSE_SENSITIVITY = 0.003; // radians per pixel
+const TOUCH_SENSITIVITY = 2.2;   // touch px scaled into mouse-px units (comfortable swipe = useful pan)
 const KEY_PITCH_RATE = 1.6;      // rad/s
 const KEY_ROLL_RATE  = 2.5;      // rad/s
 const RUDDER_RATE    = 0.5;      // rad/s for yaw keys
@@ -26,6 +28,9 @@ export class InputHandler {
     this._dX = 0;
     this._dY = 0;
     this._locked = false;
+    this._touchId = null; // identifier of the active look touch
+    this._touchX = 0;
+    this._touchY = 0;
 
     window.addEventListener('keydown', e => {
       this.keys.add(e.code);
@@ -51,6 +56,48 @@ export class InputHandler {
     canvas.addEventListener('click', () => {
       if (!this._locked) canvas.requestPointerLock();
     });
+
+    // --- Touch freelook (single finger drag = camera look, view-only) ---
+    // Feeds the SAME _dX/_dY accumulators the mouse uses, scaled into
+    // mouse-pixel units so set_look() sees one consistent convention.
+    // Drag finger right → look right; drag finger down → look down.
+    canvas.addEventListener('touchstart', e => {
+      e.preventDefault();
+      if (this._touchId === null && e.changedTouches.length > 0) {
+        const t = e.changedTouches[0];
+        this._touchId = t.identifier;
+        this._touchX = t.clientX;
+        this._touchY = t.clientY;
+      }
+    }, { passive: false });
+
+    canvas.addEventListener('touchmove', e => {
+      e.preventDefault();
+      if (this._touchId === null) return;
+      for (const t of e.changedTouches) {
+        if (t.identifier !== this._touchId) continue;
+        const dx = t.clientX - this._touchX;
+        const dy = t.clientY - this._touchY;
+        this._touchX = t.clientX;
+        this._touchY = t.clientY;
+        // Mouse uses lookDX = -dX*sens (positive = look right). Negate dx so
+        // dragging right looks right; leave dy so dragging down looks down.
+        this._dX += -dx * TOUCH_SENSITIVITY;
+        this._dY +=  dy * TOUCH_SENSITIVITY;
+      }
+    }, { passive: false });
+
+    const endTouch = e => {
+      e.preventDefault();
+      for (const t of e.changedTouches) {
+        if (t.identifier === this._touchId) {
+          this._touchId = null;
+          break;
+        }
+      }
+    };
+    canvas.addEventListener('touchend', endTouch, { passive: false });
+    canvas.addEventListener('touchcancel', endTouch, { passive: false });
   }
 
   // Returns [thrust, 0, 0, pitch, yaw, roll, 0, afterburner] for eng.set_input().

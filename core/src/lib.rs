@@ -27,13 +27,14 @@ const CHASE_BACK: f32 = 28.0;
 /// Tiny against a 6000 wu planet — a small foreground silhouette.
 pub const AIRCRAFT_SCALE: f32 = 2.2;
 
-/// Spawn: cruising LEVEL inside the atmosphere over the north-Indian plains
-/// (lat 24°N, lon 84°E), heading NORTH so the Himalaya / Tibetan-plateau wall (terrain
-/// rising to ~450–570 wu a few hundred km ahead) fills the view. Cruise altitude is set
-/// above the local plains but low enough that the curved horizon + terrain sit in frame
-/// (horizon dip ≈ acos(R/(R+alt)) must stay within the ~22° half-FOV).
+/// Spawn: cruising LEVEL inside the atmosphere over the central Sahara
+/// (lat 24°N, lon 12°E), heading NORTH so flying forward the view crosses the Sahara →
+/// the Mediterranean coastline → Italy / Europe — recognizable coastlines unfolding
+/// ahead. North Africa is low/flat, so the cruise altitude clears terrain easily. Cruise
+/// altitude is low enough that the curved horizon sits in frame (horizon dip ≈
+/// acos(R/(R+alt)) must stay within the ~22° half-FOV).
 const SPAWN_LAT: f32 = 24.0;
-const SPAWN_LON: f32 = 84.0;
+const SPAWN_LON: f32 = 12.0;
 /// Cruise altitude above the sea-level sphere (wu). Above the local plains, below the
 /// FOV horizon limit so the planet + horizon are visible ahead in level flight.
 const CRUISE_ALT: f32 = 500.0;
