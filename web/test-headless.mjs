@@ -213,7 +213,10 @@ async function run() {
   // and be horizontally centered. In a LEVEL in-atmosphere cruise the terrain correctly
   // sits in the lower frame near the horizon (sky above), so the vertical centroid is
   // lower-middle — not a centered from-afar disc.
-  if (disc.coverage > 0.02 && disc.coverage < 0.85 &&
+  // At realistic vertical exaggeration (VERT_EXAGGERATION = 1) the relief is subtle and the
+  // globe limb sits low in the cruise frame, so terrain covers a smaller pixel fraction than
+  // it did under the old dramatic relief — hence the modest lower bound.
+  if (disc.coverage > 0.01 && disc.coverage < 0.85 &&
       disc.aspect > 0.5 &&
       disc.cxFrac > 0.2 && disc.cxFrac < 0.8 &&
       disc.cyFrac > 0.1 && disc.cyFrac < 0.8) {

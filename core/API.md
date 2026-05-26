@@ -13,8 +13,10 @@ The world is a **globe of stacked latitude rings** centered at the origin. Each 
 cell (row → latitude φ, col → longitude λ, elev_m) maps to a 3D point on a sphere:
 
 - `R_WORLD` = planet radius = **6000.0** world units.
-- `VERT_SCALE` = **0.11** wu per meter of elevation (vertical exaggeration). Max elevation
-  (7712 m) bulges ≈ 848 wu (~14% of R_WORLD) so continents/mountains read dramatically.
+- `VERT_EXAGGERATION` = **1.0** (multiple of true scale). `VERT_SCALE = (R_WORLD /
+  EARTH_RADIUS_M) * VERT_EXAGGERATION ≈ 0.0009418` wu per meter. At 1× (realistic) Everest
+  (8849 m) ≈ 8.3 wu — a tiny bump; the globe is essentially smooth, with land read by the
+  normalized elevation→brightness. (The old dramatic look was VERT_EXAGGERATION ≈ 117.)
 - `h_wu = elev_m * VERT_SCALE`, `r = R_WORLD + h_wu`.
 - Cartesian (north pole = **+Y**): `x = r·cosφ·cosλ`, `y = r·sinφ`, `z = -r·cosφ·sinλ`
   (longitude handedness flipped so EAST renders to the RIGHT with north up),

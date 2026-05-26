@@ -11,6 +11,8 @@
 /web/package-lock.json
 /web/test-screenshot.png
 /web/test-dive.png
+/web/ve-*.png
+/web/ve-capture.mjs
 
 # Python
 __pycache__/

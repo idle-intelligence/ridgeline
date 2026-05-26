@@ -10,8 +10,8 @@
 //
 // φ in [-90,90]°, λ in [-180,180]°. row 0 = +90° north, col 0 = -180° west.
 //
-// VERT_SCALE: max elevation (7712 m) should bulge ~8–12% of R_world (~500–700 wu).
-//   VERT_SCALE = 0.08 → Everest-class peak ≈ 617 wu (~10% of R_world).
+// VERT_SCALE = (R_world / EARTH_RADIUS_M) * VERT_EXAGGERATION. At VERT_EXAGGERATION = 1.0
+//   (realistic) Everest (8849 m) ≈ 8.3 wu — a tiny bump on the 6000-wu globe.
 //
 // Each ROW (constant latitude) is a parallel ring around the globe; as λ sweeps it
 // traces the ring with elevation bumps. Land bulges out, ocean (h=0) is a smooth
@@ -22,12 +22,18 @@ use glam::Vec3;
 /// Planet radius in world units.
 pub const R_WORLD: f32 = 6000.0;
 
-/// Vertical exaggeration: world units per meter of elevation.
-/// 0.11 → Everest-class peak (7712 m) ≈ 848 wu (~14% of R_world) — dramatic relief.
-pub const VERT_SCALE: f32 = 0.11;
-
 /// Earth radius in meters — for HUD horizontal scale (meters per world unit).
 pub const EARTH_RADIUS_M: f32 = 6_371_000.0;
+
+/// Vertical exaggeration as a MULTIPLE of true (1:1) scale. THE one knob to tune.
+///   1.0  = realistic — relief is to scale with the globe (Everest ≈ 8.3 wu, a tiny bump).
+///   ~117 = the old dramatic look (when VERT_SCALE was hardcoded to 0.11).
+pub const VERT_EXAGGERATION: f32 = 1.0;
+
+/// World units per meter of elevation.
+/// True (1:1) scale is `R_WORLD / EARTH_RADIUS_M ≈ 0.0009418` wu/m; VERT_SCALE is that
+/// scaled by VERT_EXAGGERATION. At 1× Everest (8849 m) ≈ 8.3 wu.
+pub const VERT_SCALE: f32 = (R_WORLD / EARTH_RADIUS_M) * VERT_EXAGGERATION;
 
 /// Meters of real surface per world unit (so the globe maps to Earth's true size).
 /// m_per_wu = EARTH_RADIUS_M / R_WORLD ≈ 1061.8 m/wu.
