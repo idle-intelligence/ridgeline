@@ -205,7 +205,8 @@ async function main() {
     const latVal = ll[0], lonVal = ll[1];
     const latStr = `${Math.abs(latVal).toFixed(1)}°${latVal >= 0 ? 'N' : 'S'}`;
     const lonStr = `${Math.abs(lonVal).toFixed(1)}°${lonVal >= 0 ? 'E' : 'W'}`;
-    hud.textContent = `${kmh} km/h   ALT ${alt}m   ${latStr} ${lonStr}`;
+    const mode = ['SPACE', 'PLANETARY', 'ATMO'][eng.flight_mode()] || 'SPACE';
+    hud.textContent = `${kmh} km/h   ALT ${alt}m   ${latStr} ${lonStr} · ${mode}`;
 
     requestAnimationFrame(frame);
   }
