@@ -29,7 +29,10 @@ use crate::heightfield::R_WORLD;
 
 const MAX_THRUST: f32 = 2200.0;  // wu/s² at full throttle
 const THROTTLE_RATE: f32 = 2.5;  // s⁻¹  — lag to reach target throttle
-const IDLE_THROTTLE: f32 = 0.1;  // minimum throttle when no thrust input
+const IDLE_THROTTLE: f32 = 0.3;  // hands-off cruise throttle: with no thrust input the
+                                 // engine settles here, sustaining a steady level cruise
+                                 // (~cruise speed) so the craft holds altitude rather than
+                                 // bleeding speed and sinking.
 
 const BOOST_SCALE: f32 = 3.0;    // terminal ~3000 wu/s
 const FTL_SCALE: f32 = 9.0;      // terminal ~9000 wu/s — circumnavigate in a few s
@@ -72,6 +75,12 @@ const LIFT_AUTHORITY: f32 = 1.0;
 /// the wings resist vertical (radial) motion in the atmosphere so a level heading cruises
 /// flat. Strong enough to hold level, weak enough that nose-up/down thrust overrides it.
 const RADIAL_DAMP: f32 = 40.0;
+
+/// Hands-off auto-level rate (s⁻¹): how fast the nose settles onto the level heading when
+/// no pitch is commanded, so level cruise holds altitude over the curved planet. High
+/// enough to effectively track the horizon each frame (the leveling must be near-complete
+/// or thrust slowly tips the craft into a climb). Only active in the atmosphere.
+const AUTO_LEVEL_RATE: f32 = 60.0;
 
 /// Tiny epsilon above the sea-level sphere for the anti-fall-through floor (wu).
 const FLOOR_EPS: f32 = 0.5;
@@ -142,6 +151,39 @@ impl Physics {
         let dq_yaw = Quat::from_axis_angle(Vec3::Y, y * dt);
         let dq_roll = Quat::from_axis_angle(Vec3::NEG_Z, r * dt);
         self.orientation = (self.orientation * dq_yaw * dq_pitch * dq_roll).normalize();
+
+        // --- Arcade auto-level (hands-off altitude-hold) ---
+        // Flying a fixed world orientation tangent to a CURVED planet makes the nose drift
+        // nose-up relative to the LOCAL horizon (the surface falls away beneath you), which
+        // would otherwise command an ever-steeper climb (a runaway, since thrust then pushes
+        // outward). When the player isn't pitching AND is in the atmosphere, the wings settle
+        // the nose onto the LEVEL heading — the direction of travel with its radial
+        // (climb/sink) component removed — so level cruise truly holds altitude as the planet
+        // curves beneath. Active pitch input bypasses this, so nose-up still climbs and
+        // nose-down dives; in space (no air) it's a no-op → free ballistic flight.
+        if pitch.abs() < 1e-3 {
+            let r_dist0 = self.position.length().max(1e-3);
+            let radial0 = self.position / r_dist0;
+            let d0 = air_density(r_dist0);
+            if d0 > 0.0 {
+                let nose0 = self.orientation * Vec3::NEG_Z;
+                let mut target = self.velocity - radial0 * self.velocity.dot(radial0);
+                if target.length_squared() < 1e-6 {
+                    target = nose0 - radial0 * nose0.dot(radial0);
+                }
+                let target = target.normalize_or_zero();
+                if target != Vec3::ZERO {
+                    // Snap the nose onto the level heading (strong arcade leveling); the
+                    // rotation that takes the old nose there also carries the roll/up with it.
+                    let frac = (AUTO_LEVEL_RATE * dt).clamp(0.0, 1.0);
+                    let new_nose = nose0.lerp(target, frac).normalize_or_zero();
+                    if new_nose != Vec3::ZERO {
+                        let relevel = Quat::from_rotation_arc(nose0, new_nose);
+                        self.orientation = (relevel * self.orientation).normalize();
+                    }
+                }
+            }
+        }
 
         // --- Throttle ---
         let throttle_target = if thrust > 0.0 {
@@ -276,7 +318,10 @@ mod scenarios {
             let view = Mat4::look_to_rh(Vec3::ZERO, nose, radial);
             let rot3 = Mat3::from_mat4(view).transpose();
             p.orientation = Quat::from_mat3(&rot3).normalize();
-            p.step(dt, thrust, 0.0, 0.0, 0.0, 0.0, ftl);
+            // Pass the pitch_offset as a (sign-carrying) pitch INPUT so the hands-off
+            // auto-level only engages when the pilot is holding level (offset 0); a held
+            // climb/descent attitude is preserved.
+            p.step(dt, thrust, pitch_offset, 0.0, 0.0, 0.0, ftl);
         }
     }
 
@@ -344,6 +389,7 @@ mod scenarios {
         let speed = 1000.0;
         p.velocity = look * speed;
         p.speed = speed;
+        p.throttle = 0.0; // pure coast: cut the engine (no residual idle thrust)
         let dir0 = p.velocity.normalize();
         run(&mut p, 5.0, -1.0, 0.0, false);
         let dir1 = p.velocity.normalize();
@@ -390,6 +436,77 @@ mod scenarios {
         println!("[floor] min r = {:.2} (R_WORLD={:.0})", min_r, R_WORLD);
         assert!(min_r >= R_WORLD, "craft sank below the sea-level sphere: {min_r}");
         assert!(p.position.length().is_finite());
+    }
+
+    // Replicate the engine spawn: level cruise at CRUISE_ALT over (27N,86E), north
+    // heading, seeded velocity + throttle. With NO input it must HOLD altitude (not
+    // plummet to the floor, not rocket to space) and hold speed.
+    fn spawn_cruise() -> Physics {
+        let cruise_alt = 500.0_f32;
+        let cruise_speed = 450.0_f32;
+        let cruise_throttle = 0.30_f32;
+        // sphere_point(24,84, alt): radial dir over the north-Indian plains.
+        let pos = crate::heightfield::Heightfield::sphere_point(24.0, 84.0, cruise_alt);
+        let up = pos.normalize();
+        let mut fwd = Vec3::Y - up * Vec3::Y.dot(up);
+        fwd = fwd.normalize();
+        let view = Mat4::look_to_rh(Vec3::ZERO, fwd, up);
+        let rot3 = Mat3::from_mat4(view).transpose();
+        let mut p = Physics::new(pos, fwd);
+        p.orientation = Quat::from_mat3(&rot3).normalize();
+        p.velocity = fwd * cruise_speed;
+        p.speed = cruise_speed;
+        p.throttle = cruise_throttle;
+        p
+    }
+
+    #[test]
+    fn h_spawn_cruise_holds_altitude() {
+        let mut p = spawn_cruise();
+        let a0 = alt(&p);
+        let s0 = p.speed;
+        let (mut amin, mut amax) = (a0, a0);
+        let (mut smin, mut smax) = (s0, s0);
+        let dt = 1.0 / 60.0;
+        for s in 0..20 {
+            for _ in 0..60 {
+                // NO input: thrust=0 (idle target handled internally), no pitch/yaw/roll.
+                p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false);
+            }
+            let a = alt(&p);
+            amin = amin.min(a);
+            amax = amax.max(a);
+            smin = smin.min(p.speed);
+            smax = smax.max(p.speed);
+            println!("[spawn] t={}s alt={:.0} speed={:.0}", s + 1, a, p.speed);
+        }
+        println!("[spawn] alt start={:.0} min={:.0} max={:.0} | speed start={:.0} min={:.0} max={:.0}",
+            a0, amin, amax, s0, smin, smax);
+        // Tight band: holds within ±120 wu of spawn alt, never near floor or atmosphere top.
+        assert!((amin - a0).abs() < 120.0, "spawn cruise sank: min={amin} (start {a0})");
+        assert!((amax - a0).abs() < 120.0, "spawn cruise climbed: max={amax} (start {a0})");
+        assert!(amin > 200.0, "spawn cruise dropped toward floor: {amin}");
+        assert!(amax < ATMOSPHERE_TOP, "spawn cruise left atmosphere: {amax}");
+        // Speed steady (no runaway, no stall).
+        assert!(smin > 300.0 && smax < 700.0, "spawn speed drifted: {smin}..{smax}");
+    }
+
+    #[test]
+    fn i_spawn_pitch_down_descends_shift_space_climbs() {
+        // From the spawn state, nose-down should descend below level.
+        let a0 = alt(&spawn_cruise());
+        let mut level = spawn_cruise();
+        let mut down = spawn_cruise();
+        run_leveled(&mut level, 4.0, 0.0, 0.0, false);
+        run_leveled(&mut down, 4.0, 0.0, -0.4, false);
+        println!("[spawn-pitch] level={:.0} down={:.0} (a0={:.0})", alt(&level), alt(&down), a0);
+        assert!(alt(&down) < alt(&level), "nose-down failed to descend from spawn");
+
+        // Shift+Space (full throttle + ftl, nose up) should climb out toward/into space.
+        let mut climb = spawn_cruise();
+        run_leveled(&mut climb, 6.0, 1.0, 0.6, true);
+        println!("[spawn-climb] alt={:.0} (ATM_TOP={:.0})", alt(&climb), ATMOSPHERE_TOP);
+        assert!(alt(&climb) > a0 + 200.0, "Shift+Space failed to climb from spawn");
     }
 
     #[test]

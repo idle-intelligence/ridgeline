@@ -10,6 +10,7 @@
 /web/node_modules
 /web/package-lock.json
 /web/test-screenshot.png
+/web/test-dive.png
 
 # Python
 __pycache__/

@@ -27,25 +27,45 @@ const CHASE_BACK: f32 = 28.0;
 /// Tiny against a 6000 wu planet — a small foreground silhouette.
 pub const AIRCRAFT_SCALE: f32 = 2.2;
 
-/// Spawn: out in space at ~2.5*R_world, sub-camera point near lat 25°N, lon 10°E
-/// (Europe / Africa / Mediterranean / Atlantic facing the camera).
-const SPAWN_LAT: f32 = 25.0;
-const SPAWN_LON: f32 = 10.0;
-const SPAWN_DIST: f32 = 3.0 * R_WORLD;
+/// Spawn: cruising LEVEL inside the atmosphere over the north-Indian plains
+/// (lat 24°N, lon 84°E), heading NORTH so the Himalaya / Tibetan-plateau wall (terrain
+/// rising to ~450–570 wu a few hundred km ahead) fills the view. Cruise altitude is set
+/// above the local plains but low enough that the curved horizon + terrain sit in frame
+/// (horizon dip ≈ acos(R/(R+alt)) must stay within the ~22° half-FOV).
+const SPAWN_LAT: f32 = 24.0;
+const SPAWN_LON: f32 = 84.0;
+/// Cruise altitude above the sea-level sphere (wu). Above the local plains, below the
+/// FOV horizon limit so the planet + horizon are visible ahead in level flight.
+const CRUISE_ALT: f32 = 500.0;
+/// Forward cruise speed (wu/s). Seeded to match the hands-off (idle-throttle) terminal at
+/// this altitude so speed stays flat with no input.
+const CRUISE_SPEED: f32 = 450.0;
+/// Throttle seeded at spawn. Equal to the idle/hands-off throttle so, with no input, the
+/// engine already sits at the level it settles to → steady cruise from frame 1.
+const CRUISE_THROTTLE: f32 = 0.30;
 
-/// Ship spawn position: along the sub-camera radial, out in space. The chase camera
-/// sits a little further out behind it; both look toward the globe center.
+/// Ship spawn position: on the cruise-altitude sphere over (SPAWN_LAT, SPAWN_LON).
 fn spawn_position() -> Vec3 {
-    // Place the ship slightly inward of the camera so the camera (further out) sees it
-    // against the globe. Camera ≈ ship + CHASE_BACK along the outward radial.
-    let radial = Heightfield::sphere_point(SPAWN_LAT, SPAWN_LON, 0.0).normalize();
-    radial * (SPAWN_DIST - CHASE_BACK)
+    Heightfield::sphere_point(SPAWN_LAT, SPAWN_LON, CRUISE_ALT)
 }
 
-/// Look direction at spawn: toward the globe center (i.e. inward, −radial).
+/// Level-flight orientation at spawn: up = radial (away from center), forward = the
+/// tangent direction pointing NORTH along the surface (perpendicular to up). Returns
+/// (forward, up) so the caller can build the basis and seed the velocity.
+fn spawn_basis() -> (Vec3, Vec3) {
+    let up = spawn_position().normalize();
+    // North-ish tangent: project the +Y (north pole) axis onto the local tangent plane.
+    let mut fwd = Vec3::Y - up * Vec3::Y.dot(up);
+    if fwd.length_squared() < 1e-6 {
+        // Near a pole: fall back to an eastward tangent.
+        fwd = Vec3::X - up * Vec3::X.dot(up);
+    }
+    (fwd.normalize(), up)
+}
+
+/// Look direction at spawn: tangent (level, horizontal), pointing north.
 fn spawn_look() -> Vec3 {
-    let radial = Heightfield::sphere_point(SPAWN_LAT, SPAWN_LON, 0.0).normalize();
-    -radial
+    spawn_basis().0
 }
 
 // Freelook clamps (radians)
@@ -111,7 +131,17 @@ impl Engine {
 
         let pos = spawn_position();
         let look = spawn_look();
-        let phys = Physics::new(pos, look);
+        let mut phys = Physics::new(pos, look);
+        // Seed a stable in-atmosphere cruise: build a LEVEL orientation from the radial
+        // basis (up = radial, forward = north tangent), move forward at cruise speed, and
+        // seed the throttle that balances drag so speed + altitude hold without input.
+        let (fwd, up) = spawn_basis();
+        let view = Mat4::look_to_rh(Vec3::ZERO, fwd, up);
+        let rot3 = glam::Mat3::from_mat4(view).transpose();
+        phys.orientation = Quat::from_mat3(&rot3).normalize();
+        phys.velocity = fwd * CRUISE_SPEED;
+        phys.speed = CRUISE_SPEED;
+        phys.throttle = CRUISE_THROTTLE;
         let view_proj_mat = compute_view_proj(&phys, 0.0, 0.0, ASPECT_DEFAULT);
 
         let cam_pos = chase_cam_pos(&phys);

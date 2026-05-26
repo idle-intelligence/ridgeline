@@ -69,10 +69,14 @@ View direction = ship orientation + freelook offset (`set_look`). Flight physics
 (`phys.position`, `phys.orientation`) are the **ship** transform; the camera
 offset is view-only.
 
-**Spawn**: ship at `3.0 * R_WORLD` from center along the radial through (25°N, 10°E),
-oriented to look toward the globe center — the whole planet (Europe / Africa /
-Mediterranean / Atlantic facing the camera) is in view. The chase craft is a small
-foreground silhouette (AIRCRAFT_SCALE small vs the 6000 wu planet).
+**Spawn**: ship cruising LEVEL inside the atmosphere at `CRUISE_ALT = 500` wu over the
+north-Indian plains (24°N, 84°E), heading NORTH toward the Himalaya / Tibetan-plateau
+wall. The orientation is built from a radial basis (up = radial, forward = north
+tangent), and the craft is seeded with a forward velocity (`CRUISE_SPEED = 450` wu/s) and
+the hands-off cruise throttle (`= IDLE_THROTTLE`), so from frame 1 it holds altitude and
+speed with no input — no free-fall, no climb-out. Pitch down dives; pitch up + Shift+Space
+climbs to space. The chase craft is a small foreground silhouette against the terrain and
+curved horizon ahead (AIRCRAFT_SCALE small vs the 6000 wu planet).
 
 Projection near/far are at space scale: `Z_NEAR=1`, `Z_FAR=200000` (globe radius 6000,
 camera out to tens of thousands of wu).

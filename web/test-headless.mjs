@@ -84,6 +84,77 @@ async function run() {
 
   await page.waitForTimeout(500);
 
+  // ── Spawn view screenshot (BEFORE any stepping) ──────────────────────────────
+  // Capture the calm in-atmosphere cruise framing the player sees at spawn.
+  await page.evaluate(() => { if (window._renderer && window._eng) window._renderer.draw(window._eng); });
+  await page.screenshot({ path: join(__dir, 'test-screenshot.png') });
+  console.log('Spawn screenshot saved: web/test-screenshot.png');
+
+  // ── Spawn cruise holds altitude (NO input, just seeded cruise throttle) ──────
+  // Step ~18 s with zero input and confirm the craft holds a tight altitude band and
+  // steady speed (it must NOT plummet to the floor nor rocket to space), then confirm
+  // pitch-down descends and Shift+Space climbs out.
+  const cruise = await page.evaluate(() => {
+    const eng = window._eng;
+    eng.set_input(0, 0, 0, 0, 0, 0, 0, false);
+    const a0 = eng.altitude();
+    let amin = a0, amax = a0, smin = eng.speed(), smax = eng.speed();
+    const trace = [];
+    for (let s = 0; s < 18; s++) {
+      for (let i = 0; i < 60; i++) eng.step(1 / 60);
+      const a = eng.altitude(), sp = eng.speed();
+      amin = Math.min(amin, a); amax = Math.max(amax, a);
+      smin = Math.min(smin, sp); smax = Math.max(smax, sp);
+      trace.push(`t=${s + 1}s alt=${a.toFixed(0)} speed=${sp.toFixed(0)}`);
+    }
+    return { a0, amin, amax, smin, smax, trace };
+  });
+  console.log('CRUISE: ' + cruise.trace.join(' | '));
+  console.log(`CRUISE: alt start=${cruise.a0.toFixed(0)} band=[${cruise.amin.toFixed(0)},${cruise.amax.toFixed(0)}] ` +
+    `speed=[${cruise.smin.toFixed(0)},${cruise.smax.toFixed(0)}]`);
+  const a0 = cruise.a0;
+  if (Math.abs(cruise.amin - a0) < 150 && Math.abs(cruise.amax - a0) < 150 &&
+      cruise.amin > 200 && cruise.amax < 1500 &&
+      cruise.smin > 300 && cruise.smax < 700) {
+    console.log('PASS: spawn cruise holds altitude + speed with no input (no free-fall, no escape)');
+  } else {
+    fail(`spawn cruise did not hold: alt band [${cruise.amin.toFixed(0)},${cruise.amax.toFixed(0)}] ` +
+      `speed [${cruise.smin.toFixed(0)},${cruise.smax.toFixed(0)}]`, browser, server, logs);
+  }
+
+  // Pitch-down should descend; Shift+Space should climb out — quick sanity (fresh reloads).
+  const maneuver = await page.evaluate(() => {
+    const eng = window._eng;
+    // Reset to spawn by reloading state is not exposed; instead measure deltas from current.
+    // Pitch nose DOWN (KeyW = pitch down → negative in input mapping is handled in input.js;
+    // here we feed the raw pitch arg: -1 = nose down) for 4 s.
+    const aStart = eng.altitude();
+    eng.set_input(0, 0, 0, -1, 0, 0, 0, false);
+    for (let i = 0; i < 4 * 60; i++) eng.step(1 / 60);
+    const aDown = eng.altitude();
+    // Now Shift+Space: full thrust + afterburner, nose UP for 6 s.
+    eng.set_input(1, 0, 0, 1, 0, 0, 0, true);
+    for (let i = 0; i < 6 * 60; i++) eng.step(1 / 60);
+    const aClimb = eng.altitude();
+    return { aStart, aDown, aClimb };
+  });
+  console.log(`MANEUVER: start=${maneuver.aStart.toFixed(0)} afterPitchDown=${maneuver.aDown.toFixed(0)} ` +
+    `afterShiftSpace=${maneuver.aClimb.toFixed(0)}`);
+  if (maneuver.aDown < maneuver.aStart && maneuver.aClimb > maneuver.aDown) {
+    console.log('PASS: pitch-down descends and Shift+Space climbs out');
+  } else {
+    fail('pitch-down / Shift+Space did not behave as expected', browser, server, logs);
+  }
+
+  // Reload to restore a fresh spawn for the remaining (geometry/perf/motion) checks,
+  // which the maneuvers above would otherwise have flown out of frame.
+  await page.goto(url, { waitUntil: 'load' });
+  await page.waitForFunction(
+    () => document.getElementById('overlay').style.display === 'none',
+    { timeout: 10000 },
+  );
+  await page.waitForTimeout(300);
+
   // ── HUD populated ──────────────────────────────────────────────────────────
   const hudText = await page.$eval('#hud', el => el.textContent.trim());
   if (hudText && hudText.includes('km/h') && hudText.includes('ALT')) {
@@ -258,8 +329,8 @@ async function run() {
   }
 
   await page.evaluate(() => { const eng = window._eng; if (eng) eng.step(0.001); });
-  await page.screenshot({ path: join(__dir, 'test-screenshot.png') });
-  console.log('Final screenshot saved: web/test-screenshot.png');
+  await page.screenshot({ path: join(__dir, 'test-dive.png') });
+  console.log('Dive screenshot saved: web/test-dive.png (spawn view kept in test-screenshot.png)');
 
   await browser.close();
   server.close();
