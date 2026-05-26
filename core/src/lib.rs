@@ -382,6 +382,12 @@ impl Engine {
         self.phys.speed * M_PER_WU * 3.6
     }
 
+    /// Current flight regime by altitude: 0 = SPACE (free Newtonian), 1 = PLANETARY
+    /// (capture-zone assisted approach), 2 = ATMOSPHERE (fly-by-nose cruise).
+    pub fn flight_mode(&self) -> u8 {
+        self.phys.flight_mode()
+    }
+
     /// Sub-camera geographic position `[lat, lon]` in decimal degrees — the point on the
     /// globe directly beneath the camera (projection of cam_pos onto the sphere).
     pub fn lat_lon(&self) -> Float32Array {

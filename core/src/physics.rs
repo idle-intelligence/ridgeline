@@ -89,6 +89,39 @@ const G_SURFACE: f32 = 60.0;
 /// Tiny epsilon above the sea-level sphere for the anti-fall-through floor (wu).
 const FLOOR_EPS: f32 = 0.5;
 
+// ── Capture zone / planetary-mode assist ─────────────────────────────────────────
+/// Top of the CAPTURE ZONE as an ALTITUDE above the sea-level sphere (wu) = R_WORLD·FRAC.
+/// GENEROUS (10× the planet radius ≈ 60,000 wu ≈ 60,000 km) so returning from deep space is
+/// forgiving: anywhere below this the onboard AI starts easing the craft into a controlled
+/// approach — pointing roughly at the planet reliably gets you captured, no pixel-perfect aim.
+const CAPTURE_FRAC: f32 = 10.0;
+pub const CAPTURE_ALT: f32 = R_WORLD * CAPTURE_FRAC;
+
+/// Managed approach speed (wu/s) the effective cap bleeds down to as assist → 1 (i.e. as you
+/// descend through the capture zone). Brisk but controllable (well under V_CAP) so you
+/// DECELERATE smoothly on approach instead of screaming past the planet.
+const APPROACH_SPEED: f32 = 2000.0;
+
+/// CAPTURE / planetary-mode assist factor in [0,1] from altitude above the sea-level sphere:
+///   * deep space (alt > CAPTURE_ALT)            → 0  : fully Newtonian/free (coast, orbit, escape).
+///   * capture zone (ATMOSPHERE_TOP..CAPTURE_ALT) → smoothstep 1→0 as you climb : assist ramps in.
+///   * atmosphere (alt < ATMOSPHERE_TOP)         → 1  : full fly-by-nose cruise.
+///
+/// At the atmosphere boundary assist == 1, matching the atmospheric regime, so the handoff to
+/// the density-blended fly-by-nose cruise is seamless (no discontinuity).
+pub fn assist(r: f32) -> f32 {
+    let alt = r - R_WORLD;
+    if alt <= ATMOSPHERE_TOP {
+        return 1.0;
+    }
+    if alt >= CAPTURE_ALT {
+        return 0.0;
+    }
+    let t = (alt - ATMOSPHERE_TOP) / (CAPTURE_ALT - ATMOSPHERE_TOP); // 0..1 up the zone
+    let s = t * t * (3.0 - 2.0 * t); // smoothstep 0→1
+    1.0 - s // 1 at the atmosphere boundary, 0 at CAPTURE_ALT
+}
+
 /// Air density 1.0 at sea level → 0.0 at ATMOSPHERE_TOP (smoothstep on altitude), 0 in
 /// space. `r` is distance from planet center in wu. This is the blend weight between the
 /// fly-by-nose (atmosphere) and Newtonian (space) regimes.
@@ -166,6 +199,7 @@ impl Physics {
         let r_dist = self.position.length().max(1e-3);
         let radial_out = self.position / r_dist; // unit, away from center
         let density = air_density(r_dist); // 1 = full atmosphere, 0 = space
+        let assist = assist(r_dist); // 1 = atmosphere, ramps 0 in capture zone, 0 deep space
         let g = G_SURFACE * (R_WORLD / r_dist).powi(2);
         let nose = self.orientation * Vec3::NEG_Z;
 
@@ -242,14 +276,46 @@ impl Physics {
             v
         };
 
-        // ===== SPACE term: Newtonian =====
-        // velocity += gravity·dt + nose·thrust_accel·dt; capped. No direction steering.
+        // ===== SPACE term: Newtonian, with CAPTURE-ZONE assist =====
+        // Deep space (assist == 0): pure inertia — velocity += gravity·dt + nose·thrust·dt,
+        // no direction steering (coast/orbit/escape unchanged). In the capture zone the
+        // onboard AI eases the craft into a controlled approach, ramping in by `assist`:
+        //   1. fly-by-nose STEERING ramps in (slerp velocity dir → nose at TURN_RATE·assist),
+        //      so pointing the nose at the planet (or down) actually brings you in — and
+        //      pointing OUTWARD + afterburner still lets you climb back out (assist, not prison).
+        //   2. the effective speed CAP bleeds from V_CAP down to APPROACH_SPEED, so you
+        //      DECELERATE smoothly toward the planet instead of overshooting.
+        // At assist == 1 (atmosphere boundary) this matches the atmospheric regime, so the
+        // density blend below hands off with no discontinuity.
         let space_vel = {
-            let thrust_accel = (v_target - self.velocity.length()).max(0.0) / dt.max(1e-4);
-            let thrust_accel = thrust_accel.min(SPEED_ACCEL * 4.0); // bounded thrust authority
             let mut v = self.velocity;
             v += -radial_out * (g * dt); // inverse-square gravity
+            let cur = v.length();
+            // Thrust along the nose toward v_target (bounded), as before.
+            let thrust_accel =
+                ((v_target - cur).max(0.0) / dt.max(1e-4)).min(SPEED_ACCEL * 4.0);
             v += nose * (thrust_accel * dt); // thrust along the nose
+
+            // --- Capture-zone assist (ramps in by `assist`) ---
+            if assist > 0.0 {
+                // 1. Steer the velocity DIRECTION toward the nose at TURN_RATE·assist.
+                let spd = v.length();
+                if spd > 1e-3 {
+                    let dir = v / spd;
+                    let turn = (TURN_RATE * assist * dt).clamp(0.0, 1.0);
+                    let new_dir = dir.lerp(nose, turn).normalize_or(dir);
+                    v = new_dir * spd;
+                }
+                // 2. Bleed the effective speed cap down to APPROACH_SPEED, easing (don't snap)
+                //    the current speed toward it under bounded acceleration. Only ever slows
+                //    the craft (cap ≤ V_CAP), so afterburner can still climb back out.
+                let eff_cap = V_CAP + (APPROACH_SPEED - V_CAP) * assist;
+                let spd = v.length();
+                if spd > eff_cap {
+                    let dv = (spd - eff_cap).min(SPEED_ACCEL * dt);
+                    v *= (spd - dv) / spd;
+                }
+            }
             v
         };
 
@@ -282,6 +348,20 @@ impl Physics {
         }
 
         self.speed = self.velocity.length();
+    }
+
+    /// Current flight regime by altitude: 0 = SPACE (free Newtonian, alt ≥ CAPTURE_ALT),
+    /// 1 = PLANETARY (capture-zone assisted approach, ATMOSPHERE_TOP ≤ alt < CAPTURE_ALT),
+    /// 2 = ATMOSPHERE (full fly-by-nose cruise, alt < ATMOSPHERE_TOP).
+    pub fn flight_mode(&self) -> u8 {
+        let alt = self.position.length() - R_WORLD;
+        if alt >= CAPTURE_ALT {
+            0
+        } else if alt >= ATMOSPHERE_TOP {
+            1
+        } else {
+            2
+        }
     }
 }
 
@@ -466,6 +546,134 @@ mod scenarios {
         println!("[hands-off] alt {:.0} [{:.0},{:.0}] | speed {:.0} [{:.0},{:.0}]", a0, amin, amax, s0, smin, smax);
         assert!((amin - a0).abs() < 80.0 && (amax - a0).abs() < 80.0, "altitude drifted: {amin}..{amax}");
         assert!((smax - smin) < 60.0, "speed drifted: {smin}..{smax}");
+    }
+
+    // A craft in deep space at altitude `alt`, nose + velocity pointed ROUGHLY toward the
+    // planet (origin) — offset by `aim_off` (a tangential fraction) so it isn't a pixel-perfect
+    // dead-center dive but a forgiving glancing approach, the realistic player case.
+    fn inbound_craft(alt: f32, speed: f32, throttle: f32, aim_off: f32) -> Physics {
+        let pos = Vec3::new(R_WORLD + alt, 0.0, 0.0); // radial = +X
+        let toward = -pos.normalize(); // toward center
+        let tangent = Vec3::NEG_Z; // a tangent at +X
+        let look = (toward + tangent * aim_off).normalize();
+        let mut p = Physics::new(pos, look);
+        p.velocity = look * speed;
+        p.speed = speed;
+        p.throttle = throttle;
+        p
+    }
+
+    // (i) Round-trip return: from deep space, nose at the planet + throttle on → assist
+    // engages, speed bleeds toward APPROACH_SPEED, descends into the atmosphere and settles
+    // into a STABLE cruise altitude (no overshoot/escape, no crash through the floor).
+    #[test]
+    fn i_round_trip_return() {
+        // Roughly-aimed inbound (40% tangential offset) — pointing "at the planet", not dead
+        // center — with cruise throttle so once captured it can settle into level flight.
+        let mut p = inbound_craft(100_000.0, V_CAP, 0.6, 0.4);
+        let dt = 1.0 / 60.0;
+        let mut entered_zone = false;
+        let mut speed_in_atmo = f32::INFINITY;
+        let (mut amin, mut amax) = (f32::INFINITY, 0.0_f32);
+        let mut t = 0.0;
+        for i in 0..(400.0 / dt) as usize {
+            // The pilot keeps the nose pointed roughly AT the planet while still in space /
+            // the upper capture zone (re-aim toward center), then hands off to auto-level once
+            // inside the atmosphere. This is the documented intent: point at the planet → the
+            // AI brings you in. (Modeled by re-seeding orientation toward the origin.)
+            if alt(&p) > ATMOSPHERE_TOP {
+                let look = -p.position.normalize();
+                p.orientation = Physics::new(p.position, look).orientation;
+            }
+            // No FTL: AI manages the approach. Throttle held (gives a cruise target once down).
+            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false);
+            t += dt;
+            let a = alt(&p);
+            if a < CAPTURE_ALT && !entered_zone {
+                entered_zone = true;
+                println!("[round-trip] entered capture zone at t={t:.1}s alt={a:.0} speed={:.0}", p.speed);
+            }
+            // Once we're well inside the atmosphere, start tracking the settle band.
+            if a < ATMOSPHERE_TOP {
+                speed_in_atmo = speed_in_atmo.min(p.speed);
+            }
+            // Track the settled band over the last 100 s of the run.
+            if t > 300.0 {
+                amin = amin.min(a);
+                amax = amax.max(a);
+            }
+            if i % (30.0 / dt) as usize == 0 {
+                println!("[round-trip] t={t:.0}s alt={a:.0} speed={:.0} assist={:.2} mode={}",
+                    p.speed, assist(p.position.length()), p.flight_mode());
+            }
+        }
+        println!("[round-trip] FINAL alt={:.0} speed={:.0} | settle band [{:.0},{:.0}] | min speed in atmo {:.0} (APPROACH={:.0})",
+            alt(&p), p.speed, amin, amax, speed_in_atmo, APPROACH_SPEED);
+        assert!(entered_zone, "never entered capture zone");
+        assert!(alt(&p) < ATMOSPHERE_TOP, "did not descend into atmosphere: {}", alt(&p));
+        assert!(alt(&p) > 0.0, "crashed through the floor: {}", alt(&p));
+        // Settled: altitude band over the last 100 s is bounded near the atmosphere — it does
+        // NOT escape back to space (well under CAPTURE_ALT) and does NOT plummet through the
+        // floor. A small bob across the atmosphere boundary as it settles is fine.
+        assert!(amax < ATMOSPHERE_TOP * 1.5, "escaped toward space: settle band up to {amax}");
+        assert!((amax - amin) < 800.0, "altitude not stable: band [{amin},{amax}]");
+        assert!(amin > 50.0, "settled too low / scraping the floor: band from {amin}");
+        // Speed was bled down on approach (came near APPROACH_SPEED, not screaming at V_CAP).
+        assert!(speed_in_atmo < APPROACH_SPEED * 1.2, "speed not bled on approach: {speed_in_atmo}");
+    }
+
+    // (j) Decel on entry: crossing CAPTURE_ALT inbound at V_CAP → speed eases down to about
+    // APPROACH_SPEED by the time it reaches the atmosphere.
+    #[test]
+    fn j_decel_on_entry() {
+        // Start just above CAPTURE_ALT so we cross it inbound at full speed.
+        let mut p = inbound_craft(CAPTURE_ALT + 500.0, V_CAP, 0.0, 0.0);
+        let dt = 1.0 / 60.0;
+        let mut speed_at_atmo = None;
+        for _ in 0..(600.0 / dt) as usize {
+            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false);
+            if alt(&p) <= ATMOSPHERE_TOP && speed_at_atmo.is_none() {
+                speed_at_atmo = Some(p.speed);
+                break;
+            }
+        }
+        let s = speed_at_atmo.expect("never reached the atmosphere");
+        println!("[decel] crossed CAPTURE_ALT at V_CAP={V_CAP:.0}, reached atmosphere at speed={s:.0} (APPROACH={APPROACH_SPEED:.0})");
+        assert!(s < APPROACH_SPEED * 1.3, "speed did not bleed to ~APPROACH_SPEED: {s}");
+        assert!(s < V_CAP * 0.5, "barely decelerated: {s}");
+    }
+
+    // (k) Not a prison: in the capture zone, nose pointed OUTWARD + afterburner → climbs back
+    // out past CAPTURE_ALT (can re-escape).
+    #[test]
+    fn k_not_a_prison() {
+        // Mid capture zone, nose pointed straight OUT, modest inbound speed.
+        let alt0 = (ATMOSPHERE_TOP + CAPTURE_ALT) * 0.5;
+        let pos = Vec3::new(R_WORLD + alt0, 0.0, 0.0);
+        let out = pos.normalize();
+        let mut p = Physics::new(pos, out); // nose outward
+        p.velocity = out * 500.0; // already drifting out a little
+        p.speed = 500.0;
+        p.throttle = 1.0;
+        let dt = 1.0 / 60.0;
+        for _ in 0..(300.0 / dt) as usize {
+            p.step(dt, 1.0, 0.0, 0.0, 0.0, 0.0, true); // afterburner, climb out
+        }
+        println!("[not-prison] alt {:.0} -> {:.0} (CAPTURE_ALT={:.0}) speed={:.0}",
+            alt0, alt(&p), CAPTURE_ALT, p.speed);
+        assert!(alt(&p) > CAPTURE_ALT, "could not re-escape the capture zone: {}", alt(&p));
+    }
+
+    // (l) flight_mode reports the right regime by altitude.
+    #[test]
+    fn l_flight_mode() {
+        let space = level_craft(CAPTURE_ALT + 1000.0, 1000.0, 0.0);
+        let planetary = level_craft((ATMOSPHERE_TOP + CAPTURE_ALT) * 0.5, 1000.0, 0.0);
+        let atmo = level_craft(400.0, 600.0, 0.5);
+        println!("[mode] space={} planetary={} atmo={}", space.flight_mode(), planetary.flight_mode(), atmo.flight_mode());
+        assert_eq!(space.flight_mode(), 0, "SPACE");
+        assert_eq!(planetary.flight_mode(), 1, "PLANETARY");
+        assert_eq!(atmo.flight_mode(), 2, "ATMOSPHERE");
     }
 
     // (h) Stability: dt=0.05 cap, long run → no NaN/blowup.

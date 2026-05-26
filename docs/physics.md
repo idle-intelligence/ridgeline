@@ -12,6 +12,9 @@ density:
 - **Space — Newtonian.** Air density → 0, so you coast inertially: `velocity += gravity·dt +
   nose·thrust·dt`. Orientation aims thrust, not the velocity direction. Enables orbit and a
   (capped) escape.
+- **Capture zone — planetary-mode assist.** Between the atmosphere and deep space the onboard
+  AI eases the craft into a controlled approach so returning from far away is forgiving (see
+  "Capture zone" below).
 
 A **hard speed cap** (`V_CAP`) clamps `|velocity|` every step in both regimes, so thrust in
 vacuum can never run away (this kills the old "billion km/h" bug).
@@ -78,6 +81,40 @@ velocity +=  nose   * thrust_accel * dt       (thrust along the nose, bounded)
 
 No direction steering — you coast; orientation only aims thrust. Free 6DOF (auto-level off).
 
+## Capture zone (planetary-mode assist)
+
+Deep space is huge and the planet is a tiny target, so an unassisted return means screaming
+past it. A **capture zone** makes coming back forgiving. An `assist ∈ [0,1]` factor is derived
+from altitude above the sea-level sphere:
+
+- **Deep space** (`alt > CAPTURE_ALT`) → `assist = 0`: fully Newtonian/free — coast, orbit, escape (unchanged).
+- **Capture zone** (`ATMOSPHERE_TOP < alt < CAPTURE_ALT`) → `assist` smoothsteps `0→1` as you descend.
+- **Atmosphere** (`alt < ATMOSPHERE_TOP`) → `assist = 1`: full fly-by-nose cruise (unchanged).
+
+In the **space term**, the assist ramps two behaviors in by `assist` (so the higher you are,
+the weaker — pure inertia at the top, full cruise at the bottom):
+
+1. **Fly-by-nose steering ramps in.** The velocity DIRECTION is slerped toward the nose at
+   `TURN_RATE · assist`. Pointing the nose at the planet (or down) actually brings you in — the
+   AI follows the pilot's intent. Pointing the nose OUTWARD + afterburner still lets you climb
+   back out and re-escape, so it's an assist, not a prison.
+2. **Speed cap bleeds down.** The effective cap is `lerp(V_CAP, APPROACH_SPEED, assist)`; the
+   current speed eases (never snaps) down to it. You DECELERATE smoothly on approach instead of
+   overshooting, arriving at the atmosphere boundary near `APPROACH_SPEED`.
+
+At `assist = 1` (the atmosphere boundary) the space term matches the atmospheric regime, so the
+density blend hands off to the fly-by-nose cruise with no discontinuity. `APPROACH_SPEED ≤ V_CAP`,
+so the hard cap, gravity and the floor are all unchanged.
+
+| Constant | Value | Notes |
+|---|---|---|
+| `CAPTURE_ALT` | `R_WORLD·10 = 60000` wu | top of the capture zone (≈ 60,000 km — generous) |
+| `APPROACH_SPEED` | 2000 wu/s | managed approach speed the cap bleeds to (≤ `V_CAP`) |
+
+**Flight mode** (`flight_mode()` / HUD label): `0 = SPACE` (`alt ≥ CAPTURE_ALT`),
+`1 = PLANETARY` (capture zone), `2 = ATMOSPHERE` (`alt < ATMOSPHERE_TOP`). The web HUD appends
+`· SPACE` / `· PLANETARY` / `· ATMO`.
+
 ## Blend & gravity
 
 - `density(r)` is a smoothstep 1→0 from sea level to `ATMOSPHERE_TOP = R_WORLD·0.25 = 1500
@@ -108,4 +145,8 @@ Roll: `A/D`. Afterburner: `Space` (held). Mouse drives freelook only (view-only)
 `a` accelerate holds altitude (band ≈ 16 wu over 20 s, speed → cruise cap) · `b` speed never
 exceeds `V_CAP` (Shift+Space 60 s in space) · `c` pitch climbs/descends, level holds · `d`
 stall sinks · `e` space coasts ~straight · `f` escape stays capped · `g` hands-off cruise
-holds altitude + speed · `h` stable at dt = 0.05.
+holds altitude + speed · `h` stable at dt = 0.05 · `i` round-trip return (deep space → capture
+zone → descends → settles into a stable cruise, no overshoot/crash) · `j` decel on entry
+(crossing `CAPTURE_ALT` at `V_CAP` bleeds to ~`APPROACH_SPEED` by the atmosphere) · `k` not a
+prison (nose outward + afterburner re-escapes past `CAPTURE_ALT`) · `l` `flight_mode` reports
+SPACE/PLANETARY/ATMOSPHERE at the right altitudes.

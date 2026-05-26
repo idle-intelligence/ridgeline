@@ -117,7 +117,13 @@ Shift+Space climbs to space.
 sets a *target speed* (hard-capped at `V_CAP = 10000` wu/s, so the HUD km/h is always
 bounded). In the atmosphere the craft flies **by the nose** — a level nose holds altitude at
 any speed, pitch climbs/dives, and dropping below `STALL_SPEED` makes it sink. In space it is
-**Newtonian** (coasts; gravity + nose-thrust only). The two blend by air density. The chase craft is a small foreground silhouette against the terrain and
+**Newtonian** (coasts; gravity + nose-thrust only). The two blend by air density. Between the
+atmosphere and deep space a **CAPTURE ZONE** (`ATMOSPHERE_TOP` < alt < `CAPTURE_ALT = R_WORLD·10
+= 60000` wu) runs a planetary-mode **assist** that ramps in as you descend: fly-by-nose steering
+ramps in (point at the planet → the AI brings you in) and the speed cap bleeds from `V_CAP` down
+to `APPROACH_SPEED = 2000` wu/s, so returning from deep space decelerates smoothly into a
+controlled approach instead of overshooting — yet pointing outward + afterburner still re-escapes
+(assist, not prison). The chase craft is a small foreground silhouette against the terrain and
 curved horizon ahead (AIRCRAFT_SCALE small vs the 6000 wu planet).
 
 Projection near/far are at space scale: `Z_NEAR=1`, `Z_FAR=200000` (globe radius 6000,
@@ -186,6 +192,10 @@ painter's back-to-front order is no longer required.
   (not VERT_SCALE) so altitudes read as plausible orbital/atmospheric heights.
 - `eng.speed()` → f32 (world units/sec).
 - `eng.speed_kmh()` → f32 (km/h) = `speed() × M_PER_WU × 3.6` (same horizontal planet scale).
+- `eng.flight_mode()` → `u8` — current flight regime by altitude: `0 = SPACE` (free Newtonian,
+  `alt ≥ CAPTURE_ALT`), `1 = PLANETARY` (capture-zone assisted approach,
+  `ATMOSPHERE_TOP ≤ alt < CAPTURE_ALT`), `2 = ATMOSPHERE` (fly-by-nose cruise,
+  `alt < ATMOSPHERE_TOP`). The web HUD maps these to `· SPACE` / `· PLANETARY` / `· ATMO`.
 - `eng.lat_lon()` → `Float32Array` length 2 `[lat, lon]` — the **sub-camera point**: the camera
   position projected onto the globe. `lat = asin(cam.y / |cam|)`, `lon = atan2(-cam.z, cam.x)`,
   both in degrees. Shows what the camera is above.
