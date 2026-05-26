@@ -209,13 +209,15 @@ async function run() {
   console.log(`DISC: nonSky=${disc.n} coverage=${(disc.coverage * 100).toFixed(1)}% ` +
     `bbox=${disc.bw}x${disc.bh} aspect=${disc.aspect.toFixed(2)} ` +
     `centroid=(${disc.cxFrac.toFixed(2)},${disc.cyFrac.toFixed(2)})`);
-  // Planet should cover a meaningful but not full-screen area, be roughly square-ish,
-  // and be centered-ish.
+  // Planet/terrain should cover a meaningful but not full-screen area, span a wide band,
+  // and be horizontally centered. In a LEVEL in-atmosphere cruise the terrain correctly
+  // sits in the lower frame near the horizon (sky above), so the vertical centroid is
+  // lower-middle — not a centered from-afar disc.
   if (disc.coverage > 0.02 && disc.coverage < 0.85 &&
       disc.aspect > 0.5 &&
       disc.cxFrac > 0.2 && disc.cxFrac < 0.8 &&
-      disc.cyFrac > 0.2 && disc.cyFrac < 0.8) {
-    console.log('PASS: planet renders as a centered, roughly disc-shaped cluster');
+      disc.cyFrac > 0.1 && disc.cyFrac < 0.8) {
+    console.log('PASS: planet/terrain renders as a centered, wide cluster in the lower frame');
   } else {
     fail('planet cluster not disc-like / off-center / wrong size', browser, server, logs);
   }
