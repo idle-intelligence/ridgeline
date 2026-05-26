@@ -39,6 +39,40 @@ pub const VERT_SCALE: f32 = (R_WORLD / EARTH_RADIUS_M) * VERT_EXAGGERATION;
 /// m_per_wu = EARTH_RADIUS_M / R_WORLD ≈ 1061.8 m/wu.
 pub const M_PER_WU: f32 = EARTH_RADIUS_M / R_WORLD;
 
+// ── Altitude-coupled vertical exaggeration ───────────────────────────────────
+// The RENDERED relief scales with camera altitude so the planet is dramatic from
+// space (draws you in) and relaxes toward realistic as you descend. The aim is
+// apparent-size constancy: apparent height ∝ rendered_height/distance ∝ VE/altitude,
+// so a linear-in-altitude VE keeps the on-screen relief roughly constant through the
+// transition band, then clamps at both ends.
+//
+//   VE(alt) = clamp(VE_K * altitude_wu, VE_NEAR, VE_FAR)
+//
+// Only the terrain ring radii use VE; the occluder sphere, camera, physics, floor,
+// and all HUD/brightness math stay on the real (fixed) scale.
+
+/// Vertical exaggeration near the surface — realistic, gentle relief.
+pub const VE_NEAR: f32 = 1.0;
+
+/// Vertical exaggeration far out in space — dramatic relief that draws the eye in.
+pub const VE_FAR: f32 = 8.0;
+
+/// Slope of the VE ramp (exaggeration per world unit of altitude). With VE_NEAR=1
+/// the ramp leaves the near clamp at altitude = VE_NEAR/VE_K ≈ 1429 wu and reaches the
+/// VE_FAR=8 cap at altitude = VE_FAR/VE_K ≈ 11429 wu. So low cruise (alt ~500 wu) sits
+/// at the realistic floor, mid altitudes (a few thousand wu) ramp through ~2–6×, and
+/// from space (>~11k wu) it saturates at the dramatic 8× cap.
+pub const VE_K: f32 = 0.0007;
+
+/// Vertical exaggeration for a given camera altitude (world units above the sea-level
+/// sphere). Linear ramp clamped to [VE_NEAR, VE_FAR].
+#[inline]
+pub fn ve_for_altitude(altitude_wu: f32) -> f32 {
+    let alt = altitude_wu.max(0.0);
+    (VE_K * alt).clamp(VE_NEAR, VE_FAR)
+}
+
+
 pub struct Heightfield {
     pub width: u32,
     pub height: u32,
@@ -142,4 +176,13 @@ impl Heightfield {
         Vec3::new(r * cos_phi * cos_lam, r * sin_phi, -r * cos_phi * sin_lam)
     }
 
+    /// Like `sphere_point`, but the elevation `h_wu` (stored at the fixed `VERT_SCALE` /
+    /// `VERT_EXAGGERATION`) is RESCALED by `ve` so terrain relief follows the altitude-coupled
+    /// vertical exaggeration. `ve_ratio = ve / VERT_EXAGGERATION` converts the stored height to
+    /// the dynamic one: `h_dyn = h_wu * ve_ratio`. The base radius R_WORLD is unchanged.
+    #[inline]
+    pub fn sphere_point_scaled(lat_deg: f32, lon_deg: f32, h_wu: f32, ve: f32) -> Vec3 {
+        let ve_ratio = ve / VERT_EXAGGERATION;
+        Self::sphere_point(lat_deg, lon_deg, h_wu * ve_ratio)
+    }
 }

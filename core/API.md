@@ -13,11 +13,24 @@ The world is a **globe of stacked latitude rings** centered at the origin. Each 
 cell (row → latitude φ, col → longitude λ, elev_m) maps to a 3D point on a sphere:
 
 - `R_WORLD` = planet radius = **6000.0** world units.
-- `VERT_EXAGGERATION` = **1.0** (multiple of true scale). `VERT_SCALE = (R_WORLD /
-  EARTH_RADIUS_M) * VERT_EXAGGERATION ≈ 0.0009418` wu per meter. At 1× (realistic) Everest
-  (8849 m) ≈ 8.3 wu — a tiny bump; the globe is essentially smooth, with land read by the
-  normalized elevation→brightness. (The old dramatic look was VERT_EXAGGERATION ≈ 117.)
-- `h_wu = elev_m * VERT_SCALE`, `r = R_WORLD + h_wu`.
+- `VERT_EXAGGERATION` = **8.0** (the BASE multiple of true scale at which heightfield
+  elevations are stored). `VERT_SCALE = (R_WORLD / EARTH_RADIUS_M) * VERT_EXAGGERATION`. At
+  1× (realistic) Everest (8849 m) ≈ 8.3 wu — a tiny bump. (The old dramatic look was ≈ 117.)
+- **Altitude-coupled vertical exaggeration (rendered relief only).** The terrain ring radii
+  are scaled per-frame by `VE(altitude)` so the planet is dramatic from space and relaxes
+  toward realistic on approach (engineering apparent-size constancy: apparent height ∝
+  rendered_height/distance ∝ VE/altitude ≈ const through the ramp):
+  `VE(alt) = clamp(VE_K · altitude_wu, VE_NEAR, VE_FAR)` with **VE_NEAR = 1.0**,
+  **VE_FAR = 8.0**, **VE_K = 0.0007**, `altitude_wu = max(|cam_pos| − R_WORLD, 0)`. The ramp
+  leaves the near clamp at ~1429 wu and saturates at the 8× cap by ~11429 wu. Low cruise
+  (~500 wu) renders ~1× (realistic), mid altitudes ramp through ~2–6×, space caps at 8×.
+  Measured: alt 472 wu → VE 1.00, alt 4972 wu → VE 3.48, alt 11972 wu → VE 8.00.
+  This is a single smooth global radial multiplier per frame, so nothing swims (lat/lon grid
+  indices and distance-based LOD strides are unchanged). Only the rendered TERRAIN relief
+  scales; the OCCLUDER sphere stays at R_WORLD, and camera/physics/floor and all HUD/altitude/
+  speed/lat-lon plus the normalized elevation→brightness stay on the real (fixed) scale.
+- `h_wu = elev_m * VERT_SCALE`, `r = R_WORLD + VE/VERT_EXAGGERATION · h_wu` (terrain;
+  occluder uses `r = OCCLUDER_R`).
 - Cartesian (north pole = **+Y**): `x = r·cosφ·cosλ`, `y = r·sinφ`, `z = -r·cosφ·sinλ`
   (longitude handedness flipped so EAST renders to the RIGHT with north up),
   φ in [-90,90]°, λ in [-180,180]°. row 0 = +90° N (lat_max), col 0 = -180° W (lon_min).

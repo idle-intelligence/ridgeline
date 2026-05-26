@@ -32,7 +32,7 @@
 // Strength fade: ramps to 0 as a point approaches the horizon, so rings dissolve at the
 //   edge of the visible hemisphere instead of popping.
 
-use crate::heightfield::{Heightfield, R_WORLD};
+use crate::heightfield::{ve_for_altitude, Heightfield, R_WORLD};
 use glam::Vec3;
 
 /// Occluder sphere radius — just below sea level so it never z-fights ocean rings.
@@ -152,6 +152,12 @@ pub fn generate(hf: &Heightfield, cam_pos: Vec3, cam_fwd: Vec3) -> GeometryBuffe
     // Camera longitude (degrees) — the nearest point of any latitude ring lies here.
     // Matches the lon = atan2(-z, x) mapping in heightfield::sphere_point / lat_lon().
     let cam_lon_deg = (-cam_pos.z).atan2(cam_pos.x).to_degrees();
+
+    // Altitude-coupled vertical exaggeration: dramatic from space, realistic near the
+    // surface. A single global factor this frame → smooth radial scaling, no swimming
+    // (lat/lon indices and distance-based LOD strides are unchanged). Only terrain ring
+    // radii use `ve`; the occluder sphere and all distance/horizon math stay on real scale.
+    let ve = ve_for_altitude(cam_len - R_WORLD);
 
     let mut fill_verts: Vec<f32> = Vec::new();
     let mut fill_draws: Vec<u32> = Vec::new();
@@ -310,7 +316,7 @@ pub fn generate(hf: &Heightfield, cam_pos: Vec3, cam_fwd: Vec3) -> GeometryBuffe
                         run_start: &mut Option<u32>| {
             let lon = hf.col_lon(c);
             let h = hf.sample(row, c);
-            let p = Heightfield::sphere_point(lat, lon, h);
+            let p = Heightfield::sphere_point_scaled(lat, lon, h, ve);
             let s = point_strength(p, cam_dir, horizon_dot);
             let visible = s > 0.0 && in_sight(cam_pos, cam_fwd, p, cos_half);
             if visible {
