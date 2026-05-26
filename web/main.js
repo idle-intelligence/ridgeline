@@ -73,8 +73,10 @@ const M_PER_WU = 6371000 / 6000; // ≈ 1061.8
 const DEFAULT_SPAWN = { lat: 38.0, lon: 8.0, altWu: 250.0, heading: 0.0 };
 
 // Safe altitude band (world units above the sea-level sphere): above the surface,
-// below escaping to deep space. ~10 wu (≈10.6 km) up to ~12000 wu (≈12740 km).
-const ALT_WU_MIN = 10.0;
+// below escaping to deep space. ~0.5 wu (≈0.5 km) up to ~12000 wu (≈12740 km).
+// Low floor allows skimming/sea-level URL spawns (e.g. ?alt=1); the engine's own
+// hard floor at R_WORLD+0.5 still prevents going inside the planet.
+const ALT_WU_MIN = 0.5;
 const ALT_WU_MAX = 12000.0;
 
 function num(params, key) {
