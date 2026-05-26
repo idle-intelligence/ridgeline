@@ -202,10 +202,11 @@ impl Engine {
         );
 
         let cam_pos = chase_cam_pos(&self.phys);
-        // Horizon cull is view-independent (uses cam position), so cam_fwd is unused by
-        // geometry; we still pass the camera look direction for completeness.
+        // cam_fwd IS used by the geometry frustum/sight cull, so it MUST match the view's
+        // look direction in compute_view_proj (note the negated look_yaw) — otherwise
+        // freelooking sideways clips terrain on the side you turn toward.
         let look_offset =
-            Quat::from_rotation_y(self.look_yaw) * Quat::from_rotation_x(self.look_pitch);
+            Quat::from_rotation_y(-self.look_yaw) * Quat::from_rotation_x(self.look_pitch);
         let cam_fwd = (self.phys.orientation * look_offset) * Vec3::NEG_Z;
         self.geom = geometry::generate(&self.hf, cam_pos, cam_fwd);
         self.view_proj_mat =
