@@ -89,6 +89,24 @@ fn strides_for_distance(dist_wu: f32) -> (u32, u32) {
     }
 }
 
+/// Sub-ring subdivision factor for the near-surface "Joy Division" density: how many rings
+/// to render per data-row gap (1 = no subdivision). Index-anchored: the sub-ring positions
+/// are fixed fractional row indices (k/factor), NOT camera-relative, so nothing swims. The
+/// factor ramps DOWN with distance so the added density stays bounded — only the nearest
+/// bands get extra rings; far geometry renders at the raw data rows.
+#[inline]
+fn subring_factor_for_distance(dist_wu: f32) -> u32 {
+    if dist_wu < 150.0 {
+        6 // right under / in front of the camera: dense intermediate rings
+    } else if dist_wu < 400.0 {
+        4
+    } else if dist_wu < 900.0 {
+        2
+    } else {
+        1 // far: raw data rows only
+    }
+}
+
 /// Visibility strength of a surface point given the camera direction and horizon threshold.
 /// Returns 0 if culled (behind horizon + margin), ramping 0→1 across FADE_BAND.
 #[inline]
@@ -276,16 +294,69 @@ pub fn generate(
     // of that ring to the camera.
     let mut row = 0u32;
     while row < hf.height {
-        let lat = hf.row_lat(row);
-
         // Distance of this ring's NEAREST point to the camera. The ring is a circle of
         // radius R·cosφ at height y=R·sinφ; its closest point lies at the camera's own
         // longitude. Computing it analytically (one sphere_point) is far cheaper than
         // probing many longitudes and is camera-deterministic → still index-anchored.
-        let p = Heightfield::sphere_point(lat, cam_lon_deg, 0.0);
+        let p = Heightfield::sphere_point(hf.row_lat(row), cam_lon_deg, 0.0);
         let nearest = (p - cam_pos).length();
         let (row_step, ring_col_stride) = strides_for_distance(nearest);
 
+        // Sub-ring subdivision: render `factor` rings across this [row, row+row_step] gap,
+        // at fixed fractional indices `row + k·row_step/factor` (index-anchored → no swimming),
+        // interpolating elevation between the bracketing data rows. Density ramps down with
+        // distance via `subring_factor_for_distance` so the cost stays bounded.
+        let factor = subring_factor_for_distance(nearest);
+        let sub_count = factor.max(1);
+
+        for sub in 0..sub_count {
+            // Fractional row in [row, row+row_step]. The data rows bracketing it are
+            // `r_lo = floor`, with interpolation fraction `frac` between r_lo and r_lo+1.
+            let f_global = row as f32 + (sub as f32) * (row_step as f32) / (sub_count as f32);
+            let f_global = f_global.min((hf.height - 1) as f32);
+            let r_lo = f_global.floor() as u32;
+            let frac = f_global - r_lo as f32;
+            let lat = hf.row_lat_frac(r_lo, frac);
+            emit_ring(
+                hf, r_lo, frac, lat, ve, cam_pos, cam_dir, cam_fwd, horizon_dot, cos_half,
+                cam_lon_deg, ring_col_stride, last_col,
+                &mut line_verts, &mut line_strengths, &mut line_elevations, &mut line_draws,
+            );
+        }
+
+        row += row_step;
+    }
+
+    GeometryBuffers {
+        fill_verts, fill_draws, fill_strengths, fill_elevations,
+        line_verts, line_draws, line_strengths, line_elevations,
+    }
+}
+
+/// Emit one latitude ring at fractional data-row (`r0` + `frac`), latitude `lat`. Sweeps
+/// longitude (windowed to the visible arc), samples interpolated elevation, applies horizon +
+/// sight cull, and pushes LINE_STRIP run(s) into the line buffers.
+#[allow(clippy::too_many_arguments)]
+fn emit_ring(
+    hf: &Heightfield,
+    r0: u32,
+    frac: f32,
+    lat: f32,
+    ve: f32,
+    cam_pos: Vec3,
+    cam_dir: Vec3,
+    cam_fwd: Vec3,
+    horizon_dot: f32,
+    cos_half: f32,
+    cam_lon_deg: f32,
+    ring_col_stride: u32,
+    last_col: u32,
+    line_verts: &mut Vec<f32>,
+    line_strengths: &mut Vec<f32>,
+    line_elevations: &mut Vec<f32>,
+    line_draws: &mut Vec<u32>,
+) {
+    {
         // Bound the longitude sweep to the arc that can be visible (horizon window widened
         // by a generous pad covering the sight cone + fade band), so we don't iterate the
         // whole far side of every near ring. The emitted columns are still stride multiples
@@ -293,10 +364,7 @@ pub fn generate(
         // large pad means the window never clips terrain that should appear at the edge.
         let cut = horizon_dot - HORIZON_MARGIN;
         let visible_half = match visible_lon_half_deg(lat, cam_dir, cut) {
-            None => {
-                row += row_step;
-                continue; // ring entirely beyond the limb
-            }
+            None => return, // ring entirely beyond the limb
             Some(h) => h,
         };
         // Pad: fade band (~a few °) + sight-cone slack. Generous — 40° beyond the geometric
@@ -323,7 +391,7 @@ pub fn generate(
                         line_draws: &mut Vec<u32>,
                         run_start: &mut Option<u32>| {
             let lon = hf.col_lon(c);
-            let h = hf.sample(row, c);
+            let h = hf.sample_row_frac(r0, frac, c);
             let p = Heightfield::sphere_point_scaled(lat, lon, h, ve);
             let s = point_strength(p, cam_dir, horizon_dot);
             let visible = s > 0.0 && in_sight(cam_pos, cam_fwd, p, cos_half);
@@ -333,7 +401,7 @@ pub fn generate(
                 }
                 line_verts.extend_from_slice(&[p.x, p.y, p.z]);
                 line_strengths.push(s);
-                line_elevations.push(hf.elev_norm(row, c));
+                line_elevations.push(hf.elev_norm_frac(r0, frac, c));
             } else if let Some(start) = run_start.take() {
                 let count = (line_verts.len() / 3) as u32 - start;
                 if count >= 2 {
@@ -353,8 +421,8 @@ pub fn generate(
             let mut col = 0u32;
             loop {
                 let c = col.min(last_col);
-                emit(c, &mut line_verts, &mut line_strengths, &mut line_elevations,
-                    &mut line_draws, &mut run_start);
+                emit(c, line_verts, line_strengths, line_elevations,
+                    line_draws, &mut run_start);
                 if c == last_col {
                     break;
                 }
@@ -373,8 +441,8 @@ pub fn generate(
             let mut k = lo;
             while k <= raw_hi {
                 let c = k.rem_euclid(hf.width as i64) as u32; // wrap longitude
-                emit(c, &mut line_verts, &mut line_strengths, &mut line_elevations,
-                    &mut line_draws, &mut run_start);
+                emit(c, line_verts, line_strengths, line_elevations,
+                    line_draws, &mut run_start);
                 k += stride;
             }
         }
@@ -389,12 +457,5 @@ pub fn generate(
                 line_elevations.truncate(start as usize);
             }
         }
-
-        row += row_step;
-    }
-
-    GeometryBuffers {
-        fill_verts, fill_draws, fill_strengths, fill_elevations,
-        line_verts, line_draws, line_strengths, line_elevations,
     }
 }

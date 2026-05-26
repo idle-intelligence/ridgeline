@@ -51,8 +51,9 @@ pub const M_PER_WU: f32 = EARTH_RADIUS_M / R_WORLD;
 // Only the terrain ring radii use VE; the occluder sphere, camera, physics, floor,
 // and all HUD/brightness math stay on the real (fixed) scale.
 
-/// Vertical exaggeration near the surface — realistic, gentle relief.
-pub const VE_NEAR: f32 = 1.0;
+/// Vertical exaggeration near the surface — gentle but legible relief so mountains/valleys
+/// read over land at low altitude (a touch above true 1× scale, not spiky).
+pub const VE_NEAR: f32 = 2.75;
 
 /// Vertical exaggeration far out in space — dramatic relief that draws the eye in.
 pub const VE_FAR: f32 = 8.0;
@@ -153,7 +154,37 @@ impl Heightfield {
         self.elev[(row * self.width + col) as usize]
     }
 
+    /// Elevation sample (world units) at a FRACTIONAL row, fixed col. Linearly interpolates
+    /// between data rows `r0` and `r0+1` by `frac` ∈ [0,1]. Used for sub-ring interpolation
+    /// (intermediate latitude rings between data rows for a denser near-surface look).
+    #[inline]
+    pub fn sample_row_frac(&self, r0: u32, frac: f32, col: u32) -> f32 {
+        let a = self.sample(r0, col);
+        if frac <= 0.0 || r0 + 1 >= self.height {
+            return a;
+        }
+        let b = self.sample(r0 + 1, col);
+        a + (b - a) * frac
+    }
+
+    /// Normalized elevation in [0,1] at a fractional row, clamped. 0 = sea, 1 = highest.
+    #[inline]
+    pub fn elev_norm_frac(&self, r0: u32, frac: f32, col: u32) -> f32 {
+        if self.elev_world_max <= 0.0 {
+            return 0.0;
+        }
+        (self.sample_row_frac(r0, frac, col) / self.elev_world_max).clamp(0.0, 1.0)
+    }
+
+    /// Latitude (degrees) for a fractional row index (row0 + frac). row 0 = lat_max (north).
+    #[inline]
+    pub fn row_lat_frac(&self, r0: u32, frac: f32) -> f32 {
+        let t = (r0 as f32 + frac) / (self.height - 1) as f32;
+        self.lat_max - t * (self.lat_max - self.lat_min)
+    }
+
     /// Normalized elevation in [0,1] for (row, col), clamped. 0 = sea, 1 = highest.
+    #[allow(dead_code)]
     #[inline]
     pub fn elev_norm(&self, row: u32, col: u32) -> f32 {
         if self.elev_world_max <= 0.0 {
