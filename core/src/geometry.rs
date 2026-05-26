@@ -313,6 +313,14 @@ pub fn generate(
 
     // ── Latitude rings (bright lines) ──────────────────────────────────────────
     let last_col = hf.width - 1;
+    // Per-ring filled occlusion is active exactly where the dome is OFF (near/mid regime).
+    // The dome handles the far/disc regime; here we instead fill the surface between
+    // consecutive rendered (sub-)rings so near terrain solidly occludes far terrain/rings.
+    let emit_fills = disc_half_angle >= OCCLUDER_FOV_GATE;
+    // Ordered list of emitted (sub-)rings: (r_lo, frac, lat, col_stride). Fills are emitted
+    // BETWEEN consecutive entries, reusing the exact same row/sub-row stations and column
+    // strides as the lines so fills and lines align exactly (no separate coarse mesh).
+    let mut emitted_rings: Vec<(u32, f32, f32, u32)> = Vec::new();
     // Choose the row step per-ring from that ring's distance to the camera. We advance the
     // row index by `row_step` (index-anchored), so the set of rendered rows changes only at
     // band boundaries → no swimming. The row_step for a ring is taken from the nearest point
@@ -347,15 +355,187 @@ pub fn generate(
                 cam_lon_deg, ring_col_stride, last_col,
                 &mut line_verts, &mut line_strengths, &mut line_elevations, &mut line_draws,
             );
+            if emit_fills {
+                emitted_rings.push((r_lo, frac, lat, ring_col_stride));
+            }
         }
 
         row += row_step;
+    }
+
+    // ── Per-ring filled occlusion (near/mid regime) ─────────────────────────────
+    // Fill the surface between each pair of consecutive rendered (sub-)rings with a
+    // background-colored, terrain-following TRIANGLE_STRIP. Uses the same column stations as
+    // the lines (the coarser of the two adjacent rings' strides), so the fill mesh shares
+    // vertices with the ridge lines — no z-fighting / tearing, and it depth-occludes far
+    // geometry. fill_elevations = 0 → drawn flat at the dark fill color (like the dome).
+    if emit_fills {
+        for w in emitted_rings.windows(2) {
+            let (ra, fa, lat_a, sa_stride) = w[0];
+            let (rb, fb, lat_b, sb_stride) = w[1];
+            let stride = sa_stride.max(sb_stride);
+            emit_fill_strip(
+                hf, ra, fa, lat_a, rb, fb, lat_b, ve, cam_dir, cam_fwd, cam_pos,
+                horizon_dot, cos_half, cam_lon_deg, stride, last_col,
+                &mut fill_verts, &mut fill_strengths, &mut fill_elevations, &mut fill_draws,
+            );
+        }
     }
 
     GeometryBuffers {
         fill_verts, fill_draws, fill_strengths, fill_elevations,
         line_verts, line_draws, line_strengths, line_elevations,
     }
+}
+
+/// Emit a background-colored TRIANGLE_STRIP filling the surface between two consecutive
+/// rendered rings A (`ra`+`fa`, `lat_a`) and B (`rb`+`fb`, `lat_b`), following the terrain.
+/// Sweeps longitude on the SAME stride-aligned column stations as the lines (`stride`), so
+/// the fill shares vertices with the ridge lines (no z-fighting / tearing). Strength per
+/// vertex fades at the limb; elevation is 0 so it draws at the flat dark fill color. The
+/// strip is split into runs wherever both edge vertices fall behind the horizon / out of
+/// sight, so it never fills across the limb.
+#[allow(clippy::too_many_arguments)]
+fn emit_fill_strip(
+    hf: &Heightfield,
+    ra: u32,
+    fa: f32,
+    lat_a: f32,
+    rb: u32,
+    fb: f32,
+    lat_b: f32,
+    ve: f32,
+    cam_dir: Vec3,
+    cam_fwd: Vec3,
+    cam_pos: Vec3,
+    horizon_dot: f32,
+    cos_half: f32,
+    cam_lon_deg: f32,
+    stride: u32,
+    last_col: u32,
+    fill_verts: &mut Vec<f32>,
+    fill_strengths: &mut Vec<f32>,
+    fill_elevations: &mut Vec<f32>,
+    fill_draws: &mut Vec<u32>,
+) {
+    let cut = horizon_dot - HORIZON_MARGIN;
+    // Visible-longitude window: union of the two rings' arcs (use the wider), padded like
+    // the lines so the fill window matches what the lines emit.
+    let ha = visible_lon_half_deg(lat_a, cam_dir, cut);
+    let hb = visible_lon_half_deg(lat_b, cam_dir, cut);
+    let visible_half = match (ha, hb) {
+        (None, None) => return,
+        (Some(a), Some(b)) => a.max(b),
+        (Some(a), None) => a,
+        (None, Some(b)) => b,
+    };
+    let pad_deg = 40.0;
+    let window_half = visible_half + pad_deg;
+
+    let lon_span = hf.lon_max - hf.lon_min;
+    let full = window_half >= 180.0 || lon_span < 360.0 - 1e-3;
+    let to_col = |lon: f32| -> i64 {
+        (((lon - hf.lon_min) / lon_span) * (hf.width - 1) as f32).round() as i64
+    };
+
+    let mut run_start: Option<u32> = None;
+    let mut run_added = 0usize;
+    let mut run_visible = false;
+
+    let flush = |fill_verts: &mut Vec<f32>,
+                     fill_strengths: &mut Vec<f32>,
+                     fill_elevations: &mut Vec<f32>,
+                     fill_draws: &mut Vec<u32>,
+                     run_start: &mut Option<u32>,
+                     run_added: &mut usize,
+                     run_visible: &mut bool| {
+        if let Some(start) = run_start.take() {
+            let count = (fill_verts.len() / 3) as u32 - start;
+            if count >= 3 && *run_visible {
+                fill_draws.push(start);
+                fill_draws.push(count);
+            } else {
+                fill_verts.truncate((start as usize) * 3);
+                fill_strengths.truncate(fill_strengths.len() - *run_added);
+                fill_elevations.truncate(fill_elevations.len() - *run_added);
+            }
+        }
+        *run_added = 0;
+        *run_visible = false;
+    };
+
+    let emit_col = |c: u32,
+                        fill_verts: &mut Vec<f32>,
+                        fill_strengths: &mut Vec<f32>,
+                        fill_elevations: &mut Vec<f32>,
+                        fill_draws: &mut Vec<u32>,
+                        run_start: &mut Option<u32>,
+                        run_added: &mut usize,
+                        run_visible: &mut bool| {
+        let lon = hf.col_lon(c);
+        let pa = Heightfield::sphere_point_scaled(
+            lat_a, lon, hf.sample_row_frac(ra, fa, c), ve,
+        );
+        let pb = Heightfield::sphere_point_scaled(
+            lat_b, lon, hf.sample_row_frac(rb, fb, c), ve,
+        );
+        let sa = point_strength(pa, cam_dir, horizon_dot);
+        let sb = point_strength(pb, cam_dir, horizon_dot);
+        let vis = (sa > 0.0 && in_sight(cam_pos, cam_fwd, pa, cos_half))
+            || (sb > 0.0 && in_sight(cam_pos, cam_fwd, pb, cos_half));
+        if vis {
+            if run_start.is_none() {
+                *run_start = Some((fill_verts.len() / 3) as u32);
+            }
+            fill_verts.extend_from_slice(&[pa.x, pa.y, pa.z, pb.x, pb.y, pb.z]);
+            fill_strengths.push(sa);
+            fill_strengths.push(sb);
+            fill_elevations.push(0.0);
+            fill_elevations.push(0.0);
+            *run_added += 2;
+            *run_visible = true;
+        } else {
+            flush(
+                fill_verts, fill_strengths, fill_elevations, fill_draws,
+                run_start, run_added, run_visible,
+            );
+        }
+    };
+
+    if full {
+        let mut col = 0u32;
+        loop {
+            let c = col.min(last_col);
+            emit_col(
+                c, fill_verts, fill_strengths, fill_elevations, fill_draws,
+                &mut run_start, &mut run_added, &mut run_visible,
+            );
+            if c == last_col {
+                break;
+            }
+            col = (col + stride).min(last_col);
+        }
+    } else {
+        let c_center = to_col(cam_lon_deg);
+        let half_cols = (((window_half / lon_span) * (hf.width - 1) as f32).ceil() as i64).max(1);
+        let raw_lo = c_center - half_cols;
+        let raw_hi = c_center + half_cols;
+        let st = stride as i64;
+        let lo = raw_lo.div_euclid(st) * st;
+        let mut k = lo;
+        while k <= raw_hi {
+            let c = k.rem_euclid(hf.width as i64) as u32;
+            emit_col(
+                c, fill_verts, fill_strengths, fill_elevations, fill_draws,
+                &mut run_start, &mut run_added, &mut run_visible,
+            );
+            k += st;
+        }
+    }
+    flush(
+        fill_verts, fill_strengths, fill_elevations, fill_draws,
+        &mut run_start, &mut run_added, &mut run_visible,
+    );
 }
 
 /// Emit one latitude ring at fractional data-row (`r0` + `frac`), latitude `lat`. Sweeps
