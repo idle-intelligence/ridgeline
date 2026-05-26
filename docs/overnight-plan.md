@@ -41,6 +41,12 @@ to pace usage. `main` must stay flyable at every commit. Risky WebGPU work stays
 10. WebGPU/wgpu: prototype a GPU-driven renderer (compute geometry / minimal upload), keep
     WebGL2 as fallback, verify perf + quality before any switch. (big; informed by #8/#9)
 
+## Reorder (2026-05-27, after #40/#41)
+#40 (tears) + #41 (occlusion) DONE on main. #41's per-ring fills ~doubled near/mid geometry
+→ gen ~77-80 ms (≈12 fps near surface). PERF is now the priority → run #45 (perf research)
+then #46 (perf impl: cut fill/sub-ring vert count, batch draws) BEFORE the physics tasks.
+New order: 45 → 46 → 42 → 43 → 44 → 47 → 48 → 49.
+
 ## Notes / deferred
 - Higher-res re-bake (2.5 km ≈ 384 MB / native 1.85 km ≈ 670 MB) — offered, user to decide.
 - Atlas/terrain collision — undecided.
