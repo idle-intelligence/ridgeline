@@ -28,7 +28,7 @@ pub const EARTH_RADIUS_M: f32 = 6_371_000.0;
 /// Vertical exaggeration as a MULTIPLE of true (1:1) scale. THE one knob to tune.
 ///   1.0  = realistic — relief is to scale with the globe (Everest ≈ 8.3 wu, a tiny bump).
 ///   ~117 = the old dramatic look (when VERT_SCALE was hardcoded to 0.11).
-pub const VERT_EXAGGERATION: f32 = 1.0;
+pub const VERT_EXAGGERATION: f32 = 8.0;
 
 /// World units per meter of elevation.
 /// True (1:1) scale is `R_WORLD / EARTH_RADIUS_M ≈ 0.0009418` wu/m; VERT_SCALE is that
