@@ -41,12 +41,13 @@ const SPAWN_LON: f32 = 8.0;
 const CRUISE_ALT: f32 = 250.0;
 /// Default spawn heading (degrees, 0 = north, 90 = east). North toward Europe.
 const SPAWN_HEADING: f32 = 0.0;
-/// Forward cruise speed (wu/s). Seeded to match the hands-off (idle-throttle) terminal at
-/// this altitude so speed stays flat with no input.
+/// Throttle seeded at spawn. With no thrust input the throttle holds, so the speed eases to
+/// its target v_target = lerp(IDLE_SPEED, CRUISE_MAX, throttle) ≈ 450 wu/s and CRUISE_SPEED
+/// is seeded equal to that → steady level cruise from frame 1 (holds altitude + speed).
+const CRUISE_THROTTLE: f32 = 0.485;
+/// Forward cruise speed (wu/s). Seeded to the hands-off target for CRUISE_THROTTLE so speed
+/// stays flat with no input.
 const CRUISE_SPEED: f32 = 450.0;
-/// Throttle seeded at spawn. Equal to the idle/hands-off throttle so, with no input, the
-/// engine already sits at the level it settles to → steady cruise from frame 1.
-const CRUISE_THROTTLE: f32 = 0.30;
 
 /// Level-flight orientation at a geographic spawn point: up = radial (away from center),
 /// forward = the tangent direction along the surface on the given compass heading

@@ -1,92 +1,97 @@
-// Throttle + momentum flight physics (planet scale) with ARCADE gravity + atmosphere.
+// Arcade flight physics (planet scale): atmosphere fly-by-nose ↔ space Newtonian.
 //
-// State: orientation (Quat), position (Vec3), throttle (0..1), velocity (Vec3).
-// Throttle is a gas pedal — thrust input raises/lowers it over time (THROTTLE_RATE).
-// Engine thrust pushes velocity along the craft's nose; on top of that we apply an
-// ARCADE (not realistic) gravity + atmosphere model:
+// State: orientation (Quat), position (Vec3), velocity (Vec3), throttle (0..1).
 //
-//   * Gravity: constant pull toward the planet CENTER (origin), inverse-square with
-//     distance so it's strong near the surface and escapable far out.
-//   * Atmosphere: air density ramps 1→0 from sea level to ATMOSPHERE_TOP, then space.
-//   * Drag: within the atmosphere velocity is damped ∝ air density. In space ≈ none
-//     (you coast inertially).
-//   * Lift: an arcade outward push ∝ density · forward-speed, tuned so that flying
-//     level at cruise throttle lift ≈ gravity → altitude holds. Pitch down → sink,
-//     pitch up → climb. No lift in space.
-//   * Floor: the craft cannot sink below the sea-level sphere (R_WORLD).
+// The model DECOUPLES speed from altitude. Two regimes, blended smoothly by air density:
 //
-// Planet scale: R_world = 6000 wu, m_per_wu ≈ 1062 m/wu (Earth radius / R_world).
-// Terminal speeds (in vacuum, gravity aside):
-//   Cruise (full throttle):  ~1000 wu/s
-//   FTL    (Space):          ~9000 wu/s → circumnavigate in a few seconds
+//   * ATMOSPHERE (density high) — FLY-BY-NOSE. Throttle maps to a TARGET speed; the speed
+//     eases toward it under bounded acceleration. The velocity DIRECTION is steered toward
+//     where the nose points (orientation*-Z) at TURN_RATE. So the craft goes where it
+//     points: a LEVEL nose ⇒ horizontal velocity ⇒ altitude held no matter the speed
+//     (accelerating no longer climbs/dives). Pitch up climbs, pitch down dives. Below
+//     STALL_SPEED the nose-following weakens and gravity sink dominates → you fall.
+//     With no pitch/roll input the nose AUTO-LEVELS onto the local horizon (hands-off level).
 //
-// Rotation rates (rad/s):
-//   PITCH_RATE = 1.6, YAW_RATE = 1.6, ROLL_RATE = 2.5
+//   * SPACE (density →0) — NEWTONIAN. velocity += gravity·dt + nose·thrust_accel·dt.
+//     No fly-by-nose steering — you coast; orientation aims thrust, not velocity. Free
+//     6DOF (auto-level disabled). Enables orbit and (capped) escape.
+//
+//   * BLEND by air density: full fly-by-nose at the surface, fully Newtonian in deep space.
+//
+//   * Gravity: inverse-square pull toward the origin, g = G_SURFACE·(R_WORLD/r)². Gentle in
+//     atmosphere (mostly countered by flight; bites on dive/stall), dominant in space.
+//
+//   * HARD SPEED CAP: |velocity| (and the target speed) is clamped to V_CAP every step in
+//     BOTH regimes, so thrust in vacuum can never run velocity away (the old billion-km/h bug).
+//
+//   * Floor: cannot sink below the sea-level sphere (R_WORLD); inward radial velocity is
+//     zeroed there. No terrain collision (flying through peaks is out of scope).
+//
+// All tunables are named, documented constants — planet-derived where sensible so another
+// planet (different R_WORLD / atmosphere) can override them.
 
 use glam::{Mat3, Mat4, Quat, Vec3};
 
 use crate::heightfield::R_WORLD;
 
-const MAX_THRUST: f32 = 2200.0;  // wu/s² at full throttle
-const THROTTLE_RATE: f32 = 2.5;  // s⁻¹  — lag to reach target throttle
-const IDLE_THROTTLE: f32 = 0.3;  // hands-off cruise throttle: with no thrust input the
-                                 // engine settles here, sustaining a steady level cruise
-                                 // (~cruise speed) so the craft holds altitude rather than
-                                 // bleeding speed and sinking.
-
-const BOOST_SCALE: f32 = 3.0;    // terminal ~3000 wu/s
-const FTL_SCALE: f32 = 9.0;      // terminal ~9000 wu/s — circumnavigate in a few s
-
+// ── Rotation rates (rad/s) ───────────────────────────────────────────────────────
 const PITCH_RATE: f32 = 1.6;
 const YAW_RATE: f32 = 1.6;
 const ROLL_RATE: f32 = 2.5;
 
-// ── ARCADE gravity + atmosphere model (all PLANET-DERIVED) ──────────────────────
-// These are functions of the planet (R_WORLD here). Another planet with a different
-// radius / atmosphere would scale them; they are deliberately small named constants
-// so a future planet config can override them.
+// ── Speed tiers (wu/s). Planet circumference ≈ 2π·R_WORLD ≈ 37700 wu, so a lap at
+//    CRUISE_MAX takes ~47 s, at FTL_MAX ~4.7 s — a pleasant pace, never a fraction of a
+//    second. All are well under V_CAP so the HUD km/h stays bounded (tens of millions max).
+/// Hands-off / zero-throttle floor speed (the engine never fully stops in atmosphere).
+const IDLE_SPEED: f32 = 120.0;
+/// Full-throttle terminal speed in atmosphere (no afterburner).
+const CRUISE_MAX: f32 = 800.0;
+/// Afterburner (Space) terminal/target speed — fast lap, still finite.
+const FTL_MAX: f32 = 8000.0;
+/// ABSOLUTE hard cap on |velocity| and on the target speed, enforced EVERY step in both
+/// regimes. Nothing can ever exceed this — the anti-runaway guarantee. ≈ 38 million km/h at
+/// planet scale (M_PER_WU·3.6·V_CAP), bounded, never billions.
+const V_CAP: f32 = 10_000.0;
 
-/// Surface gravitational acceleration in wu/s² (arcade, by feel). At the sea-level
-/// sphere the inward pull is G_SURFACE; it falls off inverse-square with distance.
-/// Tuned so cruise lift can balance it and so Shift+Space can escape it.
-const G_SURFACE: f32 = 90.0;
+/// Bounded acceleration easing the current speed toward its target (wu/s²). Gives a smooth
+/// spool-up/down rather than an instant snap.
+const SPEED_ACCEL: f32 = 1200.0;
 
-/// Top of the atmosphere as an ALTITUDE above the sea-level sphere, in wu.
-/// = R_WORLD * ATMOSPHERE_FRAC. Exaggerated terrain peaks reach ~850 wu, so the
-/// atmosphere must extend well above that. 0.25 * 6000 = 1500 wu, comfortably above peaks.
+// ── Atmosphere ─────────────────────────────────────────────────────────────────
+/// Top of the atmosphere as an ALTITUDE above the sea-level sphere (wu) = R_WORLD·FRAC.
+/// 0.25·6000 = 1500 wu, comfortably above the exaggerated terrain peaks (~850 wu).
 const ATMOSPHERE_FRAC: f32 = 0.25;
 pub const ATMOSPHERE_TOP: f32 = R_WORLD * ATMOSPHERE_FRAC;
 
-/// Drag coefficient (s⁻¹ at sea-level density). In atmosphere velocity is damped
-/// multiplicatively ∝ density; with no throttle you bleed speed, and thrust balances
-/// it at a cruise terminal. Full-throttle terminal at sea level ≈ MAX_THRUST/DRAG_K
-/// = 2200/2.2 ≈ 1000 wu/s. In space (density 0) drag vanishes → inertial coast.
-const DRAG_K: f32 = 2.2;
+/// Rate (s⁻¹) at which the velocity DIRECTION is slerped toward the nose in atmosphere
+/// (fly-by-nose authority). Higher = tighter, more arcade turning.
+const TURN_RATE: f32 = 3.0;
 
-/// Reference cruise speed (wu/s): the forward speed at which arcade lift reaches full
-/// strength (fully cancels gravity). ≈ full-throttle sea-level terminal MAX_THRUST/DRAG_K.
-const LIFT_REF_SPEED: f32 = 1000.0;
+/// Hands-off auto-level rate (s⁻¹): with no pitch/roll input the nose rotates toward the
+/// local horizon so level cruise holds altitude over the curved planet. Atmosphere only.
+const AUTO_LEVEL_RATE: f32 = 2.5;
 
-/// Max arcade-lift fraction of gravity. At full strength, lift cancels `LIFT_AUTHORITY ×
-/// gravity` so level flight holds (slight <1 leaves a gentle sink so stalls feel real).
-const LIFT_AUTHORITY: f32 = 1.0;
+/// Altitude-hold rate (s⁻¹): how fast the velocity DIRECTION's radial (climb/sink) component
+/// is driven onto its commanded value (0 when level, nose-matched when pitched). Strong so a
+/// level cruise truly pins to constant altitude as the planet curves — the core decoupling.
+const ALT_HOLD_RATE: f32 = 80.0;
 
-/// Radial-velocity damping rate (s⁻¹ at full strength). Implements arcade altitude-hold:
-/// the wings resist vertical (radial) motion in the atmosphere so a level heading cruises
-/// flat. Strong enough to hold level, weak enough that nose-up/down thrust overrides it.
-const RADIAL_DAMP: f32 = 40.0;
+/// Below this forward speed (wu/s) fly-by-nose authority fades out (stall): the craft can no
+/// longer hold its nose-commanded heading and gravity sink takes over → you lose altitude.
+const STALL_SPEED: f32 = 180.0;
 
-/// Hands-off auto-level rate (s⁻¹): how fast the nose settles onto the level heading when
-/// no pitch is commanded, so level cruise holds altitude over the curved planet. High
-/// enough to effectively track the horizon each frame (the leveling must be near-complete
-/// or thrust slowly tips the craft into a climb). Only active in the atmosphere.
-const AUTO_LEVEL_RATE: f32 = 60.0;
+// ── Gravity ──────────────────────────────────────────────────────────────────────
+/// Surface gravitational acceleration (wu/s², arcade by feel). Falls off inverse-square:
+/// g = G_SURFACE·(R_WORLD/r)². Gentle enough that level cruise holds, strong enough that a
+/// stall/dive sinks and that escape needs afterburner.
+const G_SURFACE: f32 = 60.0;
 
 /// Tiny epsilon above the sea-level sphere for the anti-fall-through floor (wu).
 const FLOOR_EPS: f32 = 0.5;
 
-/// Air density 1.0 at sea level → 0.0 at ATMOSPHERE_TOP (smoothstep on altitude),
-/// 0 in space. `r` is distance from planet center in wu.
+/// Air density 1.0 at sea level → 0.0 at ATMOSPHERE_TOP (smoothstep on altitude), 0 in
+/// space. `r` is distance from planet center in wu. This is the blend weight between the
+/// fly-by-nose (atmosphere) and Newtonian (space) regimes.
 pub fn air_density(r: f32) -> f32 {
     let alt = r - R_WORLD;
     if alt <= 0.0 {
@@ -96,7 +101,6 @@ pub fn air_density(r: f32) -> f32 {
         return 0.0;
     }
     let t = alt / ATMOSPHERE_TOP; // 0..1
-    // smoothstep(1 → 0): density high near surface, eases to 0 at the top.
     let s = t * t * (3.0 - 2.0 * t); // smoothstep 0→1
     1.0 - s
 }
@@ -116,21 +120,21 @@ impl Physics {
         let view = Mat4::look_to_rh(Vec3::ZERO, fwd, Vec3::Y);
         let rot3 = Mat3::from_mat4(view).transpose();
         let orientation = Quat::from_mat3(&rot3).normalize();
-        let speed = IDLE_THROTTLE * MAX_THRUST / DRAG_K;
+        let speed = IDLE_SPEED;
         Self {
             orientation,
             position: spawn_pos,
-            throttle: IDLE_THROTTLE,
+            throttle: 0.0,
             velocity: fwd * speed,
             speed,
         }
     }
 
     /// Integrate one physics step.
-    /// thrust: -1..1 throttle command (+1 = accelerate, -1 = cut).
+    /// thrust: -1..1 throttle command (+1 = up, -1 = down, 0 = hold).
     /// pitch/yaw/roll: desired rotation rates (rad/s), clamped internally.
-    /// boost: 0..1 (Shift held = 1).
-    /// ftl: Space-hold afterburner.
+    /// boost: 0..1 (unused by the speed model; afterburner is `ftl`).
+    /// ftl: Space-hold afterburner (raises the target speed and thrust to the FTL tier).
     #[allow(clippy::too_many_arguments)]
     pub fn step(
         &mut self,
@@ -139,112 +143,124 @@ impl Physics {
         pitch: f32,
         yaw: f32,
         roll: f32,
-        boost: f32,
+        _boost: f32,
         ftl: bool,
     ) {
-        // --- Rotations ---
+        // Guard against a non-positive or non-finite dt (e.g. a zero/negative rAF delta on
+        // the first frame), which would otherwise make `clamp(-a*dt, a*dt)` panic with
+        // min > max. A bad dt is simply a no-op step.
+        if dt <= 0.0 || dt.is_nan() {
+            return;
+        }
+
+        // --- Rotations (body frame) ---
         let p = pitch.clamp(-PITCH_RATE, PITCH_RATE);
         let y = yaw.clamp(-YAW_RATE, YAW_RATE);
         let r = roll.clamp(-ROLL_RATE, ROLL_RATE);
-
         let dq_pitch = Quat::from_axis_angle(Vec3::X, p * dt);
         let dq_yaw = Quat::from_axis_angle(Vec3::Y, y * dt);
         let dq_roll = Quat::from_axis_angle(Vec3::NEG_Z, r * dt);
         self.orientation = (self.orientation * dq_yaw * dq_pitch * dq_roll).normalize();
 
-        // --- Arcade auto-level (hands-off altitude-hold) ---
-        // Flying a fixed world orientation tangent to a CURVED planet makes the nose drift
-        // nose-up relative to the LOCAL horizon (the surface falls away beneath you), which
-        // would otherwise command an ever-steeper climb (a runaway, since thrust then pushes
-        // outward). When the player isn't pitching AND is in the atmosphere, the wings settle
-        // the nose onto the LEVEL heading — the direction of travel with its radial
-        // (climb/sink) component removed — so level cruise truly holds altitude as the planet
-        // curves beneath. Active pitch input bypasses this, so nose-up still climbs and
-        // nose-down dives; in space (no air) it's a no-op → free ballistic flight.
-        if pitch.abs() < 1e-3 {
-            let r_dist0 = self.position.length().max(1e-3);
-            let radial0 = self.position / r_dist0;
-            let d0 = air_density(r_dist0);
-            if d0 > 0.0 {
-                let nose0 = self.orientation * Vec3::NEG_Z;
-                let mut target = self.velocity - radial0 * self.velocity.dot(radial0);
-                if target.length_squared() < 1e-6 {
-                    target = nose0 - radial0 * nose0.dot(radial0);
-                }
-                let target = target.normalize_or_zero();
-                if target != Vec3::ZERO {
-                    // Snap the nose onto the level heading (strong arcade leveling); the
-                    // rotation that takes the old nose there also carries the roll/up with it.
-                    let frac = (AUTO_LEVEL_RATE * dt).clamp(0.0, 1.0);
-                    let new_nose = nose0.lerp(target, frac).normalize_or_zero();
-                    if new_nose != Vec3::ZERO {
-                        let relevel = Quat::from_rotation_arc(nose0, new_nose);
-                        self.orientation = (relevel * self.orientation).normalize();
-                    }
+        // --- Environment ---
+        let r_dist = self.position.length().max(1e-3);
+        let radial_out = self.position / r_dist; // unit, away from center
+        let density = air_density(r_dist); // 1 = full atmosphere, 0 = space
+        let g = G_SURFACE * (R_WORLD / r_dist).powi(2);
+        let nose = self.orientation * Vec3::NEG_Z;
+
+        // --- Hands-off auto-level (atmosphere only): with no pitch/roll input, rotate the
+        // nose toward the LOCAL HORIZONTAL (velocity projected onto the tangent plane) so
+        // level cruise holds altitude as the planet curves beneath. Disabled in space (free
+        // 6DOF) and bypassed when the pilot is actively pitching/rolling. ---
+        if density > 0.0 && pitch.abs() < 1e-3 && roll.abs() < 1e-3 {
+            let mut horiz = self.velocity - radial_out * self.velocity.dot(radial_out);
+            if horiz.length_squared() < 1e-6 {
+                horiz = nose - radial_out * nose.dot(radial_out);
+            }
+            let horiz = horiz.normalize_or_zero();
+            if horiz != Vec3::ZERO {
+                let frac = (AUTO_LEVEL_RATE * density * dt).clamp(0.0, 1.0);
+                let new_nose = nose.lerp(horiz, frac).normalize_or_zero();
+                if new_nose != Vec3::ZERO {
+                    let relevel = Quat::from_rotation_arc(nose, new_nose);
+                    self.orientation = (relevel * self.orientation).normalize();
                 }
             }
         }
+        let nose = self.orientation * Vec3::NEG_Z; // refresh after auto-level
 
-        // --- Throttle ---
-        let throttle_target = if thrust > 0.0 {
-            thrust
-        } else if thrust < 0.0 {
-            (self.throttle + thrust * dt * THROTTLE_RATE * 3.0).max(0.0)
-        } else {
-            IDLE_THROTTLE
+        // --- Throttle (gas pedal) ---
+        let throttle_rate = 1.5; // s⁻¹
+        self.throttle = (self.throttle + thrust * throttle_rate * dt).clamp(0.0, 1.0);
+
+        // --- Target speed from throttle (hard-capped). Afterburner raises target+cap. ---
+        let top = if ftl { FTL_MAX } else { CRUISE_MAX };
+        let v_target = (IDLE_SPEED + (top - IDLE_SPEED) * self.throttle).min(V_CAP);
+
+        // ===== ATMOSPHERE term: fly-by-nose =====
+        // Ease scalar speed toward v_target, steer the unit velocity toward the nose, then
+        // rebuild velocity = dir * speed. Stall: below STALL_SPEED the nose authority fades,
+        // so the craft can't hold its heading and gravity sink dominates.
+        let atmo_vel = {
+            let cur = self.velocity.length();
+            let dv = (v_target - cur).clamp(-SPEED_ACCEL * dt, SPEED_ACCEL * dt);
+            let speed = (cur + dv).clamp(0.0, V_CAP);
+
+            let dir_cur = if cur > 1e-3 {
+                self.velocity / cur
+            } else {
+                nose
+            };
+            // Stall factor: 1 (full authority) at/above STALL_SPEED, fading to 0 as speed
+            // drops to half STALL_SPEED — below that the wings can't hold the craft up.
+            let stall = ((speed - 0.5 * STALL_SPEED) / (0.5 * STALL_SPEED)).clamp(0.0, 1.0);
+            let turn = (TURN_RATE * stall * dt).clamp(0.0, 1.0);
+            let mut dir = dir_cur.lerp(nose, turn).normalize_or(dir_cur);
+            // Altitude-hold: with no pitch input, drive the direction's RADIAL (climb/sink)
+            // component toward what the (auto-leveled) NOSE commands — a level nose commands
+            // ~0 radial → holds altitude as the planet curves beneath; a pitched nose commands
+            // a matching climb/dive. Decouples altitude from speed and kills the slow drift.
+            let commanded_radial = if pitch.abs() < 1e-3 {
+                0.0 // true horizontal: hold altitude exactly as the planet curves
+            } else {
+                nose.dot(radial_out) // pitched: climb/dive to match the nose
+            };
+            let cur_radial = dir.dot(radial_out);
+            // Authority collapses sharply (stall³) as speed bleeds off, so a stall clearly
+            // releases the altitude hold and lets gravity sink the craft, while cruise stays
+            // firmly pinned.
+            let auth = stall * stall * stall;
+            let hold = (ALT_HOLD_RATE * auth * dt).clamp(0.0, 1.0);
+            dir = (dir - radial_out * ((cur_radial - commanded_radial) * hold))
+                .normalize_or(dir);
+            let mut v = dir * speed;
+            // Gravity sink: gravity always pulls inward; fly-by-nose mostly cancels it when
+            // flying level (the steered direction has ~0 radial component), but a stall lets
+            // it through (1 - auth), and a nose-down heading naturally dives via `dir`.
+            v += -radial_out * (g * (1.0 - auth) * dt);
+            v
         };
-        self.throttle += (throttle_target - self.throttle) * (THROTTLE_RATE * dt);
-        self.throttle = self.throttle.clamp(0.0, 1.0);
 
-        // --- Environment ---
-        let r_dist = self.position.length().max(1e-3);
-        let radial_out = self.position / r_dist; // unit vector away from center
-        let density = air_density(r_dist);
-
-        // Gravity: inverse-square inward pull. g = G_SURFACE * (R_WORLD / r)^2.
-        let g = G_SURFACE * (R_WORLD / r_dist).powi(2);
-        let gravity_accel = -radial_out * g;
-
-        // --- Engine thrust along the craft's nose (-Z) ---
-        let thrust_scale = if ftl {
-            FTL_SCALE
-        } else {
-            1.0 + boost * (BOOST_SCALE - 1.0)
+        // ===== SPACE term: Newtonian =====
+        // velocity += gravity·dt + nose·thrust_accel·dt; capped. No direction steering.
+        let space_vel = {
+            let thrust_accel = (v_target - self.velocity.length()).max(0.0) / dt.max(1e-4);
+            let thrust_accel = thrust_accel.min(SPEED_ACCEL * 4.0); // bounded thrust authority
+            let mut v = self.velocity;
+            v += -radial_out * (g * dt); // inverse-square gravity
+            v += nose * (thrust_accel * dt); // thrust along the nose
+            v
         };
-        let nose = self.orientation * Vec3::NEG_Z;
-        let thrust_accel = nose * (self.throttle * MAX_THRUST * thrust_scale);
 
-        // --- Arcade lift: an outward push that, at full strength, CANCELS gravity so
-        // level flight holds altitude. Strength scales with air density and forward speed
-        // (saturating at LIFT_REF_SPEED) — slow/stalled or high in thin air → weak lift →
-        // you sink. Because lift only counters gravity (it never exceeds it), the craft
-        // climbs/descends according to where its NOSE (thrust) points: nose up climbs,
-        // nose down descends. ---
-        let fwd_speed = self.velocity.dot(nose);
-        let speed_frac = (fwd_speed.max(0.0) / LIFT_REF_SPEED).clamp(0.0, 1.0);
-        let lift_frac = LIFT_AUTHORITY * density * speed_frac;
-        let lift_accel = radial_out * (g * lift_frac);
+        // --- Blend the two regimes by air density (smoothstep already applied in density) ---
+        self.velocity = space_vel.lerp(atmo_vel, density);
 
-        // --- Integrate velocity: thrust + lift + gravity. ---
-        let accel = thrust_accel + gravity_accel + lift_accel;
-        self.velocity += accel * dt;
-
-        // --- Altitude-hold: in the atmosphere the wings steer the velocity's RADIAL
-        // (vertical) component toward what the NOSE commands. A level nose (nose·radial≈0)
-        // commands ~0 radial velocity → holds altitude despite being above orbital speed
-        // and despite the curving planet. A raised/lowered nose commands a climb/descent
-        // matching the nose, so pitch directly flies you up/down. Strength ∝ density ·
-        // speed-fraction; in space (density 0) it's a no-op → free ballistic flight. ---
-        let radial_vel = self.velocity.dot(radial_out);
-        let commanded_radial = fwd_speed * nose.dot(radial_out);
-        let hold = (RADIAL_DAMP * density * speed_frac * dt).clamp(0.0, 1.0);
-        self.velocity -= radial_out * ((radial_vel - commanded_radial) * hold);
-
-        // --- Atmospheric drag: multiplicative damping ∝ density (clamped). Full-throttle
-        // thrust balances it at the cruise terminal. In space (density 0) it's a no-op →
-        // pure inertial coast. ---
-        let damp = (1.0 - DRAG_K * density * dt).clamp(0.0, 1.0);
-        self.velocity *= damp;
+        // --- HARD CAP: clamp |velocity| ≤ V_CAP, ALWAYS (both regimes). Anti-runaway. ---
+        let spd = self.velocity.length();
+        if spd > V_CAP {
+            self.velocity *= V_CAP / spd;
+        }
 
         // --- Integrate position ---
         self.position += self.velocity * dt;
@@ -259,10 +275,9 @@ impl Physics {
                 radial_out
             };
             self.position = out * floor;
-            // Zero out any remaining inward radial velocity (let it slide tangentially).
             let inward = self.velocity.dot(out);
             if inward < 0.0 {
-                self.velocity -= out * inward;
+                self.velocity -= out * inward; // zero inward radial velocity; slide tangent
             }
         }
 
@@ -274,179 +289,28 @@ impl Physics {
 mod scenarios {
     use super::*;
 
-    // Build a craft at altitude `alt` flying tangentially (level) eastward with a given speed.
-    fn level_craft(alt: f32, speed: f32) -> Physics {
-        let pos = Vec3::new(R_WORLD + alt, 0.0, 0.0); // on +X axis, radial = +X
-        // tangential (level) direction at +X pole: +Z or -Z; pick -Z (east-ish).
-        let look = Vec3::new(0.0, 0.0, -1.0);
-        let mut p = Physics::new(pos, look);
-        p.velocity = look * speed;
-        p.speed = speed;
-        p.throttle = 1.0;
-        p
-    }
-
     fn alt(p: &Physics) -> f32 {
         p.position.length() - R_WORLD
     }
 
-    fn run(p: &mut Physics, secs: f32, thrust: f32, pitch: f32, ftl: bool) {
-        let dt = 1.0 / 60.0;
-        let n = (secs / dt) as usize;
-        for _ in 0..n {
-            p.step(dt, thrust, pitch, 0.0, 0.0, 0.0, ftl);
-        }
-    }
-
-    // Simulate a pilot holding the nose on the LOCAL horizon (tangent to the sphere),
-    // optionally with an extra steady pitch offset (rad above/below level). Re-levels each
-    // frame, like a player keeping the craft level as it circles the globe.
-    fn run_leveled(p: &mut Physics, secs: f32, thrust: f32, pitch_offset: f32, ftl: bool) {
-        let dt = 1.0 / 60.0;
-        let n = (secs / dt) as usize;
-        for _ in 0..n {
-            // Re-orient: nose = tangential (velocity projected onto the local tangent plane),
-            // pitched by pitch_offset toward/away from the planet.
-            let radial = p.position.normalize();
-            let mut fwd = p.velocity - radial * p.velocity.dot(radial);
-            if fwd.length_squared() < 1e-6 {
-                fwd = (p.orientation * Vec3::NEG_Z) - radial * (p.orientation * Vec3::NEG_Z).dot(radial);
-            }
-            fwd = fwd.normalize();
-            // pitch up = tilt nose outward (+radial)
-            let nose = (fwd * pitch_offset.cos() + radial * pitch_offset.sin()).normalize();
-            let view = Mat4::look_to_rh(Vec3::ZERO, nose, radial);
-            let rot3 = Mat3::from_mat4(view).transpose();
-            p.orientation = Quat::from_mat3(&rot3).normalize();
-            // Pass the pitch_offset as a (sign-carrying) pitch INPUT so the hands-off
-            // auto-level only engages when the pilot is holding level (offset 0); a held
-            // climb/descent attitude is preserved.
-            p.step(dt, thrust, pitch_offset, 0.0, 0.0, 0.0, ftl);
-        }
-    }
-
-    #[test]
-    fn a_cruise_holds_altitude() {
-        // Cruise speed ≈ MAX_THRUST/DRAG ≈ 1000 wu/s, full throttle, level, in atmosphere.
-        let mut p = level_craft(400.0, 1000.0);
-        let a0 = alt(&p);
-        let mut amin = a0;
-        let mut amax = a0;
-        for s in 0..20 {
-            run_leveled(&mut p, 1.0, 1.0, 0.0, false);
-            let a = alt(&p);
-            amin = amin.min(a);
-            amax = amax.max(a);
-            if s % 5 == 0 {
-                println!("[cruise] t={}s alt={:.0} speed={:.0}", s + 1, a, p.speed);
-            }
-        }
-        println!("[cruise] start={:.0} min={:.0} max={:.0}", a0, amin, amax);
-        // Altitude should stay in a sensible band — not crash, not fly off.
-        assert!(amin > 50.0, "cruise sank too far: {amin}");
-        assert!(amax < ATMOSPHERE_TOP, "cruise flew off: {amax}");
-        assert!(p.speed.is_finite());
-    }
-
-    #[test]
-    fn b_throttle_off_sinks() {
-        let mut p = level_craft(400.0, 1000.0);
-        let s0 = p.speed;
-        let a0 = alt(&p);
-        for s in 0..15 {
-            run_leveled(&mut p, 1.0, -1.0, 0.0, false);
-            if s % 5 == 0 {
-                println!("[coast] t={}s alt={:.0} speed={:.0}", s + 1, alt(&p), p.speed);
-            }
-        }
-        println!("[coast] alt {:.0}->{:.0} speed {:.0}->{:.0}", a0, alt(&p), s0, p.speed);
-        assert!(p.speed < s0, "throttle-off should slow down");
-        assert!(alt(&p) < a0, "throttle-off should descend");
-    }
-
-    #[test]
-    fn c_pitch_climbs_and_descends() {
-        // Nose UP (pitch +) should climb; nose DOWN (pitch -) should descend, relative
-        // to level cruise. Using engine forward.
-        let mut up = level_craft(400.0, 1000.0);
-        let mut down = level_craft(400.0, 1000.0);
-        let mut level = level_craft(400.0, 1000.0);
-        run_leveled(&mut up, 5.0, 1.0, 0.4, false);
-        run_leveled(&mut down, 5.0, 1.0, -0.4, false);
-        run_leveled(&mut level, 5.0, 1.0, 0.0, false);
-        println!("[pitch] up={:.0} level={:.0} down={:.0}", alt(&up), alt(&level), alt(&down));
-        assert!(alt(&up) > alt(&level), "nose up should climb above level");
-        assert!(alt(&down) < alt(&level), "nose down should descend below level");
-    }
-
-    #[test]
-    fn d_space_coasts_straight() {
-        // High in space (well above ATMOSPHERE_TOP), no throttle → near-inertial coast.
-        let alt0 = R_WORLD * 4.0; // r = 5*R_WORLD, gravity weak
-        let pos = Vec3::new(R_WORLD + alt0, 0.0, 0.0);
-        let look = Vec3::new(0.0, 0.0, -1.0);
-        let mut p = Physics::new(pos, look);
-        let speed = 1000.0;
-        p.velocity = look * speed;
+    // A craft at altitude `alt` flying level (tangentially) at `speed`, oriented level.
+    fn level_craft(alt: f32, speed: f32, throttle: f32) -> Physics {
+        let pos = Vec3::new(R_WORLD + alt, 0.0, 0.0); // radial = +X
+        let up = pos.normalize();
+        let fwd = Vec3::NEG_Z; // tangent at +X
+        let view = Mat4::look_to_rh(Vec3::ZERO, fwd, up);
+        let rot3 = Mat3::from_mat4(view).transpose();
+        let mut p = Physics::new(pos, fwd);
+        p.orientation = Quat::from_mat3(&rot3).normalize();
+        p.velocity = fwd * speed;
         p.speed = speed;
-        p.throttle = 0.0; // pure coast: cut the engine (no residual idle thrust)
-        let dir0 = p.velocity.normalize();
-        run(&mut p, 5.0, -1.0, 0.0, false);
-        let dir1 = p.velocity.normalize();
-        let turn = dir0.dot(dir1).clamp(-1.0, 1.0).acos().to_degrees();
-        let dspeed = (p.speed - speed).abs();
-        println!("[space] speed {:.0}->{:.0} (Δ{:.1}) heading turned {:.2}°", speed, p.speed, dspeed, turn);
-        assert!(turn < 5.0, "space coast curved too much: {turn}°");
-        // No atmospheric drag in space: speed changes only by weak gravity doing work along
-        // the slightly-curved path (a few %), not by drag. Confirm it's small.
-        assert!(dspeed < 0.15 * speed, "space coast lost too much speed (drag leak?): {dspeed}");
+        p.throttle = throttle;
+        p
     }
 
-    #[test]
-    fn e_shift_space_escapes() {
-        // Low in the atmosphere, point straight UP (+radial), full throttle + afterburner.
-        let pos = Vec3::new(R_WORLD + 100.0, 0.0, 0.0);
-        let look = Vec3::new(1.0, 0.0, 0.0); // straight up (outward)
-        let mut p = Physics::new(pos, look);
-        for s in 0..20 {
-            run(&mut p, 1.0, 1.0, 0.0, true); // thrust up + ftl (Shift+Space)
-            if s % 4 == 0 {
-                println!("[escape] t={}s alt={:.0} r={:.0} speed={:.0}", s + 1, alt(&p), p.position.length(), p.speed);
-            }
-        }
-        let a = alt(&p);
-        println!("[escape] final alt={:.0} (ATMOSPHERE_TOP={:.0})", a, ATMOSPHERE_TOP);
-        assert!(a > ATMOSPHERE_TOP, "Shift+Space failed to escape atmosphere: {a}");
-        // and still climbing (outward radial velocity positive)
-        let out = p.position.normalize();
-        assert!(p.velocity.dot(out) > 0.0, "not still climbing at escape");
-    }
-
-    #[test]
-    fn f_floor_holds() {
-        // Point straight DOWN at the surface, full throttle.
-        let pos = Vec3::new(R_WORLD + 200.0, 0.0, 0.0);
-        let look = Vec3::new(-1.0, 0.0, 0.0); // straight down (inward)
-        let mut p = Physics::new(pos, look);
-        let mut min_r = p.position.length();
-        for _ in 0..600 {
-            p.step(1.0 / 60.0, 1.0, 0.0, 0.0, 0.0, 0.0, true);
-            min_r = min_r.min(p.position.length());
-        }
-        println!("[floor] min r = {:.2} (R_WORLD={:.0})", min_r, R_WORLD);
-        assert!(min_r >= R_WORLD, "craft sank below the sea-level sphere: {min_r}");
-        assert!(p.position.length().is_finite());
-    }
-
-    // Replicate the engine spawn: level cruise at CRUISE_ALT over (27N,86E), north
-    // heading, seeded velocity + throttle. With NO input it must HOLD altitude (not
-    // plummet to the floor, not rocket to space) and hold speed.
+    // Spawn state matching lib.rs set_spawn (level cruise).
     fn spawn_cruise() -> Physics {
-        let cruise_alt = 500.0_f32;
-        let cruise_speed = 450.0_f32;
-        let cruise_throttle = 0.30_f32;
-        // sphere_point(24,84, alt): radial dir over the north-Indian plains.
-        let pos = crate::heightfield::Heightfield::sphere_point(24.0, 84.0, cruise_alt);
+        let pos = crate::heightfield::Heightfield::sphere_point(38.0, 8.0, 250.0);
         let up = pos.normalize();
         let mut fwd = Vec3::Y - up * Vec3::Y.dot(up);
         fwd = fwd.normalize();
@@ -454,14 +318,134 @@ mod scenarios {
         let rot3 = Mat3::from_mat4(view).transpose();
         let mut p = Physics::new(pos, fwd);
         p.orientation = Quat::from_mat3(&rot3).normalize();
-        p.velocity = fwd * cruise_speed;
-        p.speed = cruise_speed;
-        p.throttle = cruise_throttle;
+        // Seed at the hands-off equilibrium: throttle 0 → target IDLE..CRUISE; pick a throttle
+        // whose v_target matches a sensible cruise speed and seed that speed.
+        let throttle = 0.5_f32;
+        let v = IDLE_SPEED + (CRUISE_MAX - IDLE_SPEED) * throttle;
+        p.velocity = fwd * v;
+        p.speed = v;
+        p.throttle = throttle;
         p
     }
 
+    fn run(p: &mut Physics, secs: f32, thrust: f32, pitch: f32, ftl: bool) {
+        let dt = 1.0 / 60.0;
+        for _ in 0..((secs / dt) as usize) {
+            p.step(dt, thrust, pitch, 0.0, 0.0, 0.0, ftl);
+        }
+    }
+
+    // (a) Accelerate holds altitude: ramp throttle to max for 20 s → altitude in a TIGHT band.
     #[test]
-    fn h_spawn_cruise_holds_altitude() {
+    fn a_accelerate_holds_altitude() {
+        let mut p = level_craft(400.0, 400.0, 0.5);
+        let a0 = alt(&p);
+        let (mut amin, mut amax) = (a0, a0);
+        for s in 0..20 {
+            run(&mut p, 1.0, 1.0, 0.0, false); // throttle UP, no pitch
+            let a = alt(&p);
+            amin = amin.min(a);
+            amax = amax.max(a);
+            if s % 5 == 0 {
+                println!("[accel] t={}s alt={:.0} speed={:.0}", s + 1, a, p.speed);
+            }
+        }
+        println!("[accel] alt start={:.0} min={:.0} max={:.0} | final speed={:.0}", a0, amin, amax, p.speed);
+        assert!((amin - a0).abs() < 80.0 && (amax - a0).abs() < 80.0, "altitude bobbed: {amin}..{amax} (start {a0})");
+        assert!(p.speed > CRUISE_MAX * 0.9, "did not reach cruise cap: {}", p.speed);
+        assert!(p.speed <= V_CAP);
+    }
+
+    // (b) Speed never exceeds cap: throttle + afterburner in space for 60 s.
+    #[test]
+    fn b_speed_capped_in_space() {
+        let pos = Vec3::new(R_WORLD + R_WORLD * 5.0, 0.0, 0.0);
+        let mut p = Physics::new(pos, Vec3::NEG_Z);
+        p.throttle = 1.0;
+        let mut vmax = 0.0_f32;
+        let dt = 1.0 / 60.0;
+        for i in 0..(60.0 / dt) as usize {
+            p.step(dt, 1.0, 0.0, 0.0, 0.0, 0.0, true); // Shift+Space
+            vmax = vmax.max(p.speed);
+            assert!(p.speed <= V_CAP + 1e-2, "EXCEEDED V_CAP: {} at step {i}", p.speed);
+            assert!(p.velocity.length() <= V_CAP + 1e-2);
+        }
+        println!("[cap] max speed over 60s = {:.1} (V_CAP={:.0})", vmax, V_CAP);
+        assert!(vmax.is_finite());
+    }
+
+    // (c) Pitch: nose up climbs, nose down descends, level holds.
+    #[test]
+    fn c_pitch_climbs_descends() {
+        let mut up = level_craft(400.0, 600.0, 0.7);
+        let mut down = level_craft(400.0, 600.0, 0.7);
+        let mut level = level_craft(400.0, 600.0, 0.7);
+        run(&mut up, 4.0, 0.0, 0.5, false);
+        run(&mut down, 4.0, 0.0, -0.5, false);
+        run(&mut level, 4.0, 0.0, 0.0, false);
+        println!("[pitch] up={:.0} level={:.0} down={:.0}", alt(&up), alt(&level), alt(&down));
+        assert!(alt(&up) > alt(&level) + 30.0, "nose up didn't climb");
+        assert!(alt(&down) < alt(&level) - 30.0, "nose down didn't descend");
+        assert!((alt(&level) - 400.0).abs() < 60.0, "level didn't hold: {}", alt(&level));
+    }
+
+    // (d) Stall: throttle 0 in atmosphere → slows below stall and sinks.
+    #[test]
+    fn d_stall_sinks() {
+        let mut p = level_craft(400.0, 600.0, 0.6);
+        let a0 = alt(&p);
+        for s in 0..20 {
+            run(&mut p, 1.0, -1.0, 0.0, false); // throttle DOWN
+            if s % 5 == 0 {
+                println!("[stall] t={}s alt={:.0} speed={:.0}", s + 1, alt(&p), p.speed);
+            }
+        }
+        println!("[stall] alt {:.0}->{:.0} speed ->{:.0} (STALL_SPEED={:.0})", a0, alt(&p), p.speed, STALL_SPEED);
+        assert!(p.speed <= IDLE_SPEED + 1.0, "didn't slow to idle: {}", p.speed);
+        assert!(alt(&p) < a0 - 30.0, "stall didn't sink: {} (start {a0})", alt(&p));
+    }
+
+    // (e) Space inertial: high up, no input → coasts ~straight (gravity gently curves).
+    #[test]
+    fn e_space_coasts() {
+        let pos = Vec3::new(R_WORLD + R_WORLD * 4.0, 0.0, 0.0);
+        let mut p = Physics::new(pos, Vec3::NEG_Z);
+        let speed = 1000.0;
+        p.velocity = Vec3::NEG_Z * speed;
+        p.speed = speed;
+        p.throttle = 0.0;
+        let dir0 = p.velocity.normalize();
+        run(&mut p, 5.0, 0.0, 0.0, false);
+        let dir1 = p.velocity.normalize();
+        let turn = dir0.dot(dir1).clamp(-1.0, 1.0).acos().to_degrees();
+        println!("[space] speed {:.0}->{:.0} heading turned {:.2}°", speed, p.speed, turn);
+        assert!(turn < 8.0, "space coast curved too hard: {turn}°");
+    }
+
+    // (f) Escape capped: Shift+Space from low, nose up → climbs to space, speed ≤ V_CAP.
+    #[test]
+    fn f_escape_capped() {
+        let pos = Vec3::new(R_WORLD + 100.0, 0.0, 0.0);
+        let look = Vec3::new(1.0, 0.0, 0.0); // straight up
+        let mut p = Physics::new(pos, look);
+        p.throttle = 1.0;
+        let dt = 1.0 / 60.0;
+        let mut vmax = 0.0_f32;
+        for i in 0..(30.0 / dt) as usize {
+            p.step(dt, 1.0, 0.0, 0.0, 0.0, 0.0, true);
+            vmax = vmax.max(p.speed);
+            assert!(p.speed <= V_CAP + 1e-2, "exceeded cap during escape: {} step {i}", p.speed);
+            if i % 360 == 0 {
+                println!("[escape] t={:.0}s alt={:.0} speed={:.0}", i as f32 * dt, alt(&p), p.speed);
+            }
+        }
+        println!("[escape] final alt={:.0} (ATM_TOP={:.0}) vmax={:.0}", alt(&p), ATMOSPHERE_TOP, vmax);
+        assert!(alt(&p) > ATMOSPHERE_TOP, "failed to escape: {}", alt(&p));
+    }
+
+    // (g) Hands-off cruise: spawn, no input ~20 s → altitude AND speed hold steady.
+    #[test]
+    fn g_hands_off_cruise() {
         let mut p = spawn_cruise();
         let a0 = alt(&p);
         let s0 = p.speed;
@@ -470,52 +454,28 @@ mod scenarios {
         let dt = 1.0 / 60.0;
         for s in 0..20 {
             for _ in 0..60 {
-                // NO input: thrust=0 (idle target handled internally), no pitch/yaw/roll.
                 p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false);
             }
             let a = alt(&p);
-            amin = amin.min(a);
-            amax = amax.max(a);
-            smin = smin.min(p.speed);
-            smax = smax.max(p.speed);
-            println!("[spawn] t={}s alt={:.0} speed={:.0}", s + 1, a, p.speed);
+            amin = amin.min(a); amax = amax.max(a);
+            smin = smin.min(p.speed); smax = smax.max(p.speed);
+            if s % 5 == 0 {
+                println!("[hands-off] t={}s alt={:.0} speed={:.0}", s + 1, a, p.speed);
+            }
         }
-        println!("[spawn] alt start={:.0} min={:.0} max={:.0} | speed start={:.0} min={:.0} max={:.0}",
-            a0, amin, amax, s0, smin, smax);
-        // Tight band: holds within ±120 wu of spawn alt, never near floor or atmosphere top.
-        assert!((amin - a0).abs() < 120.0, "spawn cruise sank: min={amin} (start {a0})");
-        assert!((amax - a0).abs() < 120.0, "spawn cruise climbed: max={amax} (start {a0})");
-        assert!(amin > 200.0, "spawn cruise dropped toward floor: {amin}");
-        assert!(amax < ATMOSPHERE_TOP, "spawn cruise left atmosphere: {amax}");
-        // Speed steady (no runaway, no stall).
-        assert!(smin > 300.0 && smax < 700.0, "spawn speed drifted: {smin}..{smax}");
+        println!("[hands-off] alt {:.0} [{:.0},{:.0}] | speed {:.0} [{:.0},{:.0}]", a0, amin, amax, s0, smin, smax);
+        assert!((amin - a0).abs() < 80.0 && (amax - a0).abs() < 80.0, "altitude drifted: {amin}..{amax}");
+        assert!((smax - smin) < 60.0, "speed drifted: {smin}..{smax}");
     }
 
+    // (h) Stability: dt=0.05 cap, long run → no NaN/blowup.
     #[test]
-    fn i_spawn_pitch_down_descends_shift_space_climbs() {
-        // From the spawn state, nose-down should descend below level.
-        let a0 = alt(&spawn_cruise());
-        let mut level = spawn_cruise();
-        let mut down = spawn_cruise();
-        run_leveled(&mut level, 4.0, 0.0, 0.0, false);
-        run_leveled(&mut down, 4.0, 0.0, -0.4, false);
-        println!("[spawn-pitch] level={:.0} down={:.0} (a0={:.0})", alt(&level), alt(&down), a0);
-        assert!(alt(&down) < alt(&level), "nose-down failed to descend from spawn");
-
-        // Shift+Space (full throttle + ftl, nose up) should climb out toward/into space.
-        let mut climb = spawn_cruise();
-        run_leveled(&mut climb, 6.0, 1.0, 0.6, true);
-        println!("[spawn-climb] alt={:.0} (ATM_TOP={:.0})", alt(&climb), ATMOSPHERE_TOP);
-        assert!(alt(&climb) > a0 + 200.0, "Shift+Space failed to climb from spawn");
-    }
-
-    #[test]
-    fn g_stable_at_dt_cap() {
-        // Large dt (cap) should not blow up.
-        let mut p = level_craft(400.0, 1000.0);
-        for _ in 0..300 {
-            p.step(0.05, 1.0, 0.0, 0.0, 0.0, 0.0, false);
-            assert!(p.position.is_finite() && p.velocity.is_finite());
+    fn h_stable_at_dt_cap() {
+        let mut p = level_craft(400.0, 600.0, 1.0);
+        for _ in 0..2000 {
+            p.step(0.05, 1.0, 0.0, 0.0, 0.0, 0.0, true);
+            assert!(p.position.is_finite() && p.velocity.is_finite(), "NaN/blowup");
+            assert!(p.speed <= V_CAP + 1e-2);
         }
         println!("[dtcap] alt={:.0} speed={:.0}", alt(&p), p.speed);
     }
