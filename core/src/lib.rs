@@ -27,16 +27,15 @@ const CHASE_BACK: f32 = 28.0;
 /// Tiny against a 6000 wu planet — a small foreground silhouette.
 pub const AIRCRAFT_SCALE: f32 = 2.2;
 
-/// Spawn: cruising LEVEL inside the atmosphere over the Algerian Sahara
-/// (lat 27°N, lon 3°E), heading NORTH so flying forward the view crosses the Sahara →
-/// the Atlas Mountains wall (rising ahead) → the Mediterranean coastline → Spain / Europe
-/// — recognizable geography unfolding ahead. The Atlas wall a few hundred km north fills
-/// the lower frame; the Med is the faint sea gap beyond it. Cruise altitude is low enough
-/// that the curved horizon + terrain sit in frame (horizon dip ≈ acos(R/(R+alt)) must stay
-/// within the ~22° half-FOV).
-const SPAWN_LAT: f32 = 27.0;
-const SPAWN_LON: f32 = 3.0;
-/// Cruise altitude above the sea-level sphere (wu). Above the local plains, below the
+/// Spawn: cruising LEVEL inside the atmosphere over the western/central MEDITERRANEAN
+/// (lat 38°N, lon 8°E), heading NORTH toward Europe. The Med is sea (elevation 0 = faint),
+/// so the recognizable geography is the surrounding COASTLINES: Spain / France / Italy
+/// rising ahead to the north, the North-African coast falling behind to the south. Cruise
+/// altitude is set so the sea gap + the European coast read in frame, with the curved
+/// horizon dip (≈ acos(R/(R+alt))) staying within the ~22° half-FOV.
+const SPAWN_LAT: f32 = 38.0;
+const SPAWN_LON: f32 = 8.0;
+/// Cruise altitude above the sea-level sphere (wu). Above sea level, below the
 /// FOV horizon limit so the planet + horizon are visible ahead in level flight.
 const CRUISE_ALT: f32 = 400.0;
 /// Forward cruise speed (wu/s). Seeded to match the hands-off (idle-throttle) terminal at
