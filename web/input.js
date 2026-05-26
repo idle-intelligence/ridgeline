@@ -80,10 +80,12 @@ export class InputHandler {
         const dy = t.clientY - this._touchY;
         this._touchX = t.clientX;
         this._touchY = t.clientY;
-        // Mouse uses lookDX = -dX*sens (positive = look right). Negate dx so
-        // dragging right looks right; leave dy so dragging down looks down.
-        this._dX += -dx * TOUCH_SENSITIVITY;
-        this._dY +=  dy * TOUCH_SENSITIVITY;
+        // Accumulators hold raw rightward/downward pixels (right = +dX, down = +dY),
+        // scaled into mouse-px units. sample() turns them into the engine's look
+        // convention (lookDX>0 = look right, lookDY>0 = look up). Drag finger right →
+        // look right; drag down → look down.
+        this._dX += dx * TOUCH_SENSITIVITY;
+        this._dY += dy * TOUCH_SENSITIVITY;
       }
     }, { passive: false });
 
@@ -132,8 +134,11 @@ export class InputHandler {
 
     return {
       input: [thrust, 0, 0, pitch, yaw, roll, 0, afterburner],
-      lookDX: -dX * MOUSE_SENSITIVITY,   // positive = look right
-      lookDY: -dY * MOUSE_SENSITIVITY,   // positive = look up (inverted Y)
+      // dX/dY hold rightward/downward pixels. Engine convention: lookDX>0 = look right,
+      // lookDY>0 = look up. Moving right (dX>0) → look right → +dX. Moving down (dY>0) →
+      // look down → -dY (screen-down is camera-pitch-down = negative look-up).
+      lookDX:  dX * MOUSE_SENSITIVITY,   // positive = look right (mouse right → look right)
+      lookDY: -dY * MOUSE_SENSITIVITY,   // positive = look up (mouse down → look down)
     };
   }
 }

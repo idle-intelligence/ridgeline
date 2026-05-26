@@ -80,7 +80,10 @@ fn chase_cam_pos(phys: &Physics) -> Vec3 {
 
 fn compute_view_proj(phys: &Physics, look_yaw: f32, look_pitch: f32, aspect: f32) -> [f32; 16] {
     let cam_pos = chase_cam_pos(phys);
-    let look_offset = Quat::from_rotation_y(look_yaw) * Quat::from_rotation_x(look_pitch);
+    // Negate look_yaw: Mat4::look_to_rh's basis makes from_rotation_y(+yaw) turn the view
+    // LEFT, but set_look's contract is "positive d_yaw = look RIGHT". Flip here so a positive
+    // d_yaw rotates the view right (world slides left), consistently for mouse + touch.
+    let look_offset = Quat::from_rotation_y(-look_yaw) * Quat::from_rotation_x(look_pitch);
     let cam_orient = phys.orientation * look_offset;
     let fwd = cam_orient * Vec3::NEG_Z;
     let up = cam_orient * Vec3::Y;
@@ -361,5 +364,79 @@ impl Engine {
         let arr = Float32Array::new_with_length(2);
         arr.copy_from(&[lat, lon]);
         arr
+    }
+}
+
+#[cfg(test)]
+mod look_dir {
+    use super::*;
+
+    // Project a world point through view_proj; return clip-space x (NDC after w-divide).
+    fn screen_x(vp: &[f32; 16], p: Vec3) -> f32 {
+        let m = Mat4::from_cols_array(vp);
+        let v = m * glam::Vec4::new(p.x, p.y, p.z, 1.0);
+        v.x / v.w
+    }
+
+    fn make_phys() -> Physics {
+        let pos = spawn_position();
+        let (fwd, up) = spawn_basis();
+        let view = Mat4::look_to_rh(Vec3::ZERO, fwd, up);
+        let rot3 = glam::Mat3::from_mat4(view).transpose();
+        let mut phys = Physics::new(pos, fwd);
+        phys.orientation = Quat::from_mat3(&rot3).normalize();
+        phys.velocity = fwd * CRUISE_SPEED;
+        phys.speed = CRUISE_SPEED;
+        phys
+    }
+
+    #[test]
+    fn look_right_shifts_world_left() {
+        let phys = make_phys();
+        // A landmark straight ahead on the surface (a bit north of spawn).
+        let landmark = Heightfield::sphere_point(SPAWN_LAT + 10.0, SPAWN_LON, 0.0);
+        let vp0 = compute_view_proj(&phys, 0.0, 0.0, ASPECT_DEFAULT);
+        let x0 = screen_x(&vp0, landmark);
+        // Apply "look right" = positive d_yaw.
+        let vp1 = compute_view_proj(&phys, 0.2, 0.0, ASPECT_DEFAULT);
+        let x1 = screen_x(&vp1, landmark);
+        println!("[look-right] landmark screen-x {x0:.3} -> {x1:.3} (should DECREASE: world slides left)");
+        assert!(x1 < x0, "look-right must slide world LEFT (screen-x decreases): {x0}->{x1}");
+    }
+
+    #[test]
+    fn look_up_shifts_world_down() {
+        let phys = make_phys();
+        let landmark = Heightfield::sphere_point(SPAWN_LAT + 10.0, SPAWN_LON, 0.0);
+        let m0 = Mat4::from_cols_array(&compute_view_proj(&phys, 0.0, 0.0, ASPECT_DEFAULT));
+        let m1 = Mat4::from_cols_array(&compute_view_proj(&phys, 0.0, 0.2, ASPECT_DEFAULT));
+        let yof = |m: Mat4| { let v = m * glam::Vec4::new(landmark.x, landmark.y, landmark.z, 1.0); v.y / v.w };
+        let y0 = yof(m0);
+        let y1 = yof(m1);
+        println!("[look-up] landmark screen-y {y0:.3} -> {y1:.3} (should DECREASE: world slides down)");
+        assert!(y1 < y0, "look-up must slide world DOWN: {y0}->{y1}");
+    }
+
+    #[test]
+    fn yaw_right_key_rotates_right() {
+        // Apply the keyboard "yaw right" input (KeyE => yaw = +RUDDER_RATE after the fix).
+        // Confirm the nose turns toward the craft's RIGHT (+local-X). Measure the nose's
+        // component along the initial local-right axis: turning right makes it positive.
+        let p = make_phys();
+        let right0 = (p.orientation * Vec3::X).normalize(); // craft's right (world)
+        let fwd0 = (p.orientation * Vec3::NEG_Z).normalize();
+        // physics applies the yaw as orientation * from_axis_angle(Vec3::Y, yaw*dt). The
+        // hands-off auto-level then re-snaps the nose to the velocity heading each frame, so
+        // we isolate the yaw rotation itself (its sign is what determines left vs right).
+        // input.js KeyE (yaw right) => yaw = -RUDDER_RATE (physics +Y rotation turns LEFT,
+        // so "yaw right" is the negative arg — already correct in input.js).
+        let yaw = -0.5_f32;
+        let dq_yaw = Quat::from_axis_angle(Vec3::Y, yaw * 0.5);
+        let new_orient = (p.orientation * dq_yaw).normalize();
+        let fwd1 = (new_orient * Vec3::NEG_Z).normalize();
+        let right_comp = fwd1.dot(right0);
+        let fwd_comp = fwd1.dot(fwd0);
+        println!("[yaw-right-key] nose·right0={right_comp:.3} nose·fwd0={fwd_comp:.3} (right_comp>0 = turned right)");
+        assert!(right_comp > 0.05, "KeyE (yaw right=+RUDDER) must rotate the nose RIGHT: nose·right0={right_comp}");
     }
 }
