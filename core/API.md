@@ -107,10 +107,17 @@ offset is view-only.
 western/central Mediterranean (38°N, 8°E), heading NORTH toward Europe. (Configurable at
 runtime via `set_spawn` — see "Spawn + setters" above; the web layer maps URL query params
 `?lat=&lon=&alt=&heading=&ve=` onto it.) The orientation is built from a radial basis
-(up = radial, forward = north tangent), and the craft is seeded with a forward velocity (`CRUISE_SPEED = 450` wu/s) and
-the hands-off cruise throttle (`= IDLE_THROTTLE`), so from frame 1 it holds altitude and
-speed with no input — no free-fall, no climb-out. Pitch down dives; pitch up + Shift+Space
-climbs to space. The chase craft is a small foreground silhouette against the terrain and
+(up = radial, forward = north tangent), and the craft is seeded with a forward velocity
+(`CRUISE_SPEED = 450` wu/s) and a cruise throttle (`CRUISE_THROTTLE = 0.485`) whose target
+speed equals `CRUISE_SPEED`. With no thrust input the throttle holds, so from frame 1 the
+craft holds altitude and speed — no free-fall, no climb-out. Pitch down dives; pitch up +
+Shift+Space climbs to space.
+
+**Flight model** (see `docs/physics.md`): speed is **decoupled from altitude**. Throttle
+sets a *target speed* (hard-capped at `V_CAP = 10000` wu/s, so the HUD km/h is always
+bounded). In the atmosphere the craft flies **by the nose** — a level nose holds altitude at
+any speed, pitch climbs/dives, and dropping below `STALL_SPEED` makes it sink. In space it is
+**Newtonian** (coasts; gravity + nose-thrust only). The two blend by air density. The chase craft is a small foreground silhouette against the terrain and
 curved horizon ahead (AIRCRAFT_SCALE small vs the 6000 wu planet).
 
 Projection near/far are at space scale: `Z_NEAR=1`, `Z_FAR=200000` (globe radius 6000,
