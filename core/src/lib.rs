@@ -326,7 +326,7 @@ impl Engine {
         let p = chase_cam_pos(&self.phys);
         let r = p.length().max(1e-6);
         let lat = (p.y / r).clamp(-1.0, 1.0).asin().to_degrees();
-        let lon = p.z.atan2(p.x).to_degrees();
+        let lon = (-p.z).atan2(p.x).to_degrees();
         let arr = Float32Array::new_with_length(2);
         arr.copy_from(&[lat, lon]);
         arr

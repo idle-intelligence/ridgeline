@@ -6,7 +6,7 @@
 //   R_world = planet radius in world units = 6000.0
 //   h_wu    = elev_m * VERT_SCALE      (vertical exaggeration)
 //   r       = R_world + h_wu
-//   x = r·cosφ·cosλ,  y = r·sinφ,  z = r·cosφ·sinλ   (north pole = +Y)
+//   x = r·cosφ·cosλ,  y = r·sinφ,  z = -r·cosφ·sinλ   (north pole = +Y)
 //
 // φ in [-90,90]°, λ in [-180,180]°. row 0 = +90° north, col 0 = -180° west.
 //
@@ -130,7 +130,10 @@ impl Heightfield {
         let r = R_WORLD + h_wu;
         let (sin_phi, cos_phi) = phi.sin_cos();
         let (sin_lam, cos_lam) = lam.sin_cos();
-        Vec3::new(r * cos_phi * cos_lam, r * sin_phi, r * cos_phi * sin_lam)
+        // Longitude handedness flipped (z = −r·cosφ·sinλ) so that with north up, EAST
+        // renders to the RIGHT — matching how a map/globe reads. lat_lon() inverts this
+        // with lon = atan2(−z, x) to keep the HUD reporting true longitude.
+        Vec3::new(r * cos_phi * cos_lam, r * sin_phi, -r * cos_phi * sin_lam)
     }
 
 }

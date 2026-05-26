@@ -16,7 +16,8 @@ cell (row → latitude φ, col → longitude λ, elev_m) maps to a 3D point on a
 - `VERT_SCALE` = **0.11** wu per meter of elevation (vertical exaggeration). Max elevation
   (7712 m) bulges ≈ 848 wu (~14% of R_WORLD) so continents/mountains read dramatically.
 - `h_wu = elev_m * VERT_SCALE`, `r = R_WORLD + h_wu`.
-- Cartesian (north pole = **+Y**): `x = r·cosφ·cosλ`, `y = r·sinφ`, `z = r·cosφ·sinλ`,
+- Cartesian (north pole = **+Y**): `x = r·cosφ·cosλ`, `y = r·sinφ`, `z = -r·cosφ·sinλ`
+  (longitude handedness flipped so EAST renders to the RIGHT with north up),
   φ in [-90,90]°, λ in [-180,180]°. row 0 = +90° N (lat_max), col 0 = -180° W (lon_min).
 - Each grid ROW (constant latitude) is a parallel ring around the globe; sweeping λ traces
   the ring with elevation bumps. Land bulges out, ocean (h=0) is a smooth circle at R_WORLD.
@@ -140,7 +141,7 @@ painter's back-to-front order is no longer required.
 - `eng.speed()` → f32 (world units/sec).
 - `eng.speed_kmh()` → f32 (km/h) = `speed() × M_PER_WU × 3.6` (same horizontal planet scale).
 - `eng.lat_lon()` → `Float32Array` length 2 `[lat, lon]` — the **sub-camera point**: the camera
-  position projected onto the globe. `lat = asin(cam.y / |cam|)`, `lon = atan2(cam.z, cam.x)`,
+  position projected onto the globe. `lat = asin(cam.y / |cam|)`, `lon = atan2(-cam.z, cam.x)`,
   both in degrees. Shows what the camera is above.
 
 ## Rendering contract (web side)
