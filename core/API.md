@@ -50,6 +50,25 @@ const eng = new Engine(             // #[wasm_bindgen(constructor)] → JS `new`
 );
 ```
 
+## Spawn + setters (call after construction, before the first `step`)
+```
+eng.set_spawn(lat_deg, lon_deg, alt_wu, heading_deg);
+// lat_deg, lon_deg : f32 degrees — geographic spawn point.
+// alt_wu           : f32 world units above the sea-level sphere (alt_m = alt_wu * M_PER_WU).
+// heading_deg      : f32 degrees compass — 0 = north, 90 = east.
+// Places the craft cruising LEVEL at (lat,lon,alt), nose tangent on the heading, with the
+// same seeded cruise velocity + throttle + altitude-hold as the default spawn. Resets
+// freelook (look_yaw/look_pitch = 0) and regenerates geometry so the first frame is correct.
+// new() calls this with the default spawn: lat 38°N, lon 8°E, CRUISE_ALT = 250 wu, heading north.
+
+eng.set_exaggeration_override(ve);   // force a FIXED terrain vertical exaggeration.
+eng.clear_exaggeration_override();   // back to the altitude-coupled ve_for_altitude ramp.
+// When an override is set, the per-frame terrain relief uses this constant `ve` INSTEAD of
+// VE(altitude), so the player can hold a constant relief at any altitude. When unset, the
+// altitude-coupled behavior is unchanged. Only terrain relief is affected (occluder/camera/
+// physics/HUD scales are untouched), same as the altitude-coupled path.
+```
+
 ## Per-frame input (call before `step`)
 ```
 eng.set_look(d_yaw, d_pitch);
@@ -84,10 +103,11 @@ View direction = ship orientation + freelook offset (`set_look`). Flight physics
 (`phys.position`, `phys.orientation`) are the **ship** transform; the camera
 offset is view-only.
 
-**Spawn**: ship cruising LEVEL inside the atmosphere at `CRUISE_ALT = 500` wu over the
-north-Indian plains (24°N, 84°E), heading NORTH toward the Himalaya / Tibetan-plateau
-wall. The orientation is built from a radial basis (up = radial, forward = north
-tangent), and the craft is seeded with a forward velocity (`CRUISE_SPEED = 450` wu/s) and
+**Spawn**: ship cruising LEVEL inside the atmosphere at `CRUISE_ALT = 250` wu over the
+western/central Mediterranean (38°N, 8°E), heading NORTH toward Europe. (Configurable at
+runtime via `set_spawn` — see "Spawn + setters" above; the web layer maps URL query params
+`?lat=&lon=&alt=&heading=&ve=` onto it.) The orientation is built from a radial basis
+(up = radial, forward = north tangent), and the craft is seeded with a forward velocity (`CRUISE_SPEED = 450` wu/s) and
 the hands-off cruise throttle (`= IDLE_THROTTLE`), so from frame 1 it holds altitude and
 speed with no input — no free-fall, no climb-out. Pitch down dives; pitch up + Shift+Space
 climbs to space. The chase craft is a small foreground silhouette against the terrain and

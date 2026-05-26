@@ -52,6 +52,7 @@ const FADE_BAND: f32 = 0.12;
 /// ~85° half-angle (≈170° total cone) — very forgiving; the per-distance LOD is the real win.
 const SIGHT_HALF_ANGLE: f32 = 1.483; // ~85°
 
+#[derive(Default)]
 pub struct GeometryBuffers {
     pub fill_verts: Vec<f32>,
     pub fill_draws: Vec<u32>,
@@ -142,7 +143,12 @@ fn visible_lon_half_deg(lat_deg: f32, cam_dir: Vec3, cut: f32) -> Option<f32> {
     }
 }
 
-pub fn generate(hf: &Heightfield, cam_pos: Vec3, cam_fwd: Vec3) -> GeometryBuffers {
+pub fn generate(
+    hf: &Heightfield,
+    cam_pos: Vec3,
+    cam_fwd: Vec3,
+    ve_override: Option<f32>,
+) -> GeometryBuffers {
     let cam_len = cam_pos.length().max(R_WORLD + 1.0);
     let cam_dir = cam_pos / cam_len;
     // Horizon plane: points with dot(P̂, cam_dir) > R/|cam| are on the near hemisphere.
@@ -157,7 +163,9 @@ pub fn generate(hf: &Heightfield, cam_pos: Vec3, cam_fwd: Vec3) -> GeometryBuffe
     // surface. A single global factor this frame → smooth radial scaling, no swimming
     // (lat/lon indices and distance-based LOD strides are unchanged). Only terrain ring
     // radii use `ve`; the occluder sphere and all distance/horizon math stay on real scale.
-    let ve = ve_for_altitude(cam_len - R_WORLD);
+    // When a fixed exaggeration override is set, use it directly; otherwise the
+    // altitude-coupled ramp.
+    let ve = ve_override.unwrap_or_else(|| ve_for_altitude(cam_len - R_WORLD));
 
     let mut fill_verts: Vec<f32> = Vec::new();
     let mut fill_draws: Vec<u32> = Vec::new();

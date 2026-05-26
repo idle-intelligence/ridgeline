@@ -35,9 +35,12 @@ pub const AIRCRAFT_SCALE: f32 = 2.2;
 /// horizon dip (≈ acos(R/(R+alt))) staying within the ~22° half-FOV.
 const SPAWN_LAT: f32 = 38.0;
 const SPAWN_LON: f32 = 8.0;
-/// Cruise altitude above the sea-level sphere (wu). Above sea level, below the
-/// FOV horizon limit so the planet + horizon are visible ahead in level flight.
-const CRUISE_ALT: f32 = 400.0;
+/// Default cruise altitude above the sea-level sphere (wu). Lowered so the player starts
+/// nearer the surface with terrain clearly in view, while still holding a stable
+/// altitude-hold cruise (well within the FOV horizon limit). ~250 wu ≈ 265 km.
+const CRUISE_ALT: f32 = 250.0;
+/// Default spawn heading (degrees, 0 = north, 90 = east). North toward Europe.
+const SPAWN_HEADING: f32 = 0.0;
 /// Forward cruise speed (wu/s). Seeded to match the hands-off (idle-throttle) terminal at
 /// this altitude so speed stays flat with no input.
 const CRUISE_SPEED: f32 = 450.0;
@@ -45,28 +48,24 @@ const CRUISE_SPEED: f32 = 450.0;
 /// engine already sits at the level it settles to → steady cruise from frame 1.
 const CRUISE_THROTTLE: f32 = 0.30;
 
-/// Ship spawn position: on the cruise-altitude sphere over (SPAWN_LAT, SPAWN_LON).
-fn spawn_position() -> Vec3 {
-    Heightfield::sphere_point(SPAWN_LAT, SPAWN_LON, CRUISE_ALT)
-}
-
-/// Level-flight orientation at spawn: up = radial (away from center), forward = the
-/// tangent direction pointing NORTH along the surface (perpendicular to up). Returns
-/// (forward, up) so the caller can build the basis and seed the velocity.
-fn spawn_basis() -> (Vec3, Vec3) {
-    let up = spawn_position().normalize();
+/// Level-flight orientation at a geographic spawn point: up = radial (away from center),
+/// forward = the tangent direction along the surface on the given compass heading
+/// (0 = north, 90 = east). Returns (forward, up) so the caller can build the basis and
+/// seed the velocity. `pos` is the spawn position (used to derive the local up).
+fn spawn_basis_at(pos: Vec3, heading_deg: f32) -> (Vec3, Vec3) {
+    let up = pos.normalize();
     // North-ish tangent: project the +Y (north pole) axis onto the local tangent plane.
-    let mut fwd = Vec3::Y - up * Vec3::Y.dot(up);
-    if fwd.length_squared() < 1e-6 {
+    let mut north = Vec3::Y - up * Vec3::Y.dot(up);
+    if north.length_squared() < 1e-6 {
         // Near a pole: fall back to an eastward tangent.
-        fwd = Vec3::X - up * Vec3::X.dot(up);
+        north = Vec3::X - up * Vec3::X.dot(up);
     }
-    (fwd.normalize(), up)
-}
-
-/// Look direction at spawn: tangent (level, horizontal), pointing north.
-fn spawn_look() -> Vec3 {
-    spawn_basis().0
+    let north = north.normalize();
+    // East completes the right-handed local frame (north × up points east in this mapping).
+    let east = north.cross(up).normalize();
+    let hdg = heading_deg.to_radians();
+    let fwd = (north * hdg.cos() + east * hdg.sin()).normalize();
+    (fwd, up)
 }
 
 // Freelook clamps (radians)
@@ -101,6 +100,7 @@ pub struct Engine {
     aspect: f32,
     look_yaw: f32,
     look_pitch: f32,
+    ve_override: Option<f32>,
     i_thrust: f32,
     i_pitch: f32,
     i_yaw: f32,
@@ -133,40 +133,66 @@ impl Engine {
             lon_min, lon_max,
         );
 
-        let pos = spawn_position();
-        let look = spawn_look();
-        let mut phys = Physics::new(pos, look);
-        // Seed a stable in-atmosphere cruise: build a LEVEL orientation from the radial
-        // basis (up = radial, forward = north tangent), move forward at cruise speed, and
-        // seed the throttle that balances drag so speed + altitude hold without input.
-        let (fwd, up) = spawn_basis();
-        let view = Mat4::look_to_rh(Vec3::ZERO, fwd, up);
-        let rot3 = glam::Mat3::from_mat4(view).transpose();
-        phys.orientation = Quat::from_mat3(&rot3).normalize();
-        phys.velocity = fwd * CRUISE_SPEED;
-        phys.speed = CRUISE_SPEED;
-        phys.throttle = CRUISE_THROTTLE;
-        let view_proj_mat = compute_view_proj(&phys, 0.0, 0.0, ASPECT_DEFAULT);
+        // Placeholder physics; set_spawn() below positions/orients/seeds the craft.
+        let phys = Physics::new(Vec3::new(R_WORLD + CRUISE_ALT, 0.0, 0.0), Vec3::NEG_Z);
+        let geom = GeometryBuffers::default();
 
-        let cam_pos = chase_cam_pos(&phys);
-        let cam_fwd = phys.orientation * Vec3::NEG_Z;
-        let geom = geometry::generate(&hf, cam_pos, cam_fwd);
-
-        Engine {
+        let mut eng = Engine {
             hf,
             phys,
             geom,
-            view_proj_mat,
+            view_proj_mat: [0.0; 16],
             aspect: ASPECT_DEFAULT,
             look_yaw: 0.0,
             look_pitch: 0.0,
+            ve_override: None,
             i_thrust: 0.0,
             i_pitch: 0.0,
             i_yaw: 0.0,
             i_roll: 0.0,
             i_boost: 0.0,
             i_ftl: false,
-        }
+        };
+        eng.set_spawn(SPAWN_LAT, SPAWN_LON, CRUISE_ALT, SPAWN_HEADING);
+        eng
+    }
+
+    /// Place the craft cruising LEVEL at a geographic point and altitude, nose tangent on
+    /// the given compass heading (0 = north, 90 = east). `alt_wu` is world units above the
+    /// sea-level sphere. Seeds the same cruise velocity + throttle + altitude-hold as the
+    /// default spawn, resets freelook, and regenerates geometry so the first frame is correct.
+    pub fn set_spawn(&mut self, lat_deg: f32, lon_deg: f32, alt_wu: f32, heading_deg: f32) {
+        let pos = Heightfield::sphere_point(lat_deg, lon_deg, alt_wu);
+        let (fwd, up) = spawn_basis_at(pos, heading_deg);
+        let mut phys = Physics::new(pos, fwd);
+        // LEVEL orientation from the radial basis, forward velocity at cruise speed, and the
+        // seeded throttle that balances drag so speed + altitude hold without input.
+        let view = Mat4::look_to_rh(Vec3::ZERO, fwd, up);
+        let rot3 = glam::Mat3::from_mat4(view).transpose();
+        phys.orientation = Quat::from_mat3(&rot3).normalize();
+        phys.velocity = fwd * CRUISE_SPEED;
+        phys.speed = CRUISE_SPEED;
+        phys.throttle = CRUISE_THROTTLE;
+        self.phys = phys;
+        self.look_yaw = 0.0;
+        self.look_pitch = 0.0;
+
+        let cam_pos = chase_cam_pos(&self.phys);
+        let cam_fwd = self.phys.orientation * Vec3::NEG_Z;
+        self.geom = geometry::generate(&self.hf, cam_pos, cam_fwd, self.ve_override);
+        self.view_proj_mat = compute_view_proj(&self.phys, 0.0, 0.0, self.aspect);
+    }
+
+    /// Force a FIXED terrain vertical exaggeration, used INSTEAD of the altitude-coupled
+    /// `ve_for_altitude` ramp. Lets the player hold a constant relief at any altitude.
+    pub fn set_exaggeration_override(&mut self, ve: f32) {
+        self.ve_override = Some(ve);
+    }
+
+    /// Clear the fixed exaggeration override; terrain relief returns to the altitude-coupled
+    /// behavior.
+    pub fn clear_exaggeration_override(&mut self) {
+        self.ve_override = None;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -208,7 +234,7 @@ impl Engine {
         let look_offset =
             Quat::from_rotation_y(-self.look_yaw) * Quat::from_rotation_x(self.look_pitch);
         let cam_fwd = (self.phys.orientation * look_offset) * Vec3::NEG_Z;
-        self.geom = geometry::generate(&self.hf, cam_pos, cam_fwd);
+        self.geom = geometry::generate(&self.hf, cam_pos, cam_fwd, self.ve_override);
         self.view_proj_mat =
             compute_view_proj(&self.phys, self.look_yaw, self.look_pitch, self.aspect);
     }
@@ -225,7 +251,7 @@ impl Engine {
         self.look_pitch = 0.0;
         let cam_pos = chase_cam_pos(&self.phys);
         let cam_fwd = self.phys.orientation * Vec3::NEG_Z;
-        self.geom = geometry::generate(&self.hf, cam_pos, cam_fwd);
+        self.geom = geometry::generate(&self.hf, cam_pos, cam_fwd, self.ve_override);
         self.view_proj_mat = compute_view_proj(&self.phys, 0.0, 0.0, self.aspect);
     }
 
@@ -248,7 +274,7 @@ impl Engine {
         self.look_pitch = 0.0;
         let cam_pos = chase_cam_pos(&self.phys);
         let cam_fwd = self.phys.orientation * Vec3::NEG_Z;
-        self.geom = geometry::generate(&self.hf, cam_pos, cam_fwd);
+        self.geom = geometry::generate(&self.hf, cam_pos, cam_fwd, self.ve_override);
         self.view_proj_mat = compute_view_proj(&self.phys, 0.0, 0.0, self.aspect);
     }
 
@@ -380,8 +406,8 @@ mod look_dir {
     }
 
     fn make_phys() -> Physics {
-        let pos = spawn_position();
-        let (fwd, up) = spawn_basis();
+        let pos = Heightfield::sphere_point(SPAWN_LAT, SPAWN_LON, CRUISE_ALT);
+        let (fwd, up) = spawn_basis_at(pos, SPAWN_HEADING);
         let view = Mat4::look_to_rh(Vec3::ZERO, fwd, up);
         let rot3 = glam::Mat3::from_mat4(view).transpose();
         let mut phys = Physics::new(pos, fwd);
@@ -416,6 +442,23 @@ mod look_dir {
         let y1 = yof(m1);
         println!("[look-up] landmark screen-y {y0:.3} -> {y1:.3} (should DECREASE: world slides down)");
         assert!(y1 < y0, "look-up must slide world DOWN: {y0}->{y1}");
+    }
+
+    #[test]
+    fn heading_east_points_east() {
+        // At a mid-latitude point, heading 90° (east) should give a forward tangent whose
+        // longitude increases relative to the spawn (moving east), and heading 0° points north.
+        let pos = Heightfield::sphere_point(38.0, 8.0, 120.0);
+        let (north_fwd, up) = spawn_basis_at(pos, 0.0);
+        let (east_fwd, _) = spawn_basis_at(pos, 90.0);
+        // North forward must increase latitude: a small step north has higher y/|p|.
+        let step_n = (pos + north_fwd * 10.0).normalize();
+        assert!(step_n.y > up.y, "heading 0 must move toward the north pole (+lat)");
+        // East forward must increase longitude. lon = atan2(-z, x).
+        let lon = |p: Vec3| (-p.z).atan2(p.x);
+        let step_e = pos + east_fwd * 10.0;
+        let dlon = lon(step_e) - lon(pos);
+        assert!(dlon > 0.0, "heading 90 must move EAST (+lon): dlon={dlon}");
     }
 
     #[test]
