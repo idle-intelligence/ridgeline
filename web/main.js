@@ -64,6 +64,58 @@ async function buildEngine(meta, hfBytes, wmBytes) {
   );
 }
 
+// --- URL params ---
+
+// Meters of real surface per world unit (mirrors core heightfield::M_PER_WU).
+const M_PER_WU = 6371000 / 6000; // ≈ 1061.8
+
+// Defaults mirror the core's default spawn (lower in-atmosphere cruise over the Med).
+const DEFAULT_SPAWN = { lat: 38.0, lon: 8.0, altWu: 250.0, heading: 0.0 };
+
+// Safe altitude band (world units above the sea-level sphere): above the surface,
+// below escaping to deep space. ~10 wu (≈10.6 km) up to ~12000 wu (≈12740 km).
+const ALT_WU_MIN = 10.0;
+const ALT_WU_MAX = 12000.0;
+
+function num(params, key) {
+  if (!params.has(key)) return null;
+  const v = parseFloat(params.get(key));
+  return Number.isFinite(v) ? v : null;
+}
+
+function wrapLon(lon) {
+  // Wrap to [-180, 180).
+  return ((((lon + 180) % 360) + 360) % 360) - 180;
+}
+
+function applyUrlParams(eng) {
+  const params = new URLSearchParams(location.search);
+
+  const lat = num(params, 'lat');
+  const lon = num(params, 'lon');
+  const altKm = num(params, 'alt');
+  const heading = num(params, 'heading');
+  const ve = num(params, 've');
+
+  if (ve !== null) {
+    eng.set_exaggeration_override(ve);
+  }
+
+  // If none of the spawn params are present, keep the engine's default spawn.
+  if (lat === null && lon === null && altKm === null && heading === null) {
+    return;
+  }
+
+  const spawnLat = lat === null ? DEFAULT_SPAWN.lat : Math.max(-89, Math.min(89, lat));
+  const spawnLon = lon === null ? DEFAULT_SPAWN.lon : wrapLon(lon);
+  const altWu = altKm === null
+    ? DEFAULT_SPAWN.altWu
+    : Math.max(ALT_WU_MIN, Math.min(ALT_WU_MAX, (altKm * 1000) / M_PER_WU));
+  const spawnHeading = heading === null ? DEFAULT_SPAWN.heading : heading;
+
+  eng.set_spawn(spawnLat, spawnLon, altWu, spawnHeading);
+}
+
 // --- main ---
 
 async function main() {
@@ -108,6 +160,15 @@ async function main() {
     fatal('Engine init failed.', e.message);
   }
   eng.set_aspect(canvas.width / canvas.height);
+
+  // --- URL query params (phone-friendly start config) ---
+  // ?lat=&lon=&alt=&heading=&ve=
+  //   lat, lon     — degrees (spawn location)
+  //   alt          — KILOMETERS above sea level (converted to world units below)
+  //   heading      — degrees, 0 = north, 90 = east (optional, default north)
+  //   ve           — fixed vertical-exaggeration override (optional)
+  // Missing pieces fall back to the engine's default spawn.
+  applyUrlParams(eng);
 
   // Upload aircraft wireframe geometry (static, uploaded once).
   const aircraftScale = eng.aircraft_scale();

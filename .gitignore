@@ -11,6 +11,7 @@
 /web/package-lock.json
 /web/test-screenshot.png
 /web/test-dive.png
+/web/test-url-*.png
 /web/ve-*.png
 /web/ve-capture.mjs
 
