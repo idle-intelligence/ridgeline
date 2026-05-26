@@ -10,7 +10,10 @@
 //   so it never z-fights the h=0 ocean rings). A lat/lon tessellation of the visible
 //   hemisphere, drawn TRIANGLE_STRIP per occluder ring. fill_elevations = 0
 //   (it's the dark sphere); fill_strengths ~1, fading at the limb. Depth test then
-//   hides the back side of the globe behind it.
+//   hides the back side of the globe behind it. Only emitted from afar (when the globe
+//   reads as a DISC); see the gate at the occluder block — at low/mid altitude the dome's
+//   coarse facets would graze and tear the front-side rings, and the back side isn't in
+//   frame anyway, so it is suppressed there.
 //
 // LOD (index-anchored, power-of-two strides → no swimming):
 //   row `r` rendered iff `r % row_stride == 0`; longitude sample `c` iff `c % col_stride == 0`.
@@ -37,6 +40,13 @@ use glam::Vec3;
 
 /// Occluder sphere radius — just below sea level so it never z-fights ocean rings.
 const OCCLUDER_R: f32 = R_WORLD * 0.999;
+
+/// Gate (radians) for emitting the dark occluder dome: only when the globe's disc half-angle
+/// asin(R/|cam|) is below this — i.e. the globe reads as a disc and the back-side rings could
+/// otherwise show through. Set to the vertical half-FOV (~22.5°) plus a pad, so the dome is
+/// present for the whole from-afar / disc regime but suppressed once the globe fills the view
+/// (low/mid altitude), where its coarse facets would graze and tear the front-side rings.
+const OCCLUDER_FOV_GATE: f32 = 0.55; // ~31.5°
 
 /// Horizon cull margin (subtracted from the horizon dot threshold) so geometry slightly
 /// past the geometric limb is still emitted and fades out smoothly rather than popping.
@@ -199,7 +209,22 @@ pub fn generate(
     // band step and longitude step per-band from that band's distance to the camera, and
     // drop bands fully behind the horizon or outside the sight cone. Near the surface only
     // a small dense patch survives; from afar the whole hemisphere is tessellated coarsely.
-    {
+    //
+    // The dark dome is only needed when the globe reads as a DISC — i.e. when the whole
+    // near hemisphere + limb sit inside the FOV and you could otherwise see the back-side
+    // rings through the front. That happens only from far out. When the globe fills the
+    // view (low/mid altitude, curved-horizon framing) the back hemisphere is never in
+    // frame — the ridge lines already back-face cull themselves at the horizon — so the
+    // dome contributes nothing but TROUBLE: its coarse faceted surface, sampled far coarser
+    // than the ridge lines, crosses in front of the near-limb / near-sub-camera rings and
+    // depth-culls them, tearing wedges out of the globe (the reported artifact at ~1000 km
+    // and near the poles). So emit the dome only once the globe subtends less than the
+    // vertical half-FOV (fits as a disc) — exactly the from-afar regime where it's needed
+    // and where its facets are far from the camera and never graze the front rings.
+    // Globe disc half-angle as seen from the camera = asin(R/cam_len) = asin(horizon_dot).
+    // Emit the dome only when the disc fits within the gate angle (the from-afar regime).
+    let disc_half_angle = horizon_dot.clamp(0.0, 1.0).asin();
+    if disc_half_angle < OCCLUDER_FOV_GATE {
         // Base resolution of the occluder grid (finest). Strides subdivide this.
         let occ_lat_base = 192u32; // rings of latitude at finest
         let occ_lon_base = 192u32; // segments of longitude at finest
