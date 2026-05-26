@@ -44,7 +44,7 @@ const SPAWN_HEADING: f32 = 0.0;
 /// Throttle seeded at spawn. With no thrust input the throttle holds, so the speed eases to
 /// its target v_target = lerp(IDLE_SPEED, CRUISE_MAX, throttle) ≈ 450 wu/s and CRUISE_SPEED
 /// is seeded equal to that → steady level cruise from frame 1 (holds altitude + speed).
-const CRUISE_THROTTLE: f32 = 0.485;
+const CRUISE_THROTTLE: f32 = 0.527;
 /// Forward cruise speed (wu/s). Seeded to the hands-off target for CRUISE_THROTTLE so speed
 /// stays flat with no input.
 const CRUISE_SPEED: f32 = 450.0;
@@ -375,6 +375,11 @@ impl Engine {
     /// Speed in world units/sec.
     pub fn speed(&self) -> f32 {
         self.phys.speed
+    }
+
+    /// Engine throttle setting in [0, 1] (gas pedal), for the HUD throttle readout.
+    pub fn throttle(&self) -> f32 {
+        self.phys.throttle
     }
 
     /// Speed in km/h. wu/s → m/s via M_PER_WU (horizontal planet scale) → km/h (×3.6).

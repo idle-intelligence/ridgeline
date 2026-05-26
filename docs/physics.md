@@ -38,15 +38,19 @@ v_target  = lerp(IDLE_SPEED, top, throttle)  capped to V_CAP
 ```
 
 Current speed eases toward `v_target` under bounded acceleration `SPEED_ACCEL`, and
-`|velocity| ≤ V_CAP` is enforced every step.
+`|velocity| ≤ V_CAP` is enforced every step. `THROTTLE_RATE` is deliberately **slow** (a full
+0→1 sweep takes ≈ 3.3 s) so taps give FINE adjustment — the pilot can settle at many distinct
+intermediate cruise speeds across `IDLE_SPEED..CRUISE_MAX` instead of snapping min↔max. The HUD
+shows the current throttle as `THR nn%` (`Engine::throttle()` → f32 0..1).
 
 | Constant | Value | Notes |
 |---|---|---|
-| `IDLE_SPEED` | 120 wu/s | hands-off / zero-throttle floor speed |
+| `IDLE_SPEED` | 60 wu/s | hands-off / zero-throttle floor speed — the SLOWEST cruise; held at low alt |
 | `CRUISE_MAX` | 800 wu/s | full-throttle atmosphere terminal (lap ≈ 47 s) |
 | `FTL_MAX` | 8000 wu/s | afterburner (Space) terminal (lap ≈ 4.7 s) |
 | `V_CAP` | 10000 wu/s | ABSOLUTE hard cap (≈ 38 M km/h at planet scale) |
 | `SPEED_ACCEL` | 1200 wu/s² | spool-up/down rate toward `v_target` |
+| `THROTTLE_RATE` | 0.3 s⁻¹ | throttle ramp (slow → granular, holdable settings) |
 
 Planet circumference ≈ `2π·R_WORLD ≈ 37700 wu`, so the tiers give pleasant lap times rather
 than a fraction of a second.
@@ -70,7 +74,7 @@ than a fraction of a second.
 | `TURN_RATE` | 3.0 s⁻¹ | velocity-direction → nose steering |
 | `ALT_HOLD_RATE` | 80 s⁻¹ | radial-component → commanded (core decoupling) |
 | `AUTO_LEVEL_RATE` | 2.5 s⁻¹ | hands-off nose leveling |
-| `STALL_SPEED` | 180 wu/s | below this fly-by-nose fades; idle (120) stalls |
+| `STALL_SPEED` | 30 wu/s | below this fly-by-nose fades; set BELOW `IDLE_SPEED` (60) so the slowest cruise HOLDS altitude — only a genuine crawl stalls |
 
 ## Space regime (Newtonian)
 
@@ -123,6 +127,19 @@ so the hard cap, gravity and the floor are all unchanged.
 - Gravity: `g = G_SURFACE·(R_WORLD/r)²`, `G_SURFACE = 60 wu/s²`. Gentle in atmosphere (mostly
   countered by flight; bites on dive/stall), dominant in space.
 
+## Granular speed & slow low-altitude cruise
+
+Speed regulation is **continuous and holdable**: `THROTTLE_RATE = 0.3 s⁻¹` means a tap nudges the
+target speed a little rather than snapping it to min/max, so the pilot can settle at any cruise
+speed across `IDLE_SPEED (60) .. CRUISE_MAX (800)` (≈ 64 .. 850 km/h at planet scale). The HUD
+`THR nn%` readout lets the pilot dial it in.
+
+The slowest hands-off cruise is `IDLE_SPEED = 60 wu/s`, set comfortably ABOVE
+`STALL_SPEED = 30 wu/s`. So a zero-throttle, level cruise at low altitude (~500 m ≈ 0.47 wu)
+**holds altitude indefinitely** — slow flight no longer sinks. A stall (loss of fly-by-nose
+authority → gravity sink) now requires a genuine crawl *below* `STALL_SPEED`, which throttle
+alone can't reach (its floor is `IDLE_SPEED`).
+
 ## Floor
 
 The craft cannot sink below the sea-level sphere (`R_WORLD + FLOOR_EPS`); inward radial
@@ -149,4 +166,6 @@ holds altitude + speed · `h` stable at dt = 0.05 · `i` round-trip return (deep
 zone → descends → settles into a stable cruise, no overshoot/crash) · `j` decel on entry
 (crossing `CAPTURE_ALT` at `V_CAP` bleeds to ~`APPROACH_SPEED` by the atmosphere) · `k` not a
 prison (nose outward + afterburner re-escapes past `CAPTURE_ALT`) · `l` `flight_mode` reports
-SPACE/PLANETARY/ATMOSPHERE at the right altitudes.
+SPACE/PLANETARY/ATMOSPHERE at the right altitudes · `m` slow low-altitude cruise holds (throttle
+0, level, ~500 m → altitude holds over 20 s, speed settles at `IDLE_SPEED`) · `n` granularity
+(throttles 0/0.25/0.5/0.75/1.0 → five DISTINCT steady speeds spread across `IDLE..CRUISE_MAX`).

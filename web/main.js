@@ -206,7 +206,8 @@ async function main() {
     const latStr = `${Math.abs(latVal).toFixed(1)}°${latVal >= 0 ? 'N' : 'S'}`;
     const lonStr = `${Math.abs(lonVal).toFixed(1)}°${lonVal >= 0 ? 'E' : 'W'}`;
     const mode = ['SPACE', 'PLANETARY', 'ATMO'][eng.flight_mode()] || 'SPACE';
-    hud.textContent = `${kmh} km/h   ALT ${alt}m   ${latStr} ${lonStr} · ${mode}`;
+    const thr = Math.round(eng.throttle() * 100);
+    hud.textContent = `${kmh} km/h   THR ${thr}%   ALT ${alt}m   ${latStr} ${lonStr} · ${mode}`;
 
     requestAnimationFrame(frame);
   }

@@ -108,7 +108,7 @@ western/central Mediterranean (38°N, 8°E), heading NORTH toward Europe. (Confi
 runtime via `set_spawn` — see "Spawn + setters" above; the web layer maps URL query params
 `?lat=&lon=&alt=&heading=&ve=` onto it.) The orientation is built from a radial basis
 (up = radial, forward = north tangent), and the craft is seeded with a forward velocity
-(`CRUISE_SPEED = 450` wu/s) and a cruise throttle (`CRUISE_THROTTLE = 0.485`) whose target
+(`CRUISE_SPEED = 450` wu/s) and a cruise throttle (`CRUISE_THROTTLE = 0.527`) whose target
 speed equals `CRUISE_SPEED`. With no thrust input the throttle holds, so from frame 1 the
 craft holds altitude and speed — no free-fall, no climb-out. Pitch down dives; pitch up +
 Shift+Space climbs to space.
@@ -192,6 +192,10 @@ painter's back-to-front order is no longer required.
   (not VERT_SCALE) so altitudes read as plausible orbital/atmospheric heights.
 - `eng.speed()` → f32 (world units/sec).
 - `eng.speed_kmh()` → f32 (km/h) = `speed() × M_PER_WU × 3.6` (same horizontal planet scale).
+- `eng.throttle()` → f32 in `[0, 1]` — current engine throttle (gas pedal). The web HUD shows
+  it as `THR nn%` so the pilot can regulate cruise speed. Throttle ramps slowly
+  (`THROTTLE_RATE = 0.3 s⁻¹`, a full sweep ≈ 3.3 s) so intermediate cruise settings are easy to
+  hold; `v_target = lerp(IDLE_SPEED, top, throttle)`.
 - `eng.flight_mode()` → `u8` — current flight regime by altitude: `0 = SPACE` (free Newtonian,
   `alt ≥ CAPTURE_ALT`), `1 = PLANETARY` (capture-zone assisted approach,
   `ATMOSPHERE_TOP ≤ alt < CAPTURE_ALT`), `2 = ATMOSPHERE` (fly-by-nose cruise,
