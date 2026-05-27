@@ -180,7 +180,7 @@ impl Engine {
 
         let cam_pos = chase_cam_pos(&self.phys);
         let cam_fwd = self.phys.orientation * Vec3::NEG_Z;
-        self.geom = geometry::generate(&self.hf, cam_pos, cam_fwd, self.ve_override);
+        geometry::generate_into(&mut self.geom, &self.hf, cam_pos, cam_fwd, self.ve_override);
         self.view_proj_mat = compute_view_proj(&self.phys, 0.0, 0.0, self.aspect);
     }
 
@@ -235,7 +235,7 @@ impl Engine {
         let look_offset =
             Quat::from_rotation_y(-self.look_yaw) * Quat::from_rotation_x(self.look_pitch);
         let cam_fwd = (self.phys.orientation * look_offset) * Vec3::NEG_Z;
-        self.geom = geometry::generate(&self.hf, cam_pos, cam_fwd, self.ve_override);
+        geometry::generate_into(&mut self.geom, &self.hf, cam_pos, cam_fwd, self.ve_override);
         self.view_proj_mat =
             compute_view_proj(&self.phys, self.look_yaw, self.look_pitch, self.aspect);
     }
@@ -252,7 +252,7 @@ impl Engine {
         self.look_pitch = 0.0;
         let cam_pos = chase_cam_pos(&self.phys);
         let cam_fwd = self.phys.orientation * Vec3::NEG_Z;
-        self.geom = geometry::generate(&self.hf, cam_pos, cam_fwd, self.ve_override);
+        geometry::generate_into(&mut self.geom, &self.hf, cam_pos, cam_fwd, self.ve_override);
         self.view_proj_mat = compute_view_proj(&self.phys, 0.0, 0.0, self.aspect);
     }
 
@@ -275,7 +275,7 @@ impl Engine {
         self.look_pitch = 0.0;
         let cam_pos = chase_cam_pos(&self.phys);
         let cam_fwd = self.phys.orientation * Vec3::NEG_Z;
-        self.geom = geometry::generate(&self.hf, cam_pos, cam_fwd, self.ve_override);
+        geometry::generate_into(&mut self.geom, &self.hf, cam_pos, cam_fwd, self.ve_override);
         self.view_proj_mat = compute_view_proj(&self.phys, 0.0, 0.0, self.aspect);
     }
 
@@ -356,6 +356,30 @@ impl Engine {
         arr.copy_from(&self.geom.line_elevations);
         arr
     }
+
+    // ── Zero-copy buffer access ──────────────────────────────────────────────────
+    // (ptr, len) into WASM linear memory for each geometry buffer. JS builds a typed-array
+    // VIEW over `wasm.memory.buffer` (no copy) and uploads via bufferSubData. Views are
+    // invalidated if WASM memory grows (the ArrayBuffer detaches) — JS MUST recreate them
+    // whenever `wasm.memory.buffer` identity changes. ptr is a byte offset; len is element
+    // count (f32 for verts/strengths/elevations, u32 for indices).
+    pub fn fill_verts_ptr(&self) -> u32 { self.geom.fill_verts.as_ptr() as u32 }
+    pub fn fill_verts_len(&self) -> u32 { self.geom.fill_verts.len() as u32 }
+    pub fn fill_strengths_ptr(&self) -> u32 { self.geom.fill_strengths.as_ptr() as u32 }
+    pub fn fill_strengths_len(&self) -> u32 { self.geom.fill_strengths.len() as u32 }
+    pub fn fill_elevations_ptr(&self) -> u32 { self.geom.fill_elevations.as_ptr() as u32 }
+    pub fn fill_elevations_len(&self) -> u32 { self.geom.fill_elevations.len() as u32 }
+    pub fn fill_indices_ptr(&self) -> u32 { self.geom.fill_indices.as_ptr() as u32 }
+    pub fn fill_indices_len(&self) -> u32 { self.geom.fill_indices.len() as u32 }
+
+    pub fn line_verts_ptr(&self) -> u32 { self.geom.line_verts.as_ptr() as u32 }
+    pub fn line_verts_len(&self) -> u32 { self.geom.line_verts.len() as u32 }
+    pub fn line_strengths_ptr(&self) -> u32 { self.geom.line_strengths.as_ptr() as u32 }
+    pub fn line_strengths_len(&self) -> u32 { self.geom.line_strengths.len() as u32 }
+    pub fn line_elevations_ptr(&self) -> u32 { self.geom.line_elevations.as_ptr() as u32 }
+    pub fn line_elevations_len(&self) -> u32 { self.geom.line_elevations.len() as u32 }
+    pub fn line_indices_ptr(&self) -> u32 { self.geom.line_indices.as_ptr() as u32 }
+    pub fn line_indices_len(&self) -> u32 { self.geom.line_indices.len() as u32 }
 
     /// Altitude above the sea-level sphere, in world units.
     pub fn altitude(&self) -> f32 {

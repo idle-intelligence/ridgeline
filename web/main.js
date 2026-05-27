@@ -35,12 +35,15 @@ async function buildEngine(meta, hfBytes, wmBytes) {
   if (USE_MOCK) {
     const { makeMockEngine } = await import('./mock-engine.js');
     const { bbox } = meta;
-    return makeMockEngine(
-      meta.width, meta.height,
-      hfBytes, wmBytes,
-      meta.elev_min, meta.elev_max,
-      bbox.lat_min, bbox.lat_max, bbox.lon_min, bbox.lon_max,
-    );
+    return {
+      eng: makeMockEngine(
+        meta.width, meta.height,
+        hfBytes, wmBytes,
+        meta.elev_min, meta.elev_max,
+        bbox.lat_min, bbox.lat_max, bbox.lon_min, bbox.lon_max,
+      ),
+      wasmMemory: null,
+    };
   }
 
   // Real wasm path — production
@@ -50,18 +53,21 @@ async function buildEngine(meta, hfBytes, wmBytes) {
   } catch (e) {
     fatal('Could not load WASM module.', 'Make sure web/pkg/ has been built: wasm-pack build --target web');
   }
+  let wasm;
   try {
-    await initWasm();
+    wasm = await initWasm();
   } catch (e) {
     fatal('WASM init failed.', e.message);
   }
   const { bbox } = meta;
-  return new Engine(
+  const eng = new Engine(
     meta.width, meta.height,
     hfBytes, wmBytes,
     meta.elev_min, meta.elev_max,
     bbox.lat_min, bbox.lat_max, bbox.lon_min, bbox.lon_max,
   );
+  // wasm.memory backs the zero-copy geometry views used by the renderer.
+  return { eng, wasmMemory: wasm.memory };
 }
 
 // --- URL params ---
@@ -155,8 +161,9 @@ async function main() {
     fatal('Failed to load terrain data.', e.message);
   }
 
+  let wasmMemory = null;
   try {
-    eng = await buildEngine(meta, hfBytes, wmBytes);
+    ({ eng, wasmMemory } = await buildEngine(meta, hfBytes, wmBytes));
   } catch (e) {
     // fatal() already called inside buildEngine for wasm errors; re-throw others
     fatal('Engine init failed.', e.message);
@@ -181,6 +188,7 @@ async function main() {
   // Expose engine + renderer for headless testing (no-op in production)
   window._eng = eng;
   window._renderer = renderer;
+  window._wasmMemory = wasmMemory;
 
   const input_state = new InputHandler(canvas);
 
@@ -196,7 +204,7 @@ async function main() {
     eng.set_input(thrust, strafe, lift, pitch, yaw, roll, boost, ftl);
     eng.step(dt);
 
-    renderer.draw(eng);
+    renderer.draw(eng, wasmMemory);
 
     // HUD
     const kmh = Math.round(eng.speed_kmh());

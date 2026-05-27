@@ -174,6 +174,41 @@ via the depth test.
 Indices in `fill_draws`/`line_draws` are VERTEX indices into the respective vertex array
 (not byte offsets). Returned typed arrays are copies; valid until the next `step`.
 
+**The FILL occluder is generated DECOUPLED from (far COARSER than) the lines.** It is only a
+flat dark depth-occluder, so it uses no sub-ring interpolation (raw data rows only), a row
+step and column stride each coarsened ×`FILL_COARSEN` (=3) over the line strides, and is
+nudged inward to `R * FILL_R_INSET` (=0.999) so the coarse mesh sits a hair below the bright
+lines and can never poke through / tear them. This cuts fill verts ~16× vs the lines with no
+visible change.
+
+### Zero-copy geometry access + primitive-restart indices (per frame, preferred path)
+To avoid copying ~400k floats across the WASM→JS boundary each frame and to collapse the
+~750 per-strip draws into ONE indexed draw, the core exposes:
+
+- `(ptr, len)` getters returning a byte offset into WASM linear memory and an ELEMENT count:
+  - `fill_verts_ptr()/_len()`, `fill_strengths_ptr()/_len()`, `fill_elevations_ptr()/_len()`,
+    `fill_indices_ptr()/_len()`
+  - `line_verts_ptr()/_len()`, `line_strengths_ptr()/_len()`, `line_elevations_ptr()/_len()`,
+    `line_indices_ptr()/_len()`
+  - verts/strengths/elevations are `f32`; indices are `u32`.
+- `fill_indices` / `line_indices` are **restart-delimited UNSIGNED_INT index lists**: each
+  strip's vertex indices in order, separated by the WebGL2 fixed restart index `0xFFFFFFFF`
+  (always enabled). JS draws all strips with a single
+  `gl.drawElements(gl.TRIANGLE_STRIP|gl.LINE_STRIP, len, gl.UNSIGNED_INT, 0)`.
+
+JS builds typed-array VIEWS over `wasm.memory.buffer` (no copy):
+`new Float32Array(wasm.memory.buffer, ptr, len)` / `new Uint32Array(...)`, then uploads via
+`gl.bufferSubData` into pre-sized, reused VBOs (grown only when the used size exceeds
+capacity) — never `bufferData` per frame. **CRITICAL:** a view detaches if WASM memory grows;
+JS MUST re-fetch `wasm.memory.buffer` (compare identity with `===`) and recreate the views
+when it changes. The core reuses its geometry `Vec`s across frames via `.clear()` (capacity
+kept), and builds the index lists last (after all vertex pushes) so the views are valid.
+
+The `init()` default export's return value carries `.memory`; `web/main.js` passes it to
+`renderer.draw(eng, wasmMemory)`. When `wasmMemory` is null (mock engine), the renderer falls
+back to the legacy copying getters (`fill_vertices()` etc.) + per-strip `drawArrays`. Both the
+copying getters and the new ptr/len + index getters are present.
+
 **LOD + culling.** Index-anchored, power-of-two strides chosen by camera altitude (distance
 to the surface): far → coarse rings/longitude (cheap whole globe), close → fine. Because the
 same stride set is applied globe-wide and rows/cols are sampled at index multiples of the

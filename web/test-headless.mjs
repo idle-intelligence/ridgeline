@@ -86,7 +86,7 @@ async function run() {
 
   // ── Spawn view screenshot (BEFORE any stepping) ──────────────────────────────
   // Capture the calm in-atmosphere cruise framing the player sees at spawn.
-  await page.evaluate(() => { if (window._renderer && window._eng) window._renderer.draw(window._eng); });
+  await page.evaluate(() => { if (window._renderer && window._eng) window._renderer.draw(window._eng, window._wasmMemory); });
   await page.screenshot({ path: join(__dir, 'test-screenshot.png') });
   console.log('Spawn screenshot saved: web/test-screenshot.png');
 
@@ -173,7 +173,7 @@ async function run() {
     if (!gl) return { ok: false, reason: 'no webgl2' };
     // Force a synchronous render so readPixels sees the current frame (the rAF-rendered
     // backbuffer is swapped/cleared by the time we read outside the loop).
-    if (window._renderer && window._eng) window._renderer.draw(window._eng);
+    if (window._renderer && window._eng) window._renderer.draw(window._eng, window._wasmMemory);
     const W = c.width, H = c.height;
     const px = new Uint8Array(W * H * 4);
     gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px);

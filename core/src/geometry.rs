@@ -68,10 +68,49 @@ pub struct GeometryBuffers {
     pub fill_draws: Vec<u32>,
     pub fill_strengths: Vec<f32>,
     pub fill_elevations: Vec<f32>,
+    pub fill_indices: Vec<u32>,
     pub line_verts: Vec<f32>,
     pub line_draws: Vec<u32>,
     pub line_strengths: Vec<f32>,
     pub line_elevations: Vec<f32>,
+    pub line_indices: Vec<u32>,
+}
+
+/// WebGL2 fixed primitive-restart index for UNSIGNED_INT (always enabled).
+pub const RESTART_INDEX: u32 = 0xFFFF_FFFF;
+
+impl GeometryBuffers {
+    fn clear(&mut self) {
+        self.fill_verts.clear();
+        self.fill_draws.clear();
+        self.fill_strengths.clear();
+        self.fill_elevations.clear();
+        self.fill_indices.clear();
+        self.line_verts.clear();
+        self.line_draws.clear();
+        self.line_strengths.clear();
+        self.line_elevations.clear();
+        self.line_indices.clear();
+    }
+}
+
+/// Build a single restart-delimited index list from `(start,count)` draw pairs: each strip's
+/// vertex indices in order, separated by RESTART_INDEX. One `gl.drawElements(mode, …,
+/// UNSIGNED_INT)` then draws every strip disconnected (WebGL2 fixed restart, always enabled).
+fn build_restart_indices(draws: &[u32], out: &mut Vec<u32>) {
+    out.clear();
+    let mut i = 0;
+    while i + 1 < draws.len() {
+        let start = draws[i];
+        let count = draws[i + 1];
+        if i > 0 {
+            out.push(RESTART_INDEX);
+        }
+        for v in 0..count {
+            out.push(start + v);
+        }
+        i += 2;
+    }
 }
 
 /// Distance-band LOD: choose (row_stride, col_stride) — both powers of two — from the
@@ -107,9 +146,9 @@ fn strides_for_distance(dist_wu: f32) -> (u32, u32) {
 #[inline]
 fn subring_factor_for_distance(dist_wu: f32) -> u32 {
     if dist_wu < 150.0 {
-        6 // right under / in front of the camera: dense intermediate rings
+        4 // right under / in front of the camera: dense intermediate rings
     } else if dist_wu < 400.0 {
-        4
+        3
     } else if dist_wu < 900.0 {
         2
     } else {
@@ -171,12 +210,23 @@ fn visible_lon_half_deg(lat_deg: f32, cam_dir: Vec3, cut: f32) -> Option<f32> {
     }
 }
 
-pub fn generate(
+/// Coarsening factor for the FILL occluder relative to the LINE stations. The dark fill is
+/// only a flat depth-occluder, so it can be generated far coarser in row AND column than the
+/// bright lines without any visible change. Pushed slightly inward (FILL_R_INSET) so the
+/// coarser mesh can never poke through / tear the finer bright lines.
+const FILL_COARSEN: u32 = 3;
+/// Radius multiplier for the per-ring fill occluder so a coarser fill sits a hair below the
+/// bright lines (same trick as the dome's OCCLUDER_R) and cannot tear through them.
+const FILL_R_INSET: f32 = 0.999;
+
+pub fn generate_into(
+    buf: &mut GeometryBuffers,
     hf: &Heightfield,
     cam_pos: Vec3,
     cam_fwd: Vec3,
     ve_override: Option<f32>,
-) -> GeometryBuffers {
+) {
+    buf.clear();
     let cam_len = cam_pos.length().max(R_WORLD + 1.0);
     let cam_dir = cam_pos / cam_len;
     // Horizon plane: points with dot(P̂, cam_dir) > R/|cam| are on the near hemisphere.
@@ -195,14 +245,15 @@ pub fn generate(
     // altitude-coupled ramp.
     let ve = ve_override.unwrap_or_else(|| ve_for_altitude(cam_len - R_WORLD));
 
-    let mut fill_verts: Vec<f32> = Vec::new();
-    let mut fill_draws: Vec<u32> = Vec::new();
-    let mut fill_strengths: Vec<f32> = Vec::new();
-    let mut fill_elevations: Vec<f32> = Vec::new();
-    let mut line_verts: Vec<f32> = Vec::new();
-    let mut line_draws: Vec<u32> = Vec::new();
-    let mut line_strengths: Vec<f32> = Vec::new();
-    let mut line_elevations: Vec<f32> = Vec::new();
+    // Reused persistent buffers (cleared above): refer to them through locals for brevity.
+    let fill_verts = &mut buf.fill_verts;
+    let fill_draws = &mut buf.fill_draws;
+    let fill_strengths = &mut buf.fill_strengths;
+    let fill_elevations = &mut buf.fill_elevations;
+    let line_verts = &mut buf.line_verts;
+    let line_draws = &mut buf.line_draws;
+    let line_strengths = &mut buf.line_strengths;
+    let line_elevations = &mut buf.line_elevations;
 
     // ── Occluder sphere (dark, hides far side via depth) ───────────────────────
     // Distance-LOD'd lat/lon tessellation. We tessellate the full sphere but choose the
@@ -317,10 +368,6 @@ pub fn generate(
     // The dome handles the far/disc regime; here we instead fill the surface between
     // consecutive rendered (sub-)rings so near terrain solidly occludes far terrain/rings.
     let emit_fills = disc_half_angle >= OCCLUDER_FOV_GATE;
-    // Ordered list of emitted (sub-)rings: (r_lo, frac, lat, col_stride). Fills are emitted
-    // BETWEEN consecutive entries, reusing the exact same row/sub-row stations and column
-    // strides as the lines so fills and lines align exactly (no separate coarse mesh).
-    let mut emitted_rings: Vec<(u32, f32, f32, u32)> = Vec::new();
     // Choose the row step per-ring from that ring's distance to the camera. We advance the
     // row index by `row_step` (index-anchored), so the set of rendered rows changes only at
     // band boundaries → no swimming. The row_step for a ring is taken from the nearest point
@@ -353,39 +400,52 @@ pub fn generate(
             emit_ring(
                 hf, r_lo, frac, lat, ve, cam_pos, cam_dir, cam_fwd, horizon_dot, cos_half,
                 cam_lon_deg, ring_col_stride, last_col,
-                &mut line_verts, &mut line_strengths, &mut line_elevations, &mut line_draws,
+                line_verts, line_strengths, line_elevations, line_draws,
             );
-            if emit_fills {
-                emitted_rings.push((r_lo, frac, lat, ring_col_stride));
-            }
         }
 
         row += row_step;
     }
 
     // ── Per-ring filled occlusion (near/mid regime) ─────────────────────────────
-    // Fill the surface between each pair of consecutive rendered (sub-)rings with a
-    // background-colored, terrain-following TRIANGLE_STRIP. Uses the same column stations as
-    // the lines (the coarser of the two adjacent rings' strides), so the fill mesh shares
-    // vertices with the ridge lines — no z-fighting / tearing, and it depth-occludes far
-    // geometry. fill_elevations = 0 → drawn flat at the dark fill color (like the dome).
+    // Fill the surface between consecutive RAW DATA rows with a background-colored,
+    // terrain-following TRIANGLE_STRIP — a flat dark depth-occluder, NOT a detail surface.
+    // It is generated FAR COARSER than the bright lines (decoupled stride): no sub-ring
+    // interpolation, the row step coarsened ×FILL_COARSEN, and the column stride coarsened
+    // ×FILL_COARSEN. It is nudged slightly inward (FILL_R_INSET) so the coarse mesh sits a
+    // hair below the bright lines and can never poke through / tear them. fill_elevations = 0
+    // → drawn flat at the dark fill color (like the dome). This is the dominant vertex cut.
     if emit_fills {
-        for w in emitted_rings.windows(2) {
-            let (ra, fa, lat_a, sa_stride) = w[0];
-            let (rb, fb, lat_b, sb_stride) = w[1];
-            let stride = sa_stride.max(sb_stride);
-            emit_fill_strip(
-                hf, ra, fa, lat_a, rb, fb, lat_b, ve, cam_dir, cam_fwd, cam_pos,
-                horizon_dot, cos_half, cam_lon_deg, stride, last_col,
-                &mut fill_verts, &mut fill_strengths, &mut fill_elevations, &mut fill_draws,
-            );
+        let mut frow = 0u32;
+        let mut prev: Option<(u32, f32, u32)> = None; // (row, lat, col_stride)
+        while frow < hf.height {
+            let p = Heightfield::sphere_point(hf.row_lat(frow), cam_lon_deg, 0.0);
+            let nearest = (p - cam_pos).length();
+            let (row_step, ring_col_stride) = strides_for_distance(nearest);
+            let fill_row_step = (row_step * FILL_COARSEN).max(1);
+            let fill_col_stride = (ring_col_stride * FILL_COARSEN).max(1);
+            let lat = hf.row_lat(frow);
+            if let Some((pr, plat, pstride)) = prev {
+                let stride = pstride.max(fill_col_stride);
+                emit_fill_strip(
+                    hf, pr, 0.0, plat, frow, 0.0, lat, ve, cam_dir, cam_fwd, cam_pos,
+                    horizon_dot, cos_half, cam_lon_deg, stride, last_col,
+                    fill_verts, fill_strengths, fill_elevations, fill_draws,
+                );
+            }
+            prev = Some((frow, lat, fill_col_stride));
+            frow += fill_row_step;
         }
     }
 
-    GeometryBuffers {
-        fill_verts, fill_draws, fill_strengths, fill_elevations,
-        line_verts, line_draws, line_strengths, line_elevations,
-    }
+    // The `&mut buf.*` locals are no longer used past here; build the restart-delimited
+    // index lists directly from the now-released draw arrays.
+    let fill_draws_owned = std::mem::take(&mut buf.fill_draws);
+    build_restart_indices(&fill_draws_owned, &mut buf.fill_indices);
+    buf.fill_draws = fill_draws_owned;
+    let line_draws_owned = std::mem::take(&mut buf.line_draws);
+    build_restart_indices(&line_draws_owned, &mut buf.line_indices);
+    buf.line_draws = line_draws_owned;
 }
 
 /// Emit a background-colored TRIANGLE_STRIP filling the surface between two consecutive
@@ -473,12 +533,14 @@ fn emit_fill_strip(
                         run_added: &mut usize,
                         run_visible: &mut bool| {
         let lon = hf.col_lon(c);
+        // Nudge the fill occluder slightly inward (FILL_R_INSET) so the coarser fill mesh sits
+        // a hair below the bright lines and cannot poke through / tear them.
         let pa = Heightfield::sphere_point_scaled(
             lat_a, lon, hf.sample_row_frac(ra, fa, c), ve,
-        );
+        ) * FILL_R_INSET;
         let pb = Heightfield::sphere_point_scaled(
             lat_b, lon, hf.sample_row_frac(rb, fb, c), ve,
-        );
+        ) * FILL_R_INSET;
         let sa = point_strength(pa, cam_dir, horizon_dot);
         let sb = point_strength(pb, cam_dir, horizon_dot);
         let vis = (sa > 0.0 && in_sight(cam_pos, cam_fwd, pa, cos_half))

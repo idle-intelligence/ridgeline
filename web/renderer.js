@@ -218,11 +218,15 @@ export class Renderer {
     this.aircraftColor = gl.getUniformLocation(this.aircraftProg, 'u_color');
     this.aircraftPos   = gl.getAttribLocation(this.aircraftProg,  'a_pos');
 
-    // VAOs + VBOs for fill geometry: pos VBO + strength VBO + elev VBO (all separate)
+    // VAOs + VBOs for fill geometry: pos VBO + strength VBO + elev VBO + index (restart) IBO.
+    // Buffers are pre-sized once and grown only when needed; per frame we bufferSubData a
+    // zero-copy view of WASM memory into them (no realloc, no boundary copy).
     this.fillVAO      = gl.createVertexArray();
     this.fillVBO      = gl.createBuffer();
     this.fillStrVBO   = gl.createBuffer();
     this.fillElevVBO  = gl.createBuffer();
+    this.fillIBO      = gl.createBuffer();
+    this.fillCap      = { pos: 0, str: 0, elev: 0, idx: 0 }; // current GPU byte capacities
     gl.bindVertexArray(this.fillVAO);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.fillVBO);
     gl.enableVertexAttribArray(this.fillPos);
@@ -233,6 +237,7 @@ export class Renderer {
     gl.bindBuffer(gl.ARRAY_BUFFER, this.fillElevVBO);
     gl.enableVertexAttribArray(this.fillElev);
     gl.vertexAttribPointer(this.fillElev, 1, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.fillIBO);
     gl.bindVertexArray(null);
 
     // VAOs + VBOs for line geometry
@@ -240,6 +245,8 @@ export class Renderer {
     this.lineVBO      = gl.createBuffer();
     this.lineStrVBO   = gl.createBuffer();
     this.lineElevVBO  = gl.createBuffer();
+    this.lineIBO      = gl.createBuffer();
+    this.lineCap      = { pos: 0, str: 0, elev: 0, idx: 0 };
     gl.bindVertexArray(this.lineVAO);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.lineVBO);
     gl.enableVertexAttribArray(this.linePos);
@@ -250,7 +257,12 @@ export class Renderer {
     gl.bindBuffer(gl.ARRAY_BUFFER, this.lineElevVBO);
     gl.enableVertexAttribArray(this.lineElev);
     gl.vertexAttribPointer(this.lineElev, 1, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.lineIBO);
     gl.bindVertexArray(null);
+
+    // Cached WASM memory + views, recreated when memory grows (buffer identity changes).
+    this._wasmBuffer = null;
+    this._views = null;
 
     // VAO + VBO for aircraft wireframe (static geometry, uploaded once)
     this.aircraftVAO       = gl.createVertexArray();
@@ -307,7 +319,34 @@ export class Renderer {
     gl.bindVertexArray(null);
   }
 
-  draw(eng) {
+  // Upload `view` (a typed-array view of WASM memory, length = used elements) into `buf`,
+  // growing the GPU storage only when the used byte size exceeds the current capacity.
+  // `capObj[capKey]` tracks the allocated byte size. `target` is ARRAY_BUFFER or
+  // ELEMENT_ARRAY_BUFFER. Returns nothing.
+  _upload(target, buf, view, capObj, capKey, usage) {
+    const gl = this.gl;
+    const bytes = view.byteLength;
+    gl.bindBuffer(target, buf);
+    if (bytes > capObj[capKey]) {
+      // Grow with some headroom to avoid frequent reallocs as the visible set changes.
+      const newCap = Math.max(bytes, Math.ceil(capObj[capKey] * 1.5), bytes);
+      gl.bufferData(target, newCap, usage);
+      capObj[capKey] = newCap;
+    }
+    if (bytes > 0) gl.bufferSubData(target, 0, view);
+  }
+
+  // (Re)build zero-copy typed-array views over WASM memory if the buffer identity changed
+  // (memory grew → old ArrayBuffer detached). Views are created fresh each frame with the
+  // current ptr/len, but the underlying ArrayBuffer is only re-fetched when it changes.
+  _memBuffer(wasmMemory) {
+    if (this._wasmBuffer !== wasmMemory.buffer) {
+      this._wasmBuffer = wasmMemory.buffer;
+    }
+    return this._wasmBuffer;
+  }
+
+  draw(eng, wasmMemory) {
     const gl = this.gl;
     const [sr, sg, sb, sa] = PALETTE.sky;
     gl.clearColor(sr, sg, sb, sa);
@@ -326,48 +365,94 @@ export class Renderer {
       gl.depthMask(true);
     }
 
-    // --- fill pass ---
-    const fillVerts      = eng.fill_vertices();
-    const fillDraws      = eng.fill_draws();
-    const fillStrengths  = eng.fill_strengths();
-    const fillElevations = eng.fill_elevations();
+    // Zero-copy path requires the WASM memory + the ptr/len exports. If unavailable (mock
+    // engine, older API), fall back to the copying getters + per-strip drawArrays.
+    const zeroCopy = wasmMemory && typeof eng.fill_indices_len === 'function';
 
-    gl.useProgram(this.fillProg);
-    gl.uniformMatrix4fv(this.fillMvp, false, mvp);
-    gl.uniform4fv(this.fillColor, PALETTE.fill);
+    if (zeroCopy) {
+      const mem = this._memBuffer(wasmMemory);
 
-    gl.bindVertexArray(this.fillVAO);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.fillVBO);
-    gl.bufferData(gl.ARRAY_BUFFER, fillVerts, gl.DYNAMIC_DRAW);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.fillStrVBO);
-    gl.bufferData(gl.ARRAY_BUFFER, fillStrengths, gl.DYNAMIC_DRAW);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.fillElevVBO);
-    gl.bufferData(gl.ARRAY_BUFFER, fillElevations, gl.DYNAMIC_DRAW);
+      // --- fill pass (one indexed drawElements via primitive restart) ---
+      gl.useProgram(this.fillProg);
+      gl.uniformMatrix4fv(this.fillMvp, false, mvp);
+      gl.uniform4fv(this.fillColor, PALETTE.fill);
+      gl.bindVertexArray(this.fillVAO);
 
-    for (let i = 0; i < fillDraws.length; i += 2) {
-      gl.drawArrays(gl.TRIANGLE_STRIP, fillDraws[i], fillDraws[i + 1]);
-    }
+      const fvLen = eng.fill_verts_len();
+      const fIdxLen = eng.fill_indices_len();
+      if (fIdxLen > 0) {
+        const fv  = new Float32Array(mem, eng.fill_verts_ptr(), fvLen);
+        const fs  = new Float32Array(mem, eng.fill_strengths_ptr(), eng.fill_strengths_len());
+        const fe  = new Float32Array(mem, eng.fill_elevations_ptr(), eng.fill_elevations_len());
+        const fi  = new Uint32Array(mem, eng.fill_indices_ptr(), fIdxLen);
+        this._upload(gl.ARRAY_BUFFER, this.fillVBO, fv, this.fillCap, 'pos', gl.DYNAMIC_DRAW);
+        this._upload(gl.ARRAY_BUFFER, this.fillStrVBO, fs, this.fillCap, 'str', gl.DYNAMIC_DRAW);
+        this._upload(gl.ARRAY_BUFFER, this.fillElevVBO, fe, this.fillCap, 'elev', gl.DYNAMIC_DRAW);
+        this._upload(gl.ELEMENT_ARRAY_BUFFER, this.fillIBO, fi, this.fillCap, 'idx', gl.DYNAMIC_DRAW);
+        gl.drawElements(gl.TRIANGLE_STRIP, fIdxLen, gl.UNSIGNED_INT, 0);
+      }
 
-    // --- line pass (LEQUAL so lines win over their own fill at same depth) ---
-    const lineVerts      = eng.line_vertices();
-    const lineDraws      = eng.line_draws();
-    const lineStrengths  = eng.line_strengths();
-    const lineElevations = eng.line_elevations();
+      // --- line pass (one indexed drawElements via primitive restart) ---
+      gl.useProgram(this.lineProg);
+      gl.uniformMatrix4fv(this.lineMvp, false, mvp);
+      gl.uniform4fv(this.lineColor, PALETTE.line);
+      gl.bindVertexArray(this.lineVAO);
 
-    gl.useProgram(this.lineProg);
-    gl.uniformMatrix4fv(this.lineMvp, false, mvp);
-    gl.uniform4fv(this.lineColor, PALETTE.line);
+      const lvLen = eng.line_verts_len();
+      const lIdxLen = eng.line_indices_len();
+      if (lIdxLen > 0) {
+        const lv  = new Float32Array(mem, eng.line_verts_ptr(), lvLen);
+        const ls  = new Float32Array(mem, eng.line_strengths_ptr(), eng.line_strengths_len());
+        const le  = new Float32Array(mem, eng.line_elevations_ptr(), eng.line_elevations_len());
+        const li  = new Uint32Array(mem, eng.line_indices_ptr(), lIdxLen);
+        this._upload(gl.ARRAY_BUFFER, this.lineVBO, lv, this.lineCap, 'pos', gl.DYNAMIC_DRAW);
+        this._upload(gl.ARRAY_BUFFER, this.lineStrVBO, ls, this.lineCap, 'str', gl.DYNAMIC_DRAW);
+        this._upload(gl.ARRAY_BUFFER, this.lineElevVBO, le, this.lineCap, 'elev', gl.DYNAMIC_DRAW);
+        this._upload(gl.ELEMENT_ARRAY_BUFFER, this.lineIBO, li, this.lineCap, 'idx', gl.DYNAMIC_DRAW);
+        gl.drawElements(gl.LINE_STRIP, lIdxLen, gl.UNSIGNED_INT, 0);
+      }
+    } else {
+      // --- fill pass (fallback: copy + per-strip drawArrays) ---
+      const fillVerts      = eng.fill_vertices();
+      const fillDraws      = eng.fill_draws();
+      const fillStrengths  = eng.fill_strengths();
+      const fillElevations = eng.fill_elevations();
 
-    gl.bindVertexArray(this.lineVAO);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.lineVBO);
-    gl.bufferData(gl.ARRAY_BUFFER, lineVerts, gl.DYNAMIC_DRAW);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.lineStrVBO);
-    gl.bufferData(gl.ARRAY_BUFFER, lineStrengths, gl.DYNAMIC_DRAW);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.lineElevVBO);
-    gl.bufferData(gl.ARRAY_BUFFER, lineElevations, gl.DYNAMIC_DRAW);
+      gl.useProgram(this.fillProg);
+      gl.uniformMatrix4fv(this.fillMvp, false, mvp);
+      gl.uniform4fv(this.fillColor, PALETTE.fill);
 
-    for (let i = 0; i < lineDraws.length; i += 2) {
-      gl.drawArrays(gl.LINE_STRIP, lineDraws[i], lineDraws[i + 1]);
+      gl.bindVertexArray(this.fillVAO);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.fillVBO);
+      gl.bufferData(gl.ARRAY_BUFFER, fillVerts, gl.DYNAMIC_DRAW);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.fillStrVBO);
+      gl.bufferData(gl.ARRAY_BUFFER, fillStrengths, gl.DYNAMIC_DRAW);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.fillElevVBO);
+      gl.bufferData(gl.ARRAY_BUFFER, fillElevations, gl.DYNAMIC_DRAW);
+      for (let i = 0; i < fillDraws.length; i += 2) {
+        gl.drawArrays(gl.TRIANGLE_STRIP, fillDraws[i], fillDraws[i + 1]);
+      }
+
+      // --- line pass (fallback) ---
+      const lineVerts      = eng.line_vertices();
+      const lineDraws      = eng.line_draws();
+      const lineStrengths  = eng.line_strengths();
+      const lineElevations = eng.line_elevations();
+
+      gl.useProgram(this.lineProg);
+      gl.uniformMatrix4fv(this.lineMvp, false, mvp);
+      gl.uniform4fv(this.lineColor, PALETTE.line);
+
+      gl.bindVertexArray(this.lineVAO);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.lineVBO);
+      gl.bufferData(gl.ARRAY_BUFFER, lineVerts, gl.DYNAMIC_DRAW);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.lineStrVBO);
+      gl.bufferData(gl.ARRAY_BUFFER, lineStrengths, gl.DYNAMIC_DRAW);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.lineElevVBO);
+      gl.bufferData(gl.ARRAY_BUFFER, lineElevations, gl.DYNAMIC_DRAW);
+      for (let i = 0; i < lineDraws.length; i += 2) {
+        gl.drawArrays(gl.LINE_STRIP, lineDraws[i], lineDraws[i + 1]);
+      }
     }
 
     // --- aircraft pass ---
