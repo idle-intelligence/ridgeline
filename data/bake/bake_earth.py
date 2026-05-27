@@ -3,7 +3,7 @@
 Global elevation data-bake for the ridgeline flight game.
 
 Downloads the ETOPO 2022 60 arc-second (1 arc-min) ICE-surface global relief
-grid from NOAA NCEI (open HTTP, no auth), resamples it to our 8192x4096 grid,
+grid from NOAA NCEI (open HTTP, no auth), resamples it to our 12288x6144 grid,
 clamps ocean/below-sea-level to exactly 0, and writes the project binary format:
 
   heightfield.bin  - little-endian int16 meters, row-major,
@@ -15,6 +15,7 @@ clamps ocean/below-sea-level to exactly 0, and writes the project binary format:
 
 Source DEM cached under data/bake/cache/ (gitignored, not committed).
 """
+import argparse
 import json
 import os
 import sys
@@ -31,8 +32,8 @@ ETOPO_URL = ("https://www.ngdc.noaa.gov/thredds/fileServer/global/"
              "ETOPO_2022_v1_60s_N90W180_surface.nc")
 ETOPO_FILE = os.path.join(CACHE_DIR, "ETOPO_2022_v1_60s_surface.nc")
 
-WIDTH = 8192
-HEIGHT = 4096
+WIDTH = 12288
+HEIGHT = 6144
 SOURCE = "ETOPO 2022 v1 60s ice-surface (NOAA NCEI)"
 
 
@@ -49,7 +50,7 @@ def download():
 
 
 def resample():
-    """Load ETOPO and nearest-sample onto our 8192x4096 grid.
+    """Load ETOPO and nearest-sample onto our target WIDTHxHEIGHT grid.
 
     Source: z[lat, lon] float32, lat ascending (S->N), lon ascending (W->E).
     Target: row 0 = +90 (north), col 0 = -180 (west).
@@ -83,6 +84,12 @@ def resample():
 
 
 def main():
+    global WIDTH, HEIGHT
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--width", type=int, default=WIDTH)
+    ap.add_argument("--height", type=int, default=HEIGHT)
+    args = ap.parse_args()
+    WIDTH, HEIGHT = args.width, args.height
     download()
     print(f"resampling ETOPO 60s -> {WIDTH}x{HEIGHT}")
     elev = resample()  # float32 [H,W], real meters incl. negative bathymetry

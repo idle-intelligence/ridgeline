@@ -5,10 +5,10 @@
     "lon_min": -180,
     "lon_max": 180
   },
-  "width": 8192,
-  "height": 4096,
+  "width": 12288,
+  "height": 6144,
   "elev_min": 0,
-  "elev_max": 7712,
+  "elev_max": 7918,
   "dtype": "int16",
   "byte_order": "little",
   "row_order": "north_to_south",
