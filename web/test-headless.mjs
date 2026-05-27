@@ -99,6 +99,10 @@ async function run() {
   // nor rocket to space. Then pitch-down descends and Shift+Space climbs out.
   const cruise = await page.evaluate(() => {
     const eng = window._eng;
+    // Re-pin to the default spawn first: the production rAF loop has been free-running with
+    // wall-clock dt since page load, so the craft has drifted a variable amount. Resetting to a
+    // known spawn makes the settle assertion deterministic (independent of harness timing).
+    eng.set_spawn(38.0, 8.0, 250.0, 0.0);
     eng.set_input(0, 0, 0, 0, 0, 0, 0, false);
     const a0 = eng.altitude();
     // Track the SETTLED band over the last 8 s (after the descent transient onto the AGL hold).

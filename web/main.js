@@ -31,14 +31,14 @@ async function fetchJson(url) {
 
 // --- engine factory ---
 
-async function buildEngine(meta, hfBytes, wmBytes) {
+async function buildEngine(meta, hfBytes) {
   if (USE_MOCK) {
     const { makeMockEngine } = await import('./mock-engine.js');
     const { bbox } = meta;
     return {
       eng: makeMockEngine(
         meta.width, meta.height,
-        hfBytes, wmBytes,
+        hfBytes,
         meta.elev_min, meta.elev_max,
         bbox.lat_min, bbox.lat_max, bbox.lon_min, bbox.lon_max,
       ),
@@ -62,7 +62,7 @@ async function buildEngine(meta, hfBytes, wmBytes) {
   const { bbox } = meta;
   const eng = new Engine(
     meta.width, meta.height,
-    hfBytes, wmBytes,
+    hfBytes,
     meta.elev_min, meta.elev_max,
     bbox.lat_min, bbox.lat_max, bbox.lon_min, bbox.lon_max,
   );
@@ -173,12 +173,11 @@ async function main() {
   overlay.innerHTML = '<p>Loading terrain…</p>';
   overlay.style.display = 'flex';
 
-  let meta, hfBytes, wmBytes, aircraftJson;
+  let meta, hfBytes, aircraftJson;
   try {
-    [meta, hfBytes, wmBytes, aircraftJson] = await Promise.all([
+    [meta, hfBytes, aircraftJson] = await Promise.all([
       fetchJson('../data/meta.json'),
       fetchBinary('../data/heightfield.bin'),
-      fetchBinary('../data/water_mask.bin'),
       fetchJson('../data/aircraft.json'),
     ]);
   } catch (e) {
@@ -187,11 +186,14 @@ async function main() {
 
   let wasmMemory = null;
   try {
-    ({ eng, wasmMemory } = await buildEngine(meta, hfBytes, wmBytes));
+    ({ eng, wasmMemory } = await buildEngine(meta, hfBytes));
   } catch (e) {
     // fatal() already called inside buildEngine for wasm errors; re-throw others
     fatal('Engine init failed.', e.message);
   }
+  // The engine has copied the heightfield into WASM (as int16); drop our reference to the raw
+  // ~144 MB Uint8Array so it can be GC'd — the WASM int16 copy is the only retained one.
+  hfBytes = null;
   eng.set_aspect(canvas.width / canvas.height);
 
   // --- URL query params (phone-friendly start config) ---

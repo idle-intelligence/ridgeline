@@ -44,10 +44,12 @@ await init();                       // wasm-pack default init
 const eng = new Engine(             // #[wasm_bindgen(constructor)] → JS `new`, not Engine.new
   width, height,                    // u32, from meta.json
   heightfieldBytes,                 // Uint8Array, raw int16 LE, len = width*height*2
-  waterMaskBytes,                   // Uint8Array, u8 0/1, len = width*height
   elev_min, elev_max,               // f32 (meters)
   lat_min, lat_max, lon_min, lon_max// f32 (degrees, from meta.bbox)
 );
+// The heightfield is kept in WASM as i16 (raw meters); `sample()` multiplies by VERT_SCALE on
+// read. No water mask is loaded (sea is hidden by elevation, not a mask) — drop water_mask.bin.
+// After construction the JS caller can null its raw heightfieldBytes reference (WASM holds the copy).
 ```
 
 ## Spawn + setters (call after construction, before the first `step`)
@@ -281,7 +283,9 @@ WebGL2 default path does NOT use them; they don't affect the existing contract a
 - `eng.elev_world_max()` → `f32` — max terrain elevation (world units) for elevation→brightness
   normalization (matches `line_elevations`).
 - `eng.heightfield_ptr()/_len()` → `u32` — pointer/len into WASM memory of the f32 world-unit
-  elevation grid (row-major, row 0 = north, len = width*height). Uploaded ONCE to the GPU.
+  elevation grid (row-major, row 0 = north, len = width*height). Uploaded ONCE to the GPU. The
+  grid is stored as i16 meters; `heightfield_ptr()` lazily materializes an f32 world-unit copy on
+  first call (`&mut self`), so this f32 buffer only exists when the WebGPU prototype requests it.
 - `eng.grid_width()/grid_height()` → `u32` — heightfield grid dimensions.
 
 ## Rendering contract (web side)

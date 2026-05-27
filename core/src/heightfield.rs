@@ -77,10 +77,9 @@ pub fn ve_for_altitude(altitude_wu: f32) -> f32 {
 pub struct Heightfield {
     pub width: u32,
     pub height: u32,
-    // elevation in world units (elev_m * VERT_SCALE), row 0 = north, row-major.
-    pub elev: Vec<f32>,
-    #[allow(dead_code)]
-    pub water: Vec<u8>,
+    // elevation in RAW METERS (int16), row 0 = north, row-major. Converted to world units on
+    // sample via `* VERT_SCALE` — stored as i16 (≈half the memory of an f32 world-unit copy).
+    pub elev: Vec<i16>,
     // world-unit elevation range (max drives elev_norm)
     pub elev_world_max: f32,
     // geographic bbox (degrees)
@@ -91,14 +90,13 @@ pub struct Heightfield {
 }
 
 impl Heightfield {
-    /// Parse raw int16 LE heightfield + u8 water mask.
+    /// Parse raw int16 LE heightfield (raw meters, kept as i16).
     /// elev_min/max in meters; lat/lon in degrees.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         width: u32,
         height: u32,
         hf_bytes: &[u8],
-        water_bytes: &[u8],
         elev_min: f32,
         elev_max: f32,
         lat_min: f32,
@@ -115,17 +113,13 @@ impl Heightfield {
         for i in 0..n {
             let lo = hf_bytes[i * 2] as i16;
             let hi = hf_bytes[i * 2 + 1] as i16;
-            let raw = (lo | (hi << 8)) as f32; // little-endian i16, meters
-            elev.push(raw * VERT_SCALE);
+            elev.push(lo | (hi << 8)); // little-endian i16, raw meters
         }
-
-        let water = water_bytes[..n].to_vec();
 
         Self {
             width,
             height,
             elev,
-            water,
             elev_world_max,
             lat_min,
             lat_max,
@@ -148,10 +142,12 @@ impl Heightfield {
         self.lon_min + t * (self.lon_max - self.lon_min)
     }
 
-    /// Elevation sample (world units) at (row, col).
+    /// Elevation sample (world units) at (row, col). The grid stores raw i16 meters; the
+    /// world-unit value is `meters * VERT_SCALE`, computed on read (identical to the old
+    /// stored-f32 value, just deferred — saves ~half the heightfield memory).
     #[inline]
     pub fn sample(&self, row: u32, col: u32) -> f32 {
-        self.elev[(row * self.width + col) as usize]
+        self.elev[(row * self.width + col) as usize] as f32 * VERT_SCALE
     }
 
     /// Elevation sample (world units) at a FRACTIONAL row, fixed col. Linearly interpolates

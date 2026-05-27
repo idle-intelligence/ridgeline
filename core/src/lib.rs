@@ -102,6 +102,10 @@ pub struct Engine {
     look_yaw: f32,
     look_pitch: f32,
     ve_override: Option<f32>,
+    // Lazily-built f32 world-unit copy of the heightfield, ONLY for the flag-gated WebGPU
+    // prototype's one-time GPU upload (heightfield_ptr/_len). The default WebGL2 phone path
+    // never touches this, so the int16 memory saving holds in production.
+    hf_f32_cache: Vec<f32>,
     i_thrust: f32,
     i_pitch: f32,
     i_yaw: f32,
@@ -118,7 +122,6 @@ impl Engine {
         width: u32,
         height: u32,
         hf_bytes: &[u8],
-        water_bytes: &[u8],
         elev_min: f32,
         elev_max: f32,
         lat_min: f32,
@@ -130,7 +133,7 @@ impl Engine {
         console_error_panic_hook::set_once();
 
         let hf = Heightfield::new(
-            width, height, hf_bytes, water_bytes, elev_min, elev_max, lat_min, lat_max,
+            width, height, hf_bytes, elev_min, elev_max, lat_min, lat_max,
             lon_min, lon_max,
         );
 
@@ -147,6 +150,7 @@ impl Engine {
             look_yaw: 0.0,
             look_pitch: 0.0,
             ve_override: None,
+            hf_f32_cache: Vec::new(),
             i_thrust: 0.0,
             i_pitch: 0.0,
             i_yaw: 0.0,
@@ -352,9 +356,19 @@ impl Engine {
     }
 
     /// Pointer to the heightfield elevation buffer (f32 world units, row-major, row 0 = north).
-    /// len = width*height. Additive: lets the WebGPU prototype upload the heightfield once.
-    pub fn heightfield_ptr(&self) -> u32 {
-        self.hf.elev.as_ptr() as u32
+    /// len = width*height. Additive: lets the WebGPU prototype upload the heightfield once. The
+    /// grid is stored as i16 meters; this lazily materializes the f32 world-unit copy (`* VERT_SCALE`)
+    /// the first time the prototype asks for it. `&mut self` so the cache can be built on demand.
+    pub fn heightfield_ptr(&mut self) -> u32 {
+        if self.hf_f32_cache.is_empty() && !self.hf.elev.is_empty() {
+            self.hf_f32_cache = self
+                .hf
+                .elev
+                .iter()
+                .map(|&m| m as f32 * heightfield::VERT_SCALE)
+                .collect();
+        }
+        self.hf_f32_cache.as_ptr() as u32
     }
     pub fn heightfield_len(&self) -> u32 {
         self.hf.elev.len() as u32

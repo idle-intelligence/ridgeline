@@ -2,7 +2,7 @@
 // Matches Engine API exactly per core/API.md so the WebGL2 pipeline can be
 // verified visually in headless Chromium without the real wasm present.
 
-export function makeMockEngine(width, height, _hf, _wm, _elevMin, _elevMax, latMin, latMax, lonMin, lonMax) {
+export function makeMockEngine(width, height, _hf, _elevMin, _elevMax, latMin, latMax, lonMin, lonMax) {
   const worldW = 10.0;
   const worldD = 10.0;
 
