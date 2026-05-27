@@ -41,13 +41,13 @@ const SPAWN_LON: f32 = 8.0;
 const CRUISE_ALT: f32 = 250.0;
 /// Default spawn heading (degrees, 0 = north, 90 = east). North toward Europe.
 const SPAWN_HEADING: f32 = 0.0;
-/// Throttle seeded at spawn. With no thrust input the throttle holds, so the speed eases to
-/// its target v_target = lerp(IDLE_SPEED, CRUISE_MAX, throttle) ≈ 450 wu/s and CRUISE_SPEED
-/// is seeded equal to that → steady level cruise from frame 1 (holds altitude + speed).
-const CRUISE_THROTTLE: f32 = 0.527;
-/// Forward cruise speed (wu/s). Seeded to the hands-off target for CRUISE_THROTTLE so speed
-/// stays flat with no input.
-const CRUISE_SPEED: f32 = 450.0;
+/// Throttle seeded at spawn. With no thrust input the throttle holds; in the slower/draggier
+/// ATMO band the speed settles where thrust balances quadratic drag, near CRUISE_SPEED, so the
+/// craft holds a steady level cruise from frame 1 (holds altitude + speed, no startup lurch).
+const CRUISE_THROTTLE: f32 = 0.5;
+/// Forward cruise speed (wu/s), seeded at the drag-balanced equilibrium for CRUISE_THROTTLE in
+/// the dense ATMO band so speed stays flat with no input. ≈ 228 km/h at planet scale.
+const CRUISE_SPEED: f32 = 210.0;
 
 /// Level-flight orientation at a geographic spawn point: up = radial (away from center),
 /// forward = the tangent direction along the surface on the given compass heading
@@ -411,8 +411,9 @@ impl Engine {
         self.phys.speed * M_PER_WU * 3.6
     }
 
-    /// Current flight regime by altitude: 0 = SPACE (free Newtonian), 1 = PLANETARY
-    /// (capture-zone assisted approach), 2 = ATMOSPHERE (fly-by-nose cruise).
+    /// Current flight mode by altitude: 0 = ATMO (dense fly-by-nose cruise),
+    /// 1 = ORBIT (thin-air near-circular hold), 2 = INTERPLANETARY (free Newtonian + capture
+    /// assist on re-entry).
     pub fn flight_mode(&self) -> u8 {
         self.phys.flight_mode()
     }

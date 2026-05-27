@@ -113,18 +113,20 @@ speed equals `CRUISE_SPEED`. With no thrust input the throttle holds, so from fr
 craft holds altitude and speed — no free-fall, no climb-out. Pitch down dives; pitch up +
 Shift+Space climbs to space.
 
-**Flight model** (see `docs/physics.md`): speed is **decoupled from altitude**. Throttle
-sets a *target speed* (hard-capped at `V_CAP = 10000` wu/s, so the HUD km/h is always
-bounded). In the atmosphere the craft flies **by the nose** — a level nose holds altitude at
-any speed, pitch climbs/dives, and dropping below `STALL_SPEED` makes it sink. In space it is
-**Newtonian** (coasts; gravity + nose-thrust only). The two blend by air density. Between the
-atmosphere and deep space a **CAPTURE ZONE** (`ATMOSPHERE_TOP` < alt < `CAPTURE_ALT = R_WORLD·10
-= 60000` wu) runs a planetary-mode **assist** that ramps in as you descend: fly-by-nose steering
-ramps in (point at the planet → the AI brings you in) and the speed cap bleeds from `V_CAP` down
-to `APPROACH_SPEED = 2000` wu/s, so returning from deep space decelerates smoothly into a
-controlled approach instead of overshooting — yet pointing outward + afterburner still re-escapes
-(assist, not prison). The chase craft is a small foreground silhouette against the terrain and
-curved horizon ahead (AIRCRAFT_SCALE small vs the 6000 wu planet).
+**Flight model** (see `docs/physics.md`): speed is **decoupled from altitude**, with **three
+modes crossfaded by altitude** (seamless, no discrete switch). Throttle sets a *target speed*
+(hard-capped at `V_CAP = 10000` wu/s, so the HUD km/h is always bounded). **ATMO** (`alt < 1500`):
+slow + dense fly-by-nose with **quadratic drag** (`IDLE 30 .. CRUISE_MAX 400`; cut throttle →
+speed bleeds in ~2–3 s). **ORBIT** (`1500 .. ORBIT_TOP = 12000`): thin air, faster
+(`1000 .. 3000`), a gentle critically-damped hold keeps a **near-circular** path that's easy to
+raise/lower with pitch and easy to escape (point out + accelerate). **INTERPLANETARY**
+(`> 12000`): free Newtonian (coasts; gravity + nose-thrust) up to `V_CAP`. Per-mode caps
+crossfade ≈ 1 : 7.5 : 25. **Coordinated banking** couples roll into yaw in ATMO/ORBIT (rolling
+banks you into a turn). On re-entry a **CAPTURE ZONE** (`ATMOSPHERE_TOP` < alt < `CAPTURE_ALT =
+R_WORLD·10 = 60000` wu) assist ramps in (point at the planet → the AI brings you in; the cap
+bleeds toward `APPROACH_SPEED = 2000` wu/s) so returning decelerates smoothly — yet pointing
+outward + afterburner still re-escapes (assist, not prison). The chase craft is a small
+foreground silhouette against the terrain and curved horizon ahead.
 
 Projection near/far are at space scale: `Z_NEAR=1`, `Z_FAR=200000` (globe radius 6000,
 camera out to tens of thousands of wu).
@@ -231,10 +233,13 @@ painter's back-to-front order is no longer required.
   it as `THR nn%` so the pilot can regulate cruise speed. Throttle ramps slowly
   (`THROTTLE_RATE = 0.3 s⁻¹`, a full sweep ≈ 3.3 s) so intermediate cruise settings are easy to
   hold; `v_target = lerp(IDLE_SPEED, top, throttle)`.
-- `eng.flight_mode()` → `u8` — current flight regime by altitude: `0 = SPACE` (free Newtonian,
-  `alt ≥ CAPTURE_ALT`), `1 = PLANETARY` (capture-zone assisted approach,
-  `ATMOSPHERE_TOP ≤ alt < CAPTURE_ALT`), `2 = ATMOSPHERE` (fly-by-nose cruise,
-  `alt < ATMOSPHERE_TOP`). The web HUD maps these to `· SPACE` / `· PLANETARY` / `· ATMO`.
+- `eng.flight_mode()` → `u8` — current flight mode by altitude: `0 = ATMO` (dense fly-by-nose
+  cruise, `alt < ATMOSPHERE_TOP = 1500`), `1 = ORBIT` (thin-air near-circular hold,
+  `ATMOSPHERE_TOP ≤ alt < ORBIT_TOP = 12000`), `2 = INTERPLANETARY` (free Newtonian + capture
+  assist on re-entry, `alt ≥ ORBIT_TOP`). The web HUD maps these to `· ATMO` / `· ORBIT` /
+  `· INTERPLANETARY`. Speed caps crossfade per mode (`CRUISE_MAX 400` → `ORBIT_CAP 3000` →
+  `V_CAP 10000`, ratio ≈ 1 : 7.5 : 25). The capture-zone assist is a sub-state folded into
+  INTERPLANETARY re-entry, not a separate label.
 - `eng.lat_lon()` → `Float32Array` length 2 `[lat, lon]` — the **sub-camera point**: the camera
   position projected onto the globe. `lat = asin(cam.y / |cam|)`, `lon = atan2(-cam.z, cam.x)`,
   both in degrees. Shows what the camera is above.

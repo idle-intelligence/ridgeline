@@ -115,7 +115,7 @@ async function run() {
   const a0 = cruise.a0;
   if (Math.abs(cruise.amin - a0) < 150 && Math.abs(cruise.amax - a0) < 150 &&
       cruise.amin > 200 && cruise.amax < 1500 &&
-      cruise.smin > 300 && cruise.smax < 700) {
+      cruise.smin > 100 && cruise.smax < 400) {
     console.log('PASS: spawn cruise holds altitude + speed with no input (no free-fall, no escape)');
   } else {
     fail(`spawn cruise did not hold: alt band [${cruise.amin.toFixed(0)},${cruise.amax.toFixed(0)}] ` +
