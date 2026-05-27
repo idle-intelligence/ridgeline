@@ -224,8 +224,19 @@ impl Engine {
 
     /// Advance simulation by `dt` seconds. Regenerates visible geometry.
     pub fn step(&mut self, dt: f32) {
+        // Terrain-radius sampler for AGL terrain-following: lat/lon → terrain radius AS RENDERED.
+        // Uses the same vertical exaggeration the renderer uses this frame (the override if set,
+        // else ve_for_altitude of the current camera altitude) so "hold ~500 m above ground"
+        // matches what the player sees.
+        let alt_wu = (self.phys.position.length() - R_WORLD).max(0.0);
+        let ve = self
+            .ve_override
+            .unwrap_or_else(|| heightfield::ve_for_altitude(alt_wu));
+        let hf = &self.hf;
+        let terrain = move |lat: f32, lon: f32| hf.terrain_radius_at(lat, lon, ve);
         self.phys.step(
             dt, self.i_thrust, self.i_pitch, self.i_yaw, self.i_roll, self.i_boost, self.i_ftl,
+            Some(&terrain),
         );
 
         let cam_pos = chase_cam_pos(&self.phys);
@@ -394,6 +405,20 @@ impl Engine {
     /// orbital/atmospheric heights for the planet's true size.
     pub fn altitude_m(&self) -> f32 {
         self.altitude() * M_PER_WU
+    }
+
+    /// Height ABOVE GROUND in real meters: `(|pos| − terrain_radius_below) · M_PER_WU`, where the
+    /// terrain radius uses the SAME vertical exaggeration the renderer draws this frame (the
+    /// override if set, else `ve_for_altitude(altitude)`), so AGL matches the relief the player
+    /// SEES. The ATMO terrain-following hold targets this. Clamped ≥ 0 (never reports below the
+    /// ground). Distinct from `altitude_m` (height above the sea-level sphere).
+    pub fn agl_m(&self) -> f32 {
+        let alt_wu = (self.phys.position.length() - R_WORLD).max(0.0);
+        let ve = self
+            .ve_override
+            .unwrap_or_else(|| heightfield::ve_for_altitude(alt_wu));
+        let terr_r = self.hf.terrain_radius_below(self.phys.position, ve);
+        (self.phys.position.length() - terr_r).max(0.0) * M_PER_WU
     }
 
     /// Speed in world units/sec.

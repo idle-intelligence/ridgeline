@@ -117,7 +117,10 @@ Shift+Space climbs to space.
 modes crossfaded by altitude** (seamless, no discrete switch). Throttle sets a *target speed*
 (hard-capped at `V_CAP = 10000` wu/s, so the HUD km/h is always bounded). **ATMO** (`alt < 1500`):
 slow + dense fly-by-nose with **quadratic drag** (`IDLE 30 .. CRUISE_MAX 400`; cut throttle →
-speed bleeds in ~2–3 s). **ORBIT** (`1500 .. ORBIT_TOP = 12000`): thin air, faster
+speed bleeds in ~2–3 s). Hands-off, **AGL terrain-following** holds the craft a fixed clearance
+(`TARGET_AGL = 250 wu`) above the terrain AS RENDERED: it samples terrain radii along the forward
+ground track over a speed-scaled look-ahead, takes the MAX (climbs BEFORE peaks), and tracks it
+with a critically-damped radial controller. Manual pitch overrides; auto re-engages hands-off. **ORBIT** (`1500 .. ORBIT_TOP = 12000`): thin air, faster
 (`1000 .. 3000`), a gentle critically-damped hold keeps a **near-circular** path that's easy to
 raise/lower with pitch and easy to escape (point out + accelerate). **INTERPLANETARY**
 (`> 12000`): free Newtonian (coasts; gravity + nose-thrust) up to `V_CAP`. Per-mode caps
@@ -227,6 +230,12 @@ painter's back-to-front order is no longer required.
 - `eng.altitude_m()` → f32 (real meters above sea level) = `altitude() × M_PER_WU`, where
   `M_PER_WU = EARTH_RADIUS_M / R_WORLD ≈ 1061.8` m/wu. Uses the HORIZONTAL planet scale
   (not VERT_SCALE) so altitudes read as plausible orbital/atmospheric heights.
+- `eng.agl_m()` → f32 (real meters ABOVE GROUND) = `(|pos| − terrain_radius_below) × M_PER_WU`,
+  clamped ≥ 0. The terrain radius uses the SAME vertical exaggeration the renderer draws this
+  frame (`ve_for_altitude(altitude)`, or the exaggeration override if set), so AGL matches the
+  relief the player SEES. Distinct from `altitude_m` (height above the sea-level sphere); over
+  ocean (terrain = 0) the two coincide. The ATMO terrain-following hold targets this. The web HUD
+  shows `AGL nnnm` in ATMO (alongside `ALT`).
 - `eng.speed()` → f32 (world units/sec).
 - `eng.speed_kmh()` → f32 (km/h) = `speed() × M_PER_WU × 3.6` (same horizontal planet scale).
 - `eng.throttle()` → f32 in `[0, 1]` — current engine throttle (gas pedal). The web HUD shows

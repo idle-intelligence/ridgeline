@@ -11,8 +11,8 @@ flips at a boundary; the physics is continuous — no discrete switch, no NaN):
   (∝ density·v²) makes the top speed asymptotic and bleeds speed to idle in ~2–3 s when you cut
   throttle (the "dense, hard to leave" feel). The craft flies where its nose points; a level
   nose holds altitude, pitch climbs/dives, below `STALL_SPEED` the wings give up. Hands-off the
-  nose auto-levels. (AGL terrain-following is the NEXT task; for now the level alt-hold drives
-  the radial command to 0 — a clean seam.)
+  nose auto-levels. Hands-off, **AGL terrain-following** holds a fixed clearance above the
+  terrain (see "AGL terrain-following" below); manual pitch overrides it.
 - **ORBIT** (`alt ~ATMOSPHERE_TOP .. ORBIT_TOP = 12000` wu) — faster, thin air (low drag),
   speed envelope `ORBIT_IDLE 1000 .. ORBIT_CAP 3000`. A **gentle critically-damped altitude
   hold** (`ORBIT_HOLD_RATE`, crossfaded down from the stiff ATMO hold) curves the velocity to
@@ -91,12 +91,12 @@ The same fly-by-nose term serves both ATMO and ORBIT; per-mode behavior crossfad
 2. Steer the unit velocity direction toward the nose (`orientation*-Z`) at `TURN_RATE` — the
    craft goes where it points.
 3. **Altitude hold**: with no pitch input the direction's radial (climb/sink) component is
-   driven to **0** at a rate that crossfades from the stiff `ALT_HOLD_RATE` (ATMO: pinned level)
-   to the gentle `ORBIT_HOLD_RATE` (ORBIT: loose near-circular hold, easy to raise/lower); with
-   pitch input it's driven to match the nose's radial component (climb/dive). The hold fades out
-   toward `ORBIT_TOP`, handing off to free Newtonian flight (easy escape). (AGL terrain-following
-   — the NEXT task — will replace the level command's `0` with a terrain-tracked value; a clean
-   seam, only that value changes.)
+   driven to a **commanded radial** at a rate that crossfades from the stiff `ALT_HOLD_RATE`
+   (ATMO: pinned) to the gentle `ORBIT_HOLD_RATE` (ORBIT: loose near-circular hold, easy to
+   raise/lower); with pitch input it's driven to match the nose's radial component (climb/dive).
+   The commanded radial is **AGL terrain-following** in ATMO (see below), crossfading by
+   `orbit_w` to `0` (level) in the ORBIT band. The hold fades out toward `ORBIT_TOP`, handing off
+   to free Newtonian flight (easy escape).
 4. **Stall**: authority `= stall³` where `stall` ramps 0→1 from `0.5·STALL_SPEED` to
    `STALL_SPEED`. As speed bleeds off, fly-by-nose authority collapses and the gravity sink
    term `g·(1 − authority)·dt` takes over → you fall. So you must keep speed up to stay up.
@@ -112,6 +112,58 @@ The same fly-by-nose term serves both ATMO and ORBIT; per-mode behavior crossfad
 | `BANK_GAIN` | 0.9 | roll→yaw coordinated-turn coupling (ATMO/ORBIT) |
 | `AUTO_LEVEL_RATE` | 2.5 s⁻¹ | hands-off nose leveling |
 | `STALL_SPEED` | 18 wu/s | below this fly-by-nose fades; set BELOW `IDLE_SPEED` (30) so the slowest cruise HOLDS altitude — only a genuine crawl stalls |
+
+## AGL terrain-following (ATMO)
+
+Hands-off in ATMO, the altitude-hold's commanded radial is set by an **above-ground-level (AGL)
+terrain-following** controller — the craft holds a fixed clearance above the terrain instead of a
+fixed sea-level altitude, climbing **before** peaks (look-ahead) and gliding gently down after.
+
+Per step (only when the pilot is NOT pitching; manual pitch overrides and terrain-follow yields,
+re-engaging the instant pitch is released):
+
+1. **Ground track**: project velocity onto the local tangent plane → the forward ground track.
+2. **Look-ahead max-window**: sample `AGL_SAMPLES = 8` terrain radii evenly along the track out
+   to `LOOKAHEAD = clamp(speed·LOOKAHEAD_TIME, LOOKAHEAD_MIN, LOOKAHEAD_MAX)`, PLUS the terrain
+   directly below, and take the **MAX** radius (`peak`). The max (not a mean) means a sharp ridge
+   is never smoothed away, and looking ahead makes the craft **climb before the peak**, not after
+   — fixing the documented "overshoot-the-crest-still-climbing" failure of a naive
+   match-terrain-below controller. The window scales with speed (faster ⇒ look farther).
+3. **Critically-damped radial controller**: `desired_r = peak + TARGET_AGL`,
+   `err = desired_r − |pos|`, `climb = clamp(AGL_K · err, −AGL_MAX_SINK, AGL_MAX_CLIMB)`. Because
+   the fly-by-nose altitude-hold has near-full authority each step (it snaps the velocity's radial
+   component onto the command in one frame), the AGL command is effectively a **velocity** command,
+   so a first-order proportional command (`AGL_K · err`) is **inherently critically damped** — it
+   eases toward the target with a ~`1/AGL_K` time constant and **cannot overshoot or bob** (no
+   oscillation). An explicit `−C·radial_v` damping term — correct for a pure *acceleration*
+   command — would instead *destabilise* this one-frame velocity command, so it's folded into the
+   first-order response. The rate clamp is asymmetric (climbs harder than it sinks) so it clears
+   rising terrain crisply and glides down gently after a crest.
+4. **Feed the seam**: `commanded_radial = clamp(climb/max(speed,1), −1, 1) · (1 − orbit_w)`. The
+   `(1 − orbit_w)` crossfade fades terrain-follow out across the ATMO/ORBIT boundary into the
+   ORBIT level near-circular hold — no discontinuity.
+
+**Terrain AS RENDERED.** The terrain radius (`Heightfield::terrain_radius_at(lat,lon, ve)` =
+`R_WORLD + terrain_elev · ve/VERT_EXAGGERATION`) uses the same altitude-coupled vertical
+exaggeration `ve = ve_for_altitude(altitude)` the renderer draws (or the exaggeration override if
+set), so "hold `TARGET_AGL` above ground" matches what the player SEES.
+
+**Scale note on `TARGET_AGL`.** At the horizontal scale `M_PER_WU ≈ 1061.8 m/wu`, a literal 500 m
+is only ≈ 0.47 wu — sub-world-unit, basically on the surface. But ATMO is arcade-compressed
+(`ATMOSPHERE_TOP = 1500 wu`, spawn cruise `CRUISE_ALT = 250 wu`), so we hold the established
+arcade cruise clearance `TARGET_AGL = 250 wu` (the spawn framing/FOV were tuned around it).
+
+**HUD-AGL**: `Engine::agl_m()` = `(|pos| − terrain_radius_below) · M_PER_WU` (clamped ≥ 0, same
+`ve`), shown in the web HUD as `AGL nnnm` in ATMO alongside `ALT`. Over ocean (terrain 0) AGL == ALT.
+
+| Constant | Value | Notes |
+|---|---|---|
+| `TARGET_AGL` | 250 wu | held clearance above the (rendered) terrain in ATMO |
+| `LOOKAHEAD_TIME` | 3 s | forward window = `clamp(speed·time, min, max)` |
+| `LOOKAHEAD_MIN` / `MAX` | 30 / 600 wu | look-ahead distance clamp |
+| `AGL_SAMPLES` | 8 | samples along the track (MAX-windowed) + the one directly below |
+| `AGL_K` | 4.0 s⁻¹ | first-order velocity-command gain (inherently critically damped) |
+| `AGL_MAX_CLIMB` / `SINK` | 200 / 50 wu/s | asymmetric climb/sink rate clamp (climb-fast, glide-gentle) |
 
 ## Space regime (Newtonian)
 
@@ -212,4 +264,9 @@ ratio ≈ 1:7.5:25) · `p` ATMO drag bleed (full throttle then cut → ~idle in 
 `q` ORBIT loosely holds altitude (no input → near-circular, < 15 % drift over 40 s) · `r` ORBIT
 easy escape (nose out + afterburner → climbs past `ORBIT_TOP`) · `s` smooth transitions (sweep
 altitude → `eff_cap`/`density`/`orbit_blend` continuous, bounded per-sample delta, no NaN) · `t`
-banking (a roll induces a heading change — coordinated turn).
+banking (a roll induces a heading change — coordinated turn) · `u` AGL flat (hands-off holds
+~`TARGET_AGL` steady over flat terrain, no bob) · `v` AGL ridge (climbs BEFORE a tall peak via the
+look-ahead max-window, essentially clears it, then glides gently DOWN after the crest — no
+overshoot-still-climbing) · `w` AGL rolling (gentle hills → bounded clearance, no growing
+bob/ringing — critical damping) · `x` AGL manual override (pitch-up climbs ABOVE the follow
+altitude; releasing re-engages terrain-follow back toward `TARGET_AGL`).

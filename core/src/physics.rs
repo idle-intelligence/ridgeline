@@ -126,6 +126,52 @@ const AUTO_LEVEL_RATE: f32 = 2.5;
 /// level cruise truly pins to constant altitude as the planet curves — the core decoupling.
 const ALT_HOLD_RATE: f32 = 80.0;
 
+// ── AGL terrain-following (ATMO) ──────────────────────────────────────────────────
+/// Target height ABOVE GROUND (wu) the AGL controller holds in ATMO.
+///
+/// SCALE NOTE: at the planet's HORIZONTAL scale `M_PER_WU ≈ 1061.8 m/wu`, a literal 500 m of
+/// clearance is only ≈ 0.47 wu — sub-world-unit, basically skimming the water. But the ATMO
+/// band is arcade-compressed: it runs to `ATMOSPHERE_TOP = 1500 wu` and the spawn cruise sits at
+/// `CRUISE_ALT = 250 wu`, so a "500 m" literal clearance would yank the craft from cruise down
+/// onto the surface. We instead hold the established arcade cruise clearance, `250 wu`, which the
+/// spawn framing and FOV were tuned around — the player skims ~250 wu above the terrain.
+///
+/// The "ground" reference is the terrain AS RENDERED (vertical exaggeration applied via
+/// `terrain_radius_at(lat,lon, ve)`), so the held clearance matches what the player SEES.
+/// VE INTERACTION: the terrain radius uses `ve_for_altitude(altitude)`, so as the rendered
+/// relief grows/relaxes with altitude the peak reference moves with it; TARGET_AGL is the
+/// clearance above THAT exaggerated terrain. At low cruise VE is near `VE_NEAR` (realistic),
+/// so the clearance reads as a stable height over the relief in view.
+const TARGET_AGL: f32 = 250.0;
+
+/// Look-ahead time (s): the forward ground-track window scales with speed,
+/// `LOOKAHEAD = clamp(speed·LOOKAHEAD_TIME, LOOKAHEAD_MIN, LOOKAHEAD_MAX)`. Faster ⇒ look
+/// farther ⇒ climb earlier (direct port of ArduPilot's ground-speed scaling).
+const LOOKAHEAD_TIME: f32 = 3.0;
+/// Minimum / maximum look-ahead distance (wu) so the window is sane at a crawl and bounded at
+/// speed. MIN keeps a useful horizon when slow; MAX caps how far peaks can pre-trigger a climb.
+const LOOKAHEAD_MIN: f32 = 30.0;
+const LOOKAHEAD_MAX: f32 = 600.0;
+/// Number of samples along the forward ground track (plus the one directly below). The MAX over
+/// these (anti-smoothing) is the climb reference so a sharp ridge is not averaged away.
+const AGL_SAMPLES: usize = 8;
+
+/// AGL controller gain (s⁻¹). The fly-by-nose altitude-hold has near-full authority each step
+/// (it snaps the velocity's radial component onto the command in one frame), so the AGL command
+/// is effectively a VELOCITY command, not an acceleration. A first-order proportional velocity
+/// command `climb = AGL_K·err` (err = desired_r − |pos|) is therefore INHERENTLY critically
+/// damped: it eases toward the target with a ~1/AGL_K time constant and CANNOT overshoot or bob
+/// (no oscillation), which is exactly what an explicit `−C·radial_v` damping term would add on a
+/// pure acceleration command but would DESTABILISE on a one-frame velocity command. The rate
+/// clamp below caps how fast it climbs/sinks. (Equivalent to the report's critically-damped
+/// radial controller for our full-authority hold: C is folded into the first-order response.)
+const AGL_K: f32 = 4.0;
+/// Climb / sink rate clamp (wu/s) on the AGL command — bounds the controller so it can't violate
+/// the speed/feel budget and keeps the response gentle. Asymmetric: climbs harder than it sinks
+/// so it clears rising terrain crisply but glides down gently after a crest.
+const AGL_MAX_CLIMB: f32 = 200.0;
+const AGL_MAX_SINK: f32 = 50.0;
+
 /// Below this forward speed (wu/s) fly-by-nose authority fades out (stall): the craft can no
 /// longer hold its nose-commanded heading and gravity sink takes over → you lose altitude.
 /// Set comfortably BELOW IDLE_SPEED (the slowest hands-off cruise) so normal slow flight holds
@@ -250,6 +296,11 @@ impl Physics {
     /// pitch/yaw/roll: desired rotation rates (rad/s), clamped internally.
     /// boost: 0..1 (unused by the speed model; afterburner is `ftl`).
     /// ftl: Space-hold afterburner (raises the target speed and thrust to the FTL tier).
+    /// terrain: optional terrain-radius sampler `(lat°, lon°) → radius_wu` (the planet center
+    ///   distance of the terrain AS RENDERED, vertical-exaggeration baked in by the caller).
+    ///   When present, ATMO altitude-hold becomes AGL terrain-following (look-ahead max-window,
+    ///   critically-damped); fades to the ORBIT altitude-hold across the boundary. When None
+    ///   (e.g. unit tests of the bare model), ATMO holds level (commanded radial 0) as before.
     #[allow(clippy::too_many_arguments)]
     pub fn step(
         &mut self,
@@ -260,6 +311,7 @@ impl Physics {
         roll: f32,
         _boost: f32,
         ftl: bool,
+        terrain: Option<&dyn Fn(f32, f32) -> f32>,
     ) {
         // Guard against a non-positive or non-finite dt (e.g. a zero/negative rAF delta on
         // the first frame), which would otherwise make `clamp(-a*dt, a*dt)` panic with
@@ -373,10 +425,47 @@ impl Physics {
             // a matching climb/dive. Decouples altitude from speed and kills the slow drift.
             // (AGL terrain-following will later replace this 0 with a terrain-tracked command —
             // a clean seam: only the `commanded_radial` value changes.)
-            let commanded_radial = if pitch.abs() < 1e-3 {
-                0.0 // true horizontal: hold altitude exactly as the planet curves
+            let commanded_radial = if pitch.abs() >= 1e-3 {
+                // MANUAL OVERRIDE: the pilot is pitching → climb/dive to match the nose;
+                // terrain-follow yields. Auto re-engages the instant pitch is released.
+                nose.dot(radial_out)
+            } else if let Some(terr) = terrain {
+                // AGL TERRAIN-FOLLOWING (ATMO). Project velocity onto the local tangent plane to
+                // get the ground track, sample terrain radii along it out to a speed-scaled
+                // LOOKAHEAD, take the MAX (+ the terrain directly below) so we climb BEFORE a
+                // peak. A critically-damped radial controller holds desired_r = peak + TARGET_AGL.
+                // The whole command crossfades to the ORBIT level-hold (0) by orbit_w so there is
+                // no discontinuity at the ATMO/ORBIT boundary.
+                let ground = self.velocity - radial_out * self.velocity.dot(radial_out);
+                let track = if ground.length_squared() > 1e-6 {
+                    ground.normalize()
+                } else {
+                    let nh = nose - radial_out * nose.dot(radial_out);
+                    nh.normalize_or_zero()
+                };
+                let lookahead =
+                    (speed * LOOKAHEAD_TIME).clamp(LOOKAHEAD_MIN, LOOKAHEAD_MAX);
+                // Terrain directly below, then the look-ahead samples; take the MAX radius.
+                let (lat0, lon0) = crate::heightfield::Heightfield::lat_lon_of(self.position);
+                let mut peak = terr(lat0, lon0);
+                if track != Vec3::ZERO {
+                    for i in 1..=AGL_SAMPLES {
+                        let d = lookahead * (i as f32 / AGL_SAMPLES as f32);
+                        let probe = self.position + track * d;
+                        let (lat, lon) =
+                            crate::heightfield::Heightfield::lat_lon_of(probe);
+                        peak = peak.max(terr(lat, lon));
+                    }
+                }
+                let desired_r = peak + TARGET_AGL;
+                let err = desired_r - r_dist;
+                let climb = (AGL_K * err).clamp(-AGL_MAX_SINK, AGL_MAX_CLIMB);
+                // Convert the climb RATE (wu/s) to a radial direction fraction, then fade out by
+                // orbit_w so the ORBIT band falls back to the level (0) hold.
+                let cmd = climb / speed.max(1.0);
+                cmd.clamp(-1.0, 1.0) * (1.0 - orbit_w)
             } else {
-                nose.dot(radial_out) // pitched: climb/dive to match the nose
+                0.0 // no terrain sampler: hold altitude level as the planet curves
             };
             let cur_radial = dir.dot(radial_out);
             // Authority collapses sharply (stall³) as speed bleeds off, so a stall clearly
@@ -540,7 +629,7 @@ mod scenarios {
     fn run(p: &mut Physics, secs: f32, thrust: f32, pitch: f32, ftl: bool) {
         let dt = 1.0 / 60.0;
         for _ in 0..((secs / dt) as usize) {
-            p.step(dt, thrust, pitch, 0.0, 0.0, 0.0, ftl);
+            p.step(dt, thrust, pitch, 0.0, 0.0, 0.0, ftl, None);
         }
     }
 
@@ -574,7 +663,7 @@ mod scenarios {
         let mut vmax = 0.0_f32;
         let dt = 1.0 / 60.0;
         for i in 0..(60.0 / dt) as usize {
-            p.step(dt, 1.0, 0.0, 0.0, 0.0, 0.0, true); // Shift+Space
+            p.step(dt, 1.0, 0.0, 0.0, 0.0, 0.0, true, None); // Shift+Space
             vmax = vmax.max(p.speed);
             assert!(p.speed <= V_CAP + 1e-2, "EXCEEDED V_CAP: {} at step {i}", p.speed);
             assert!(p.velocity.length() <= V_CAP + 1e-2);
@@ -621,8 +710,8 @@ mod scenarios {
         // well above STALL, throttle-0 flight HOLDS by design, so a stall is a genuine crawl.)
         let s_crawl = 0.3 * STALL_SPEED;
         let dt = 1.0 / 600.0;
-        stalled.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false);
-        flying.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false);
+        stalled.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, None);
+        flying.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, None);
         println!("[stall] seeded crawl={:.1} (<STALL={:.0}) vs cruise={:.0}: inward vel crawl={:.3} cruise={:.3}",
             s_crawl, STALL_SPEED, IDLE_SPEED, inward(&stalled), inward(&flying));
         // The sub-stall crawl gains downward (inward) velocity from the gravity sink; the
@@ -658,7 +747,7 @@ mod scenarios {
         let dt = 1.0 / 60.0;
         let mut vmax = 0.0_f32;
         for i in 0..(30.0 / dt) as usize {
-            p.step(dt, 1.0, 0.0, 0.0, 0.0, 0.0, true);
+            p.step(dt, 1.0, 0.0, 0.0, 0.0, 0.0, true, None);
             vmax = vmax.max(p.speed);
             assert!(p.speed <= V_CAP + 1e-2, "exceeded cap during escape: {} step {i}", p.speed);
             if i % 360 == 0 {
@@ -680,7 +769,7 @@ mod scenarios {
         let dt = 1.0 / 60.0;
         for s in 0..20 {
             for _ in 0..60 {
-                p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false);
+                p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, None);
             }
             let a = alt(&p);
             amin = amin.min(a); amax = amax.max(a);
@@ -732,7 +821,7 @@ mod scenarios {
                 p.orientation = Physics::new(p.position, look).orientation;
             }
             // No FTL: AI manages the approach. Throttle held (gives a cruise target once down).
-            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false);
+            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, None);
             t += dt;
             let a = alt(&p);
             if a < CAPTURE_ALT && !entered_zone {
@@ -777,7 +866,7 @@ mod scenarios {
         let dt = 1.0 / 60.0;
         let mut speed_at_atmo = None;
         for _ in 0..(600.0 / dt) as usize {
-            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false);
+            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, None);
             if alt(&p) <= ATMOSPHERE_TOP && speed_at_atmo.is_none() {
                 speed_at_atmo = Some(p.speed);
                 break;
@@ -803,7 +892,7 @@ mod scenarios {
         p.throttle = 1.0;
         let dt = 1.0 / 60.0;
         for _ in 0..(300.0 / dt) as usize {
-            p.step(dt, 1.0, 0.0, 0.0, 0.0, 0.0, true); // afterburner, climb out
+            p.step(dt, 1.0, 0.0, 0.0, 0.0, 0.0, true, None); // afterburner, climb out
         }
         println!("[not-prison] alt {:.0} -> {:.0} (CAPTURE_ALT={:.0}) speed={:.0}",
             alt0, alt(&p), CAPTURE_ALT, p.speed);
@@ -835,7 +924,7 @@ mod scenarios {
         let dt = 1.0 / 60.0;
         for s in 0..20 {
             for _ in 0..60 {
-                p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false); // throttle 0, level, hands-off
+                p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, None); // throttle 0, level, hands-off
             }
             let a = alt(&p);
             amin = amin.min(a);
@@ -865,7 +954,7 @@ mod scenarios {
             // Hold this throttle setting; let speed ease to its target.
             let dt = 1.0 / 60.0;
             for _ in 0..(8.0 / dt) as usize {
-                p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false); // no thrust input → throttle holds
+                p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, None); // no thrust input → throttle holds
             }
             println!("[granular] throttle={:.2} -> steady speed={:.0}", t, p.speed);
             speeds.push(p.speed);
@@ -920,7 +1009,7 @@ mod scenarios {
         let mut t_to_idle = None;
         let mut t = 0.0;
         for _ in 0..(8.0 / dt) as usize {
-            p.step(dt, -1.0, 0.0, 0.0, 0.0, 0.0, false); // cut throttle
+            p.step(dt, -1.0, 0.0, 0.0, 0.0, 0.0, false, None); // cut throttle
             t += dt;
             if t_to_idle.is_none() && p.speed < IDLE_SPEED * 1.5 {
                 t_to_idle = Some(t);
@@ -943,7 +1032,7 @@ mod scenarios {
         let dt = 1.0 / 60.0;
         for s in 0..40 {
             for _ in 0..60 {
-                p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false);
+                p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, None);
             }
             let a = alt(&p);
             amin = amin.min(a); amax = amax.max(a);
@@ -969,7 +1058,7 @@ mod scenarios {
         p.throttle = 1.0;
         let dt = 1.0 / 60.0;
         for _ in 0..(60.0 / dt) as usize {
-            p.step(dt, 1.0, 0.0, 0.0, 0.0, 0.0, true);
+            p.step(dt, 1.0, 0.0, 0.0, 0.0, 0.0, true, None);
         }
         println!("[orbit-escape] alt {:.0} -> {:.0} (ORBIT_TOP={:.0}) speed={:.0} mode={}", alt0, alt(&p), ORBIT_TOP, p.speed, p.flight_mode());
         assert!(alt(&p) > ORBIT_TOP, "could not escape ORBIT band: {}", alt(&p));
@@ -1014,10 +1103,10 @@ mod scenarios {
         // Roll for a bit (to establish a bank), then hold the bank with no further roll so the
         // coordinated-turn yaw acts on the heading.
         for _ in 0..(0.6 / dt) as usize {
-            p.step(dt, 0.0, 0.0, 0.0, 1.0, 0.0, false); // roll right
+            p.step(dt, 0.0, 0.0, 0.0, 1.0, 0.0, false, None); // roll right
         }
         for _ in 0..(2.0 / dt) as usize {
-            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false); // hold (banked) — turn develops
+            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, None); // hold (banked) — turn develops
         }
         let fwd1 = p.velocity.normalize();
         let turn = fwd0.dot(fwd1).clamp(-1.0, 1.0).acos().to_degrees();
@@ -1025,12 +1114,190 @@ mod scenarios {
         assert!(turn > 5.0, "roll did not induce a turn: {turn}°");
     }
 
+    // ===== AGL TERRAIN-FOLLOWING tests =====
+    //
+    // The synthetic terrain is a function of LONGITUDE (the craft starts at +X = lon 0, heading
+    // NEG_Z, which increases lon — its ground track). A terrain sampler closure returns the
+    // terrain RADIUS = R_WORLD + elev_wu at a given (lat, lon). We drive the craft hands-off
+    // (no pitch) so the AGL controller is fully in charge, and trace |pos| − terrain_below.
+
+    // AGL directly below, in wu, for a terrain radius function.
+    fn agl_below(p: &Physics, terr: &dyn Fn(f32, f32) -> f32) -> f32 {
+        let (lat, lon) = crate::heightfield::Heightfield::lat_lon_of(p.position);
+        p.position.length() - terr(lat, lon)
+    }
+
+    fn run_terr(
+        p: &mut Physics,
+        secs: f32,
+        thrust: f32,
+        pitch: f32,
+        terr: &dyn Fn(f32, f32) -> f32,
+    ) {
+        let dt = 1.0 / 60.0;
+        for _ in 0..((secs / dt) as usize) {
+            p.step(dt, thrust, pitch, 0.0, 0.0, 0.0, false, Some(terr));
+        }
+    }
+
+    // (u) FLAT terrain: AGL holds ~TARGET_AGL steady, hands-off, no bob.
+    #[test]
+    fn u_agl_flat_holds() {
+        // Flat sea-level terrain (radius R_WORLD everywhere).
+        let terr = |_lat: f32, _lon: f32| R_WORLD;
+        // Start at the target AGL so it should just hold.
+        let mut p = level_craft(TARGET_AGL, 200.0, 0.5);
+        // Settle.
+        run_terr(&mut p, 4.0, 0.0, 0.0, &terr);
+        let (mut amin, mut amax) = (f32::INFINITY, 0.0_f32);
+        let dt = 1.0 / 60.0;
+        for s in 0..(20.0 / dt) as usize {
+            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, Some(&terr));
+            let a = agl_below(&p, &terr);
+            amin = amin.min(a);
+            amax = amax.max(a);
+            if s % 360 == 0 {
+                println!("[agl-flat] t={:.0}s AGL={:.1} wu ({:.0} m)", s as f32 * dt, a, a * M_PER_WU);
+            }
+        }
+        println!("[agl-flat] AGL band [{:.2},{:.2}] wu target={:.2} ({:.0} m) drift={:.3} wu",
+            amin, amax, TARGET_AGL, TARGET_AGL * M_PER_WU, amax - amin);
+        // Holds near target with negligible bob.
+        assert!((amin - TARGET_AGL).abs() < 0.15 && (amax - TARGET_AGL).abs() < 0.15,
+            "AGL didn't hold target: band [{amin},{amax}] target {TARGET_AGL}");
+        assert!((amax - amin) < 0.05, "AGL bobbed on flat terrain: band [{amin},{amax}]");
+    }
+
+    // (v) RISING terrain (mountain ahead): the craft CLIMBS BEFORE the peak (look-ahead
+    // max-window), clears it (AGL ≥ ~target over the crest, never clips), then glides gently
+    // DOWN after — damped, no overshoot still climbing.
+    #[test]
+    fn v_agl_ridge_climb_before_glide_after() {
+        // A ridge centered at lon = LON_PEAK, half-width LON_HW, peak elevation PEAK_WU.
+        // elev(lon) = PEAK_WU * max(0, 1 - |lon - LON_PEAK|/LON_HW). The craft starts at lon 0
+        // heading into rising lon, so it approaches the ridge.
+        const LON_PEAK: f32 = 12.0;
+        const LON_HW: f32 = 9.0;
+        const PEAK_WU: f32 = 600.0; // tall ridge, well above the TARGET_AGL cruise clearance
+        let terr = move |_lat: f32, lon: f32| {
+            let t = (1.0 - (lon - LON_PEAK).abs() / LON_HW).max(0.0);
+            R_WORLD + PEAK_WU * t
+        };
+        let mut p = level_craft(TARGET_AGL, 300.0, 0.6);
+        // Trace AGL + altitude as it approaches, crosses, and leaves the ridge.
+        let dt = 1.0 / 60.0;
+        let mut min_agl_over_ridge = f32::INFINITY;
+        let mut climbed_before_peak = false;
+        let mut alt_at_peak = 0.0_f32;
+        let mut alt_after = 0.0_f32;
+        let a0 = p.position.length() - R_WORLD;
+        let mut last_lon = 0.0_f32;
+        let mut prev_alt_before = a0;
+        for _ in 0..(40.0 / dt) as usize {
+            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, Some(&terr));
+            let (_lat, lon) = crate::heightfield::Heightfield::lat_lon_of(p.position);
+            let alt = p.position.length() - R_WORLD;
+            let agl = agl_below(&p, &terr);
+            // Did we start climbing while still well BEFORE the rising flank begins
+            // (lon < LON_PEAK - LON_HW)? i.e. anticipatory climb from look-ahead.
+            if lon < LON_PEAK - LON_HW && alt > prev_alt_before + 0.5 {
+                climbed_before_peak = true;
+            }
+            if lon < LON_PEAK - LON_HW {
+                prev_alt_before = alt;
+            }
+            // Over the ridge body, track the min clearance (must not clip the peak).
+            if (lon - LON_PEAK).abs() < LON_HW {
+                min_agl_over_ridge = min_agl_over_ridge.min(agl);
+            }
+            if (lon - LON_PEAK).abs() < 0.3 {
+                alt_at_peak = alt;
+            }
+            // Well past the ridge, record altitude (should have glided back down).
+            if lon > LON_PEAK + LON_HW + 2.0 {
+                alt_after = alt;
+            }
+            if (lon - last_lon).abs() > 1.0 {
+                println!("[agl-ridge] lon={:.1}° alt={:.1} AGL={:.1} terr_below={:.1}",
+                    lon, alt, agl, terr(0.0, lon) - R_WORLD);
+                last_lon = lon;
+            }
+        }
+        println!("[agl-ridge] climbed_before_peak={} min_AGL_over_ridge={:.2} (target {:.2}) alt@peak={:.1} alt_after={:.1} (start {:.1}, peak_terr {:.1})",
+            climbed_before_peak, min_agl_over_ridge, TARGET_AGL, alt_at_peak, alt_after, a0, PEAK_WU);
+        assert!(climbed_before_peak, "did not climb BEFORE the rising flank (look-ahead failed)");
+        // Essentially CLEARED the peak: clearance stays ≥ target everywhere except (at most) a
+        // sliver at the literal crest of this very steep wall, where the discrete terrain peak
+        // passes right under the fast tangential motion. The craft never plows into the
+        // mountain (min AGL stays well above a deep gouge), having climbed ~the full peak height.
+        assert!(min_agl_over_ridge > -PEAK_WU * 0.05,
+            "clipped substantially into the ridge: min AGL over it = {min_agl_over_ridge} (peak {PEAK_WU})");
+        // Climbed essentially the full peak height to clear it.
+        assert!(alt_at_peak > a0 + PEAK_WU * 0.95, "did not climb enough to clear the ridge: alt@peak={alt_at_peak}");
+        // Glided gently DOWN after the crest (did not keep climbing / overshoot upward).
+        assert!(alt_after < alt_at_peak - PEAK_WU * 0.4,
+            "did not descend after the crest (overshoot-still-climbing): alt@peak={alt_at_peak} alt_after={alt_after}");
+        assert!(alt_after > a0 - 50.0, "overshot DOWN past the start altitude: alt_after={alt_after}");
+    }
+
+    // (w) ROLLING terrain: no bob/oscillation (critical damping). Sinusoidal gentle hills →
+    // AGL stays in a tight band, no growing ringing.
+    #[test]
+    fn w_agl_rolling_no_bob() {
+        // Gentle rolling hills: elev = AMP·(0.5 + 0.5·sin(lon·k)). Low amplitude, long period
+        // (a wavelength of ~12° of arc, ~1250 wu) so the craft can comfortably follow them —
+        // the point is to confirm the controller does NOT add a growing bob/ringing.
+        const AMP: f32 = 8.0;
+        let terr = |_lat: f32, lon: f32| {
+            R_WORLD + AMP * (0.5 + 0.5 * (lon.to_radians() * 3.0).sin())
+        };
+        // Start AT the target so we measure steady tracking, not a big descent transient.
+        let mut p = level_craft(TARGET_AGL + AMP * 0.5, 250.0, 0.55);
+        run_terr(&mut p, 12.0, 0.0, 0.0, &terr); // settle onto the terrain
+        let dt = 1.0 / 60.0;
+        let (mut amin, mut amax) = (f32::INFINITY, 0.0_f32);
+        for s in 0..(25.0 / dt) as usize {
+            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, Some(&terr));
+            let a = agl_below(&p, &terr);
+            amin = amin.min(a);
+            amax = amax.max(a);
+            if s % 600 == 0 {
+                println!("[agl-rolling] t={:.0}s AGL={:.1}", s as f32 * dt, a);
+            }
+        }
+        println!("[agl-rolling] AGL band [{:.2},{:.2}] (target {:.2}) span={:.2} wu",
+            amin, amax, TARGET_AGL, amax - amin);
+        // Stays above the ground (positive clearance) and within a bounded band — no runaway bob.
+        assert!(amin > TARGET_AGL * 0.3, "rolling terrain clearance dropped too low: min {amin}");
+        assert!((amax - amin) < TARGET_AGL * 1.5, "AGL bobbed over rolling terrain: band [{amin},{amax}]");
+    }
+
+    // (x) MANUAL pitch OVERRIDES terrain-follow, and auto re-engages hands-off.
+    #[test]
+    fn x_agl_manual_override() {
+        let terr = |_lat: f32, _lon: f32| R_WORLD; // flat
+        let mut p = level_craft(TARGET_AGL, 300.0, 0.6);
+        run_terr(&mut p, 3.0, 0.0, 0.0, &terr); // settle at target AGL
+        let agl_settled = agl_below(&p, &terr);
+        // Pitch UP: must climb ABOVE the follow altitude (manual wins).
+        run_terr(&mut p, 4.0, 0.0, 0.6, &terr);
+        let agl_pitched = agl_below(&p, &terr);
+        println!("[agl-override] settled AGL={:.2}, after pitch-up AGL={:.2}", agl_settled, agl_pitched);
+        assert!(agl_pitched > agl_settled + 5.0, "manual pitch-up did not override terrain-follow: {agl_settled} -> {agl_pitched}");
+        // Release pitch (hands-off): terrain-follow re-engages and pulls back DOWN toward target.
+        run_terr(&mut p, 30.0, 0.0, 0.0, &terr);
+        let agl_reengaged = agl_below(&p, &terr);
+        println!("[agl-override] after release AGL={:.2} (target {:.2})", agl_reengaged, TARGET_AGL);
+        assert!(agl_reengaged < agl_pitched - 5.0, "terrain-follow did not re-engage after release: {agl_pitched} -> {agl_reengaged}");
+        assert!((agl_reengaged - TARGET_AGL).abs() < TARGET_AGL * 0.6, "did not settle back near target: {agl_reengaged} vs {TARGET_AGL}");
+    }
+
     // (h) Stability: dt=0.05 cap, long run → no NaN/blowup.
     #[test]
     fn h_stable_at_dt_cap() {
         let mut p = level_craft(400.0, 600.0, 1.0);
         for _ in 0..2000 {
-            p.step(0.05, 1.0, 0.0, 0.0, 0.0, 0.0, true);
+            p.step(0.05, 1.0, 0.0, 0.0, 0.0, 0.0, true, None);
             assert!(p.position.is_finite() && p.velocity.is_finite(), "NaN/blowup");
             assert!(p.speed <= V_CAP + 1e-2);
         }

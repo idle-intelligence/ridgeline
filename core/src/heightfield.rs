@@ -207,6 +207,72 @@ impl Heightfield {
         Vec3::new(r * cos_phi * cos_lam, r * sin_phi, -r * cos_phi * sin_lam)
     }
 
+    /// Geographic (lat°, lon°) directly beneath a world position `pos` (projection onto the
+    /// sphere). Inverts `sphere_point`: `lat = asin(y/|p|)`, `lon = atan2(-z, x)`.
+    #[inline]
+    pub fn lat_lon_of(pos: Vec3) -> (f32, f32) {
+        let r = pos.length().max(1e-6);
+        let lat = (pos.y / r).clamp(-1.0, 1.0).asin().to_degrees();
+        let lon = (-pos.z).atan2(pos.x).to_degrees();
+        (lat, lon)
+    }
+
+    /// Bilinearly-interpolated terrain elevation (world units, at the STORED `VERT_SCALE` /
+    /// `VERT_EXAGGERATION`) at a geographic (lat°, lon°). Maps lat/lon → fractional grid
+    /// (row, col) via the same row_lat / col_lon mapping, clamped to the grid, and bilerps the
+    /// four surrounding cells. Outside the data bbox it clamps to the nearest edge.
+    pub fn terrain_elev_at(&self, lat_deg: f32, lon_deg: f32) -> f32 {
+        if self.width == 0 || self.height == 0 {
+            return 0.0;
+        }
+        // row 0 = lat_max (north); col 0 = lon_min (west).
+        let span_lat = self.lat_max - self.lat_min;
+        let span_lon = self.lon_max - self.lon_min;
+        let rf = if span_lat.abs() < 1e-9 {
+            0.0
+        } else {
+            (self.lat_max - lat_deg) / span_lat * (self.height - 1) as f32
+        };
+        let cf = if span_lon.abs() < 1e-9 {
+            0.0
+        } else {
+            (lon_deg - self.lon_min) / span_lon * (self.width - 1) as f32
+        };
+        let rf = rf.clamp(0.0, (self.height - 1) as f32);
+        let cf = cf.clamp(0.0, (self.width - 1) as f32);
+        let r0 = rf.floor() as u32;
+        let c0 = cf.floor() as u32;
+        let r1 = (r0 + 1).min(self.height - 1);
+        let c1 = (c0 + 1).min(self.width - 1);
+        let fr = rf - r0 as f32;
+        let fc = cf - c0 as f32;
+        let s00 = self.sample(r0, c0);
+        let s01 = self.sample(r0, c1);
+        let s10 = self.sample(r1, c0);
+        let s11 = self.sample(r1, c1);
+        let top = s00 + (s01 - s00) * fc;
+        let bot = s10 + (s11 - s10) * fc;
+        top + (bot - top) * fr
+    }
+
+    /// Terrain RADIUS (distance from planet center, world units) at a geographic (lat°, lon°),
+    /// applying the altitude-coupled vertical exaggeration `ve` so the radius matches what the
+    /// renderer DRAWS (`sphere_point_scaled` rescales the stored elevation by `ve/VERT_EXAGGERATION`).
+    /// `terrain_radius = R_WORLD + terrain_elev_at(lat,lon) · ve/VERT_EXAGGERATION`.
+    #[inline]
+    pub fn terrain_radius_at(&self, lat_deg: f32, lon_deg: f32, ve: f32) -> f32 {
+        let ve_ratio = ve / VERT_EXAGGERATION;
+        R_WORLD + self.terrain_elev_at(lat_deg, lon_deg) * ve_ratio
+    }
+
+    /// Terrain RADIUS directly beneath a world position `pos`, with vertical exaggeration `ve`
+    /// (see `terrain_radius_at`). Convenience: projects `pos` to lat/lon then samples.
+    #[inline]
+    pub fn terrain_radius_below(&self, pos: Vec3, ve: f32) -> f32 {
+        let (lat, lon) = Self::lat_lon_of(pos);
+        self.terrain_radius_at(lat, lon, ve)
+    }
+
     /// Like `sphere_point`, but the elevation `h_wu` (stored at the fixed `VERT_SCALE` /
     /// `VERT_EXAGGERATION`) is RESCALED by `ve` so terrain relief follows the altitude-coupled
     /// vertical exaggeration. `ve_ratio = ve / VERT_EXAGGERATION` converts the stored height to
