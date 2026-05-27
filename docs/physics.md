@@ -127,8 +127,10 @@ re-engaging the instant pitch is released):
 
 1. **Ground track**: project velocity onto the local tangent plane → the forward ground track.
 2. **Hold reference = ground below.** Sample the terrain radius DIRECTLY BELOW (`terrain_below`)
-   and set the baseline `desired_r = terrain_below + target_agl`. So over a valley the target
-   drops with the valley floor (contour hug), instead of staying at the peak ahead.
+   and set the baseline `desired_r = terrain_below + target_agl · agl_scale`, where `agl_scale`
+   converts the clearance from VE-exaggerated meters to wu with the live render `ve` (see
+   "VE-CONSISTENT clearance" below). So over a valley the target drops with the valley floor
+   (contour hug), instead of staying at the peak ahead.
 3. **Look-ahead = collision avoidance only.** Sample `AGL_SAMPLES = 8` terrain radii evenly along
    the track out to `LOOKAHEAD = clamp(speed·LOOKAHEAD_TIME, LOOKAHEAD_MIN, LOOKAHEAD_MAX)`. For
    each ahead sample at distance `d`, the time to reach it is `t = d/speed`; climbing at most
@@ -152,25 +154,46 @@ re-engaging the instant pitch is released):
    `(1 − orbit_w)` crossfade fades terrain-follow out across the ATMO/ORBIT boundary into the
    ORBIT level near-circular hold — no discontinuity.
 
+**VE-CONSISTENT clearance (the key fix).** The terrain is drawn VERTICALLY EXAGGERATED — its
+radius is `R_WORLD + elev_m · VERT_SCALE · (ve/VERT_EXAGGERATION)`, so a 4808 m alp rises ~12.5 wu
+at near-surface `ve`. The clearance is therefore expressed in the **terrain's OWN exaggerated
+vertical scale** (VE-exaggerated meters) and converted to wu **per-frame** with the LIVE render
+`ve`:
+
+```
+agl_scale = VERT_SCALE · ve / VERT_EXAGGERATION      (= ve / M_PER_WU)   [wu per exaggerated meter]
+agl_wu    = target_agl_m · agl_scale                  → desired_r = terrain_below + agl_wu
+```
+
+So the held clearance is exaggerated by the SAME `ve` as the ground and skims just above the
+*visible* ridges. At near-surface `ve = VE_NEAR = 2.75`, 500 exaggerated-m ≈ **1.3 wu** of
+clearance — hugging the relief rather than the old 0.47 wu (un-exaggerated 500 m) that sat far
+below the ridges. `agl_scale` is computed in `lib.rs::step` from the live render `ve` (the
+`ve_for_altitude` ramp or the exaggeration override) and passed into `Physics::step`.
+
 **Terrain AS RENDERED.** The terrain radius (`Heightfield::terrain_radius_at(lat,lon, ve)` =
-`R_WORLD + terrain_elev · ve/VERT_EXAGGERATION`) uses the same altitude-coupled vertical
-exaggeration `ve = ve_for_altitude(altitude)` the renderer draws (or the exaggeration override if
-set), so "hold `TARGET_AGL` above ground" matches what the player SEES.
+`R_WORLD + terrain_elev · ve/VERT_EXAGGERATION`) uses the same `ve` the renderer draws, so both
+the ground reference AND the clearance use the same exaggeration — fully consistent with what the
+player SEES.
 
-**Low, tunable clearance.** The default clearance is `DEFAULT_TARGET_AGL = 60 wu` — substantially
-lower than the old 250 wu so the craft SKIMS close to the ground and hugs the relief. It is
-runtime-tunable per craft via `Physics::target_agl` / `Engine::set_target_agl(agl_wu)`, clamped to
-`[TARGET_AGL_MIN = 10, TARGET_AGL_MAX = 1000]` wu. The web layer exposes it as the **`?agl=<meters>`
-URL param** (meters → wu via `M_PER_WU`, then clamped). No param → the default. `set_spawn`
-preserves a runtime-set value across respawns.
+**Tunable clearance.** The default is `DEFAULT_TARGET_AGL = 500` exaggerated-m — a pleasant skim
+just above the visible ridges. Runtime-tunable per craft via `Physics::target_agl` /
+`Engine::set_target_agl(agl_m)` (now in exaggerated meters, NOT wu), clamped to
+`[TARGET_AGL_MIN = 80, TARGET_AGL_MAX = 60000]` exaggerated-m. The web layer exposes it as the
+**`?agl=<meters>` URL param**, passed straight through (no `M_PER_WU` conversion — the per-frame
+`ve` scaling happens in `step`), just clamped. No param → the default. `set_spawn` preserves a
+runtime-set value across respawns.
 
-**HUD-AGL**: `Engine::agl_m()` = `(|pos| − terrain_radius_below) · M_PER_WU` (clamped ≥ 0, same
-`ve`), shown in the web HUD as `AGL nnnm` in ATMO alongside `ALT`. Over ocean (terrain 0) AGL == ALT.
+**HUD-AGL**: `Engine::agl_m()` = `(|pos| − terrain_radius_below) / agl_scale` (clamped ≥ 0, same
+`ve`) — the clearance in the SAME VE-exaggerated meters, so over flat ground at the default it
+reads ≈ 500 (not ~10000). Shown in the web HUD as `AGL nnnm` in ATMO alongside `ALT`. Over ocean
+(terrain 0) the *wu* heights of AGL and ALT coincide, but they report in different scales (AGL in
+exaggerated meters, ALT in un-exaggerated meters).
 
 | Constant | Value | Notes |
 |---|---|---|
-| `DEFAULT_TARGET_AGL` | 60 wu | default clearance above the terrain DIRECTLY BELOW (contour hug); runtime-tunable |
-| `TARGET_AGL_MIN` / `MAX` | 10 / 1000 wu | clamp on the runtime-settable target AGL (`set_target_agl` / `?agl=`) |
+| `DEFAULT_TARGET_AGL` | 500 exag-m | default clearance above the terrain DIRECTLY BELOW, in VE-exaggerated meters (contour hug); runtime-tunable |
+| `TARGET_AGL_MIN` / `MAX` | 80 / 60000 exag-m | clamp on the runtime-settable target AGL (`set_target_agl` / `?agl=`) |
 | `LOOKAHEAD_TIME` | 3 s | forward window = `clamp(speed·time, min, max)` (collision avoidance) |
 | `LOOKAHEAD_MIN` / `MAX` | 30 / 600 wu | look-ahead distance clamp |
 | `AGL_SAMPLES` | 8 | collision-avoidance samples along the forward track |
@@ -286,4 +309,8 @@ than peak-window would; valley-floor clearance ≈ `DEFAULT_TARGET_AGL`) · `v3`
 hill→valley→wall trace (descends into the valley yet clears the wall) · `w` AGL rolling (gentle
 hills → bounded clearance, no growing bob/ringing — critical damping) · `x` AGL manual override
 (pitch-up climbs ABOVE the follow altitude; releasing re-engages terrain-follow back toward
-`DEFAULT_TARGET_AGL`).
+`DEFAULT_TARGET_AGL`) · `y1` AGL skim scaled ridges (`target_agl` 500 exag-m over alpine terrain
+→ holds ~500 exag-m ≈ 1.2–1.4 wu just above the visible exaggerated ridges, hugs valleys, no bob) ·
+`y2` HUD consistency (over flat ground `agl_m()` reads ≈ the set 500 exag-m, not ~10000) · `y3`
+scaled wall collision-avoidance (a 4808 m VE-exaggerated alpine wall is cleared at ATMO speed — no
+clip-through).

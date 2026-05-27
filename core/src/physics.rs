@@ -127,32 +127,32 @@ const AUTO_LEVEL_RATE: f32 = 2.5;
 const ALT_HOLD_RATE: f32 = 80.0;
 
 // ── AGL terrain-following (ATMO) ──────────────────────────────────────────────────
-/// Target height ABOVE GROUND (wu) the AGL controller holds in ATMO.
+/// Target clearance ABOVE GROUND the AGL controller holds in ATMO, in **VE-EXAGGERATED METERS**
+/// — the SAME vertical scale the terrain is DRAWN in.
 ///
-/// SCALE NOTE: at the planet's HORIZONTAL scale `M_PER_WU ≈ 1061.8 m/wu`, a literal 500 m of
-/// clearance is only ≈ 0.47 wu — sub-world-unit, basically skimming the water. But the ATMO
-/// band is arcade-compressed: it runs to `ATMOSPHERE_TOP = 1500 wu` and the spawn cruise sits at
-/// `CRUISE_ALT = 250 wu`, so a "500 m" literal clearance would yank the craft from cruise down
-/// onto the surface. We instead hold the established arcade cruise clearance, `250 wu`, which the
-/// spawn framing and FOV were tuned around — the player skims ~250 wu above the terrain.
+/// SCALE FIX: the terrain is rendered VERTICALLY EXAGGERATED — its radius is
+/// `R_WORLD + elev_m · VERT_SCALE · (ve/VERT_EXAGGERATION)`, so a 4808 m alp rises ~12.5 wu at
+/// near-surface `ve`. The OLD AGL stored a clearance in un-exaggerated wu (`agl_wu = m/M_PER_WU`),
+/// so "500 m" was 0.47 wu — far below the visible ridges. We now express the clearance in the
+/// terrain's OWN exaggerated vertical scale and convert per-frame with the LIVE `ve`:
+///   `agl_wu = clearance_m · VERT_SCALE · (ve/VERT_EXAGGERATION)`  (= `clearance_m · ve / M_PER_WU`)
+/// so the held clearance sits the same exaggerated distance above the relief the player SEES.
+/// At near-surface `ve = VE_NEAR = 2.75`, 500 exaggerated-m ≈ 1.3 wu — skimming just over the
+/// visible ridges. The conversion factor is computed in `lib.rs` from the live render `ve` (the
+/// `ve_for_altitude` ramp or the exaggeration override) and passed to `step` as `agl_scale`.
 ///
-/// The "ground" reference is the terrain AS RENDERED (vertical exaggeration applied via
-/// `terrain_radius_at(lat,lon, ve)`), so the held clearance matches what the player SEES.
-/// VE INTERACTION: the terrain radius uses `ve_for_altitude(altitude)`, so as the rendered
-/// relief grows/relaxes with altitude the peak reference moves with it; TARGET_AGL is the
-/// clearance above THAT exaggerated terrain. At low cruise VE is near `VE_NEAR` (realistic),
-/// so the clearance reads as a stable height over the relief in view.
-/// DEFAULT target height ABOVE GROUND (wu) the AGL controller holds in ATMO. This is now the
-/// clearance above the terrain DIRECTLY BELOW (contour-hugging), NOT above the peak ahead — so
-/// over a valley the craft descends WITH the valley floor instead of staying at the upcoming
-/// peak's height. Lowered substantially from the old 250 wu so the craft SKIMS close to the
-/// ground (≈ 60·M_PER_WU ≈ 64 km arcade-compressed; reads as hugging the relief). Runtime-tunable
-/// per craft via `Physics::target_agl` / `Engine::set_target_agl` (the `?agl=<meters>` URL param).
-pub const DEFAULT_TARGET_AGL: f32 = 60.0;
-/// Hard clamp on the runtime-settable target AGL (wu): a sane skim floor up to well within the
-/// ATMO band. Prevents a URL param from burying the craft in the ground or shoving it to space.
-pub const TARGET_AGL_MIN: f32 = 10.0;
-pub const TARGET_AGL_MAX: f32 = 1000.0;
+/// The "ground" reference is the terrain AS RENDERED (same `ve`), so the held clearance matches
+/// what the player SEES. Contour-hugging: the baseline target is the clearance above the terrain
+/// DIRECTLY BELOW (descends into valleys with the floor), with the look-ahead used only for
+/// collision avoidance (raising the target to clear an upcoming wall).
+/// DEFAULT clearance (VE-exaggerated meters) the AGL controller holds in ATMO. A pleasant skim
+/// just above the visible ridges. Runtime-tunable per craft via `Physics::target_agl` /
+/// `Engine::set_target_agl` (the `?agl=<meters>` URL param), interpreted in this same scaled space.
+pub const DEFAULT_TARGET_AGL: f32 = 500.0;
+/// Clamp on the runtime-settable target AGL (VE-exaggerated meters). MIN is low enough to skim
+/// tightly (so small scaled clearances are reachable), MAX caps it well within the ATMO band.
+pub const TARGET_AGL_MIN: f32 = 80.0;
+pub const TARGET_AGL_MAX: f32 = 60_000.0;
 
 /// Look-ahead time (s): the forward ground-track window scales with speed,
 /// `LOOKAHEAD = clamp(speed·LOOKAHEAD_TIME, LOOKAHEAD_MIN, LOOKAHEAD_MAX)`. Faster ⇒ look
@@ -287,7 +287,9 @@ pub struct Physics {
     pub velocity: Vec3,
     /// Scalar speed (wu/s) = |velocity|, cached for the HUD.
     pub speed: f32,
-    /// Target height above the terrain DIRECTLY BELOW (wu) the ATMO AGL controller holds.
+    /// Target clearance above the terrain DIRECTLY BELOW that the ATMO AGL controller holds, in
+    /// VE-EXAGGERATED METERS (the same vertical scale the terrain is drawn in). Converted to wu
+    /// per-frame in `step` via the live `agl_scale = VERT_SCALE·ve/VERT_EXAGGERATION`.
     /// Runtime-tunable (the `?agl=` URL param); defaults to `DEFAULT_TARGET_AGL`.
     pub target_agl: f32,
 }
@@ -314,6 +316,11 @@ impl Physics {
     /// pitch/yaw/roll: desired rotation rates (rad/s), clamped internally.
     /// boost: 0..1 (unused by the speed model; afterburner is `ftl`).
     /// ftl: Space-hold afterburner (raises the target speed and thrust to the FTL tier).
+    /// agl_scale: wu per VE-exaggerated meter of AGL clearance =
+    ///   `VERT_SCALE · ve / VERT_EXAGGERATION` (= `ve / M_PER_WU`), using the SAME `ve` the
+    ///   renderer draws terrain with this frame. `target_agl` (scaled meters) is multiplied by
+    ///   this to get the wu clearance, so it is exaggerated by the same `ve` as the ground. Only
+    ///   used when `terrain` is present; bare-model tests pass anything (e.g. 1.0).
     /// terrain: optional terrain-radius sampler `(lat°, lon°) → radius_wu` (the planet center
     ///   distance of the terrain AS RENDERED, vertical-exaggeration baked in by the caller).
     ///   When present, ATMO altitude-hold becomes AGL terrain-following (look-ahead max-window,
@@ -329,6 +336,7 @@ impl Physics {
         roll: f32,
         _boost: f32,
         ftl: bool,
+        agl_scale: f32,
         terrain: Option<&dyn Fn(f32, f32) -> f32>,
     ) {
         // Guard against a non-positive or non-finite dt (e.g. a zero/negative rAF delta on
@@ -467,10 +475,13 @@ impl Physics {
                 };
                 let lookahead =
                     (speed * LOOKAHEAD_TIME).clamp(LOOKAHEAD_MIN, LOOKAHEAD_MAX);
-                // Baseline: hug the terrain directly below + the held clearance.
+                // Baseline: hug the terrain directly below + the held clearance. The clearance is
+                // stored in VE-exaggerated meters; convert to wu with `agl_scale` (the SAME `ve`
+                // the terrain is drawn with this frame) so it is exaggerated like the ground.
+                let agl_wu = self.target_agl * agl_scale;
                 let (lat0, lon0) = crate::heightfield::Heightfield::lat_lon_of(self.position);
                 let terrain_below = terr(lat0, lon0);
-                let mut desired_r = terrain_below + self.target_agl;
+                let mut desired_r = terrain_below + agl_wu;
                 // Collision avoidance: only RAISE the target where an upcoming sample can't be
                 // out-climbed in the time it takes to reach it.
                 if track != Vec3::ZERO {
@@ -615,8 +626,11 @@ mod scenarios {
     use super::*;
     use crate::heightfield::M_PER_WU;
 
-    // The default clearance the AGL controller holds (renamed from the old `TARGET_AGL`).
-    const TARGET_AGL: f32 = DEFAULT_TARGET_AGL;
+    // Clearance (in WORLD UNITS) the AGL mechanism tests hold. These tests drive `step` with
+    // `agl_scale = 1.0`, so `target_agl` is interpreted directly as a wu clearance — isolating the
+    // controller mechanism (contour-hug, collision-avoidance, no-bob) from the VE meter→wu
+    // conversion, which is exercised separately by the `y_*` VE-consistency tests below.
+    const TARGET_AGL: f32 = 60.0;
 
     fn alt(p: &Physics) -> f32 {
         p.position.length() - R_WORLD
@@ -634,6 +648,9 @@ mod scenarios {
         p.velocity = fwd * speed;
         p.speed = speed;
         p.throttle = throttle;
+        // AGL mechanism tests drive `step` with agl_scale = 1.0 and interpret target_agl as a wu
+        // clearance, so seed the wu test target (not the scaled-meter DEFAULT_TARGET_AGL).
+        p.target_agl = TARGET_AGL;
         p
     }
 
@@ -660,7 +677,7 @@ mod scenarios {
     fn run(p: &mut Physics, secs: f32, thrust: f32, pitch: f32, ftl: bool) {
         let dt = 1.0 / 60.0;
         for _ in 0..((secs / dt) as usize) {
-            p.step(dt, thrust, pitch, 0.0, 0.0, 0.0, ftl, None);
+            p.step(dt, thrust, pitch, 0.0, 0.0, 0.0, ftl, 1.0, None);
         }
     }
 
@@ -694,7 +711,7 @@ mod scenarios {
         let mut vmax = 0.0_f32;
         let dt = 1.0 / 60.0;
         for i in 0..(60.0 / dt) as usize {
-            p.step(dt, 1.0, 0.0, 0.0, 0.0, 0.0, true, None); // Shift+Space
+            p.step(dt, 1.0, 0.0, 0.0, 0.0, 0.0, true, 1.0, None); // Shift+Space
             vmax = vmax.max(p.speed);
             assert!(p.speed <= V_CAP + 1e-2, "EXCEEDED V_CAP: {} at step {i}", p.speed);
             assert!(p.velocity.length() <= V_CAP + 1e-2);
@@ -741,8 +758,8 @@ mod scenarios {
         // well above STALL, throttle-0 flight HOLDS by design, so a stall is a genuine crawl.)
         let s_crawl = 0.3 * STALL_SPEED;
         let dt = 1.0 / 600.0;
-        stalled.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, None);
-        flying.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, None);
+        stalled.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, 1.0, None);
+        flying.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, 1.0, None);
         println!("[stall] seeded crawl={:.1} (<STALL={:.0}) vs cruise={:.0}: inward vel crawl={:.3} cruise={:.3}",
             s_crawl, STALL_SPEED, IDLE_SPEED, inward(&stalled), inward(&flying));
         // The sub-stall crawl gains downward (inward) velocity from the gravity sink; the
@@ -778,7 +795,7 @@ mod scenarios {
         let dt = 1.0 / 60.0;
         let mut vmax = 0.0_f32;
         for i in 0..(30.0 / dt) as usize {
-            p.step(dt, 1.0, 0.0, 0.0, 0.0, 0.0, true, None);
+            p.step(dt, 1.0, 0.0, 0.0, 0.0, 0.0, true, 1.0, None);
             vmax = vmax.max(p.speed);
             assert!(p.speed <= V_CAP + 1e-2, "exceeded cap during escape: {} step {i}", p.speed);
             if i % 360 == 0 {
@@ -800,7 +817,7 @@ mod scenarios {
         let dt = 1.0 / 60.0;
         for s in 0..20 {
             for _ in 0..60 {
-                p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, None);
+                p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, 1.0, None);
             }
             let a = alt(&p);
             amin = amin.min(a); amax = amax.max(a);
@@ -852,7 +869,7 @@ mod scenarios {
                 p.orientation = Physics::new(p.position, look).orientation;
             }
             // No FTL: AI manages the approach. Throttle held (gives a cruise target once down).
-            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, None);
+            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, 1.0, None);
             t += dt;
             let a = alt(&p);
             if a < CAPTURE_ALT && !entered_zone {
@@ -897,7 +914,7 @@ mod scenarios {
         let dt = 1.0 / 60.0;
         let mut speed_at_atmo = None;
         for _ in 0..(600.0 / dt) as usize {
-            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, None);
+            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, 1.0, None);
             if alt(&p) <= ATMOSPHERE_TOP && speed_at_atmo.is_none() {
                 speed_at_atmo = Some(p.speed);
                 break;
@@ -923,7 +940,7 @@ mod scenarios {
         p.throttle = 1.0;
         let dt = 1.0 / 60.0;
         for _ in 0..(300.0 / dt) as usize {
-            p.step(dt, 1.0, 0.0, 0.0, 0.0, 0.0, true, None); // afterburner, climb out
+            p.step(dt, 1.0, 0.0, 0.0, 0.0, 0.0, true, 1.0, None); // afterburner, climb out
         }
         println!("[not-prison] alt {:.0} -> {:.0} (CAPTURE_ALT={:.0}) speed={:.0}",
             alt0, alt(&p), CAPTURE_ALT, p.speed);
@@ -955,7 +972,7 @@ mod scenarios {
         let dt = 1.0 / 60.0;
         for s in 0..20 {
             for _ in 0..60 {
-                p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, None); // throttle 0, level, hands-off
+                p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, 1.0, None); // throttle 0, level, hands-off
             }
             let a = alt(&p);
             amin = amin.min(a);
@@ -985,7 +1002,7 @@ mod scenarios {
             // Hold this throttle setting; let speed ease to its target.
             let dt = 1.0 / 60.0;
             for _ in 0..(8.0 / dt) as usize {
-                p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, None); // no thrust input → throttle holds
+                p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, 1.0, None); // no thrust input → throttle holds
             }
             println!("[granular] throttle={:.2} -> steady speed={:.0}", t, p.speed);
             speeds.push(p.speed);
@@ -1040,7 +1057,7 @@ mod scenarios {
         let mut t_to_idle = None;
         let mut t = 0.0;
         for _ in 0..(8.0 / dt) as usize {
-            p.step(dt, -1.0, 0.0, 0.0, 0.0, 0.0, false, None); // cut throttle
+            p.step(dt, -1.0, 0.0, 0.0, 0.0, 0.0, false, 1.0, None); // cut throttle
             t += dt;
             if t_to_idle.is_none() && p.speed < IDLE_SPEED * 1.5 {
                 t_to_idle = Some(t);
@@ -1063,7 +1080,7 @@ mod scenarios {
         let dt = 1.0 / 60.0;
         for s in 0..40 {
             for _ in 0..60 {
-                p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, None);
+                p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, 1.0, None);
             }
             let a = alt(&p);
             amin = amin.min(a); amax = amax.max(a);
@@ -1089,7 +1106,7 @@ mod scenarios {
         p.throttle = 1.0;
         let dt = 1.0 / 60.0;
         for _ in 0..(60.0 / dt) as usize {
-            p.step(dt, 1.0, 0.0, 0.0, 0.0, 0.0, true, None);
+            p.step(dt, 1.0, 0.0, 0.0, 0.0, 0.0, true, 1.0, None);
         }
         println!("[orbit-escape] alt {:.0} -> {:.0} (ORBIT_TOP={:.0}) speed={:.0} mode={}", alt0, alt(&p), ORBIT_TOP, p.speed, p.flight_mode());
         assert!(alt(&p) > ORBIT_TOP, "could not escape ORBIT band: {}", alt(&p));
@@ -1134,10 +1151,10 @@ mod scenarios {
         // Roll for a bit (to establish a bank), then hold the bank with no further roll so the
         // coordinated-turn yaw acts on the heading.
         for _ in 0..(0.6 / dt) as usize {
-            p.step(dt, 0.0, 0.0, 0.0, 1.0, 0.0, false, None); // roll right
+            p.step(dt, 0.0, 0.0, 0.0, 1.0, 0.0, false, 1.0, None); // roll right
         }
         for _ in 0..(2.0 / dt) as usize {
-            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, None); // hold (banked) — turn develops
+            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, 1.0, None); // hold (banked) — turn develops
         }
         let fwd1 = p.velocity.normalize();
         let turn = fwd0.dot(fwd1).clamp(-1.0, 1.0).acos().to_degrees();
@@ -1167,7 +1184,7 @@ mod scenarios {
     ) {
         let dt = 1.0 / 60.0;
         for _ in 0..((secs / dt) as usize) {
-            p.step(dt, thrust, pitch, 0.0, 0.0, 0.0, false, Some(terr));
+            p.step(dt, thrust, pitch, 0.0, 0.0, 0.0, false, 1.0, Some(terr));
         }
     }
 
@@ -1183,7 +1200,7 @@ mod scenarios {
         let (mut amin, mut amax) = (f32::INFINITY, 0.0_f32);
         let dt = 1.0 / 60.0;
         for s in 0..(20.0 / dt) as usize {
-            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, Some(&terr));
+            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, 1.0, Some(&terr));
             let a = agl_below(&p, &terr);
             amin = amin.min(a);
             amax = amax.max(a);
@@ -1220,7 +1237,7 @@ mod scenarios {
         let a0 = p.position.length() - R_WORLD;
         let mut last_lon = 0.0_f32;
         for _ in 0..(40.0 / dt) as usize {
-            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, Some(&terr));
+            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, 1.0, Some(&terr));
             let (_lat, lon) = crate::heightfield::Heightfield::lat_lon_of(p.position);
             let alt = p.position.length() - R_WORLD;
             let agl = agl_below(&p, &terr);
@@ -1275,7 +1292,7 @@ mod scenarios {
         let mut alt_in_valley = f32::INFINITY;
         let mut last_lon = 0.0_f32;
         for _ in 0..(60.0 / dt) as usize {
-            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, Some(&terr));
+            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, 1.0, Some(&terr));
             let (_lat, lon) = crate::heightfield::Heightfield::lat_lon_of(p.position);
             let alt = p.position.length() - R_WORLD;
             let agl = agl_below(&p, &terr);
@@ -1320,7 +1337,7 @@ mod scenarios {
         let dt = 1.0 / 60.0;
         let (mut amin, mut amax) = (f32::INFINITY, 0.0_f32);
         for s in 0..(25.0 / dt) as usize {
-            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, Some(&terr));
+            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, 1.0, Some(&terr));
             let a = agl_below(&p, &terr);
             amin = amin.min(a);
             amax = amax.max(a);
@@ -1351,7 +1368,7 @@ mod scenarios {
         let mut min_agl_at_wall = f32::INFINITY;
         let mut min_alt_in_valley = f32::INFINITY;
         for _ in 0..(60.0 / dt) as usize {
-            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, Some(&terr));
+            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, 1.0, Some(&terr));
             let (_lat, lon) = crate::heightfield::Heightfield::lat_lon_of(p.position);
             let alt = p.position.length() - R_WORLD;
             let agl = agl_below(&p, &terr);
@@ -1392,7 +1409,7 @@ mod scenarios {
         let dt = 1.0 / 60.0;
         let (mut amin, mut amax) = (f32::INFINITY, 0.0_f32);
         for s in 0..(25.0 / dt) as usize {
-            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, Some(&terr));
+            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, 1.0, Some(&terr));
             let a = agl_below(&p, &terr);
             amin = amin.min(a);
             amax = amax.max(a);
@@ -1427,12 +1444,133 @@ mod scenarios {
         assert!((agl_reengaged - TARGET_AGL).abs() < TARGET_AGL * 0.6, "did not settle back near target: {agl_reengaged} vs {TARGET_AGL}");
     }
 
+    // ===== VE-CONSISTENT AGL tests (target/HUD in VE-exaggerated meters) =====
+    //
+    // These drive `step` with the REAL conversion `agl_scale = VERT_SCALE·ve/VERT_EXAGGERATION`
+    // (= ve/M_PER_WU), and build terrain from real elevations in meters scaled the SAME way the
+    // renderer draws them (`elev_m · VERT_SCALE · ve/VERT_EXAGGERATION`). So a clearance set in
+    // exaggerated meters skims the same exaggerated distance above the visible ridges.
+
+    use crate::heightfield::{VERT_EXAGGERATION, VERT_SCALE, VE_NEAR};
+
+    // AGL directly below in EXAGGERATED METERS (the wu clearance / agl_scale), the same space the
+    // HUD `agl_m()` reports and `target_agl` is set in.
+    fn agl_below_m(p: &Physics, terr: &dyn Fn(f32, f32) -> f32, agl_scale: f32) -> f32 {
+        let (lat, lon) = crate::heightfield::Heightfield::lat_lon_of(p.position);
+        (p.position.length() - terr(lat, lon)) / agl_scale
+    }
+
+    // (y1) SKIM THE SCALED RIDGES: with target_agl ≈ 500 exaggerated-m over mountainous terrain
+    // (a 4808 m alp), the craft holds a clearance ≈ 500 in scaled meters that is just ABOVE the
+    // exaggerated terrain (clearance_wu ≈ 500·VERT_SCALE·ve/VERT_EXAGGERATION ≈ ~1.3 wu at
+    // near-surface ve), hugging valleys, no bob.
+    #[test]
+    fn y1_skim_scaled_ridges() {
+        let ve = VE_NEAR;
+        let agl_scale = VERT_SCALE * ve / VERT_EXAGGERATION; // wu per exaggerated meter
+        let ve_ratio = ve / VERT_EXAGGERATION;
+        // Rolling alpine terrain: peaks ~3000 m, valleys ~300 m, rendered VE-exaggerated.
+        let terr = move |_lat: f32, lon: f32| {
+            let elev_m = 1650.0 + 1350.0 * (lon.to_radians() * 4.0).sin();
+            R_WORLD + elev_m * VERT_SCALE * ve_ratio
+        };
+        let mut p = level_craft(60.0, 200.0, 0.5); // initial alt arbitrary; will settle onto hold
+        p.target_agl = DEFAULT_TARGET_AGL; // 500 exaggerated meters
+        let dt = 1.0 / 60.0;
+        // Settle onto the hold.
+        for _ in 0..(15.0 / dt) as usize {
+            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, agl_scale, Some(&terr));
+        }
+        let (mut amin, mut amax) = (f32::INFINITY, 0.0_f32);
+        let (mut wu_min, mut wu_max) = (f32::INFINITY, 0.0_f32);
+        let mut last_lon = -100.0;
+        for _ in 0..(25.0 / dt) as usize {
+            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, agl_scale, Some(&terr));
+            let (_lat, lon) = crate::heightfield::Heightfield::lat_lon_of(p.position);
+            let m = agl_below_m(&p, &terr, agl_scale);
+            let wu = m * agl_scale;
+            amin = amin.min(m); amax = amax.max(m);
+            wu_min = wu_min.min(wu); wu_max = wu_max.max(wu);
+            if lon - last_lon >= 3.0 {
+                println!("[skim] lon={:.1}° terr_elev_m={:.0} AGL={:.0} scaled-m ({:.2} wu)",
+                    lon, (terr(0.0, lon) - R_WORLD) / (VERT_SCALE * ve_ratio), m, wu);
+                last_lon = lon;
+            }
+        }
+        println!("[skim] target=500 scaled-m | AGL band [{:.0},{:.0}] scaled-m  [{:.2},{:.2}] wu (agl_scale={:.4} wu/m)",
+            amin, amax, wu_min, wu_max, agl_scale);
+        // Holds ~500 scaled-m, just above the visible exaggerated ridges, ~1–1.5 wu of clearance.
+        assert!(amin > 0.0, "skim dropped through the ground: min {amin} scaled-m");
+        assert!((amin - 500.0).abs() < 250.0 && (amax - 500.0).abs() < 250.0,
+            "scaled clearance not near 500: band [{amin},{amax}]");
+        assert!((0.8..2.5).contains(&wu_max), "clearance not ~1–1.5 wu above terrain: {wu_max} wu");
+        assert!((amax - amin) < 300.0, "skim bobbed: band [{amin},{amax}] scaled-m");
+    }
+
+    // (y2) HUD CONSISTENCY: over flat ground, the AGL reads ≈ the set target in scaled meters
+    // (~500), NOT ~10000 (the old un-exaggerated reading). Checks the conversion both ways.
+    #[test]
+    fn y2_hud_consistency_flat() {
+        let ve = VE_NEAR;
+        let agl_scale = VERT_SCALE * ve / VERT_EXAGGERATION;
+        let terr = |_lat: f32, _lon: f32| R_WORLD; // flat sea level
+        let mut p = level_craft(60.0, 200.0, 0.5);
+        p.target_agl = 500.0; // 500 exaggerated meters
+        let dt = 1.0 / 60.0;
+        for _ in 0..(20.0 / dt) as usize {
+            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, agl_scale, Some(&terr));
+        }
+        let m = agl_below_m(&p, &terr, agl_scale);
+        let wu = m * agl_scale;
+        println!("[hud] target=500 scaled-m | settled AGL={:.1} scaled-m ({:.3} wu); old un-exag reading would be {:.0} m",
+            m, wu, wu * M_PER_WU);
+        assert!((m - 500.0).abs() < 30.0, "HUD AGL not ≈ target 500 scaled-m: {m}");
+        // Sanity: the OLD (un-exaggerated) reading would have been ~10000 m — confirm the new
+        // scaled reading is far smaller, i.e. consistent with the exaggerated terrain.
+        assert!(wu * M_PER_WU > 1000.0, "un-exag check sanity");
+    }
+
+    // (y3) COLLISION AVOIDANCE at ATMO speed in scaled space: a steep alpine WALL (4808 m,
+    // VE-exaggerated) — the craft climbs in time to clear it (does not clip through), skimming a
+    // low ~500 scaled-m clearance otherwise.
+    #[test]
+    fn y3_scaled_wall_collision_avoidance() {
+        let ve = VE_NEAR;
+        let agl_scale = VERT_SCALE * ve / VERT_EXAGGERATION;
+        let ve_ratio = ve / VERT_EXAGGERATION;
+        const LON_PEAK: f32 = 12.0;
+        const LON_HW: f32 = 6.0;
+        const PEAK_M: f32 = 4808.0; // Mont Blanc-ish, rendered exaggerated
+        let terr = move |_lat: f32, lon: f32| {
+            let t = (1.0 - (lon - LON_PEAK).abs() / LON_HW).max(0.0);
+            R_WORLD + PEAK_M * t * VERT_SCALE * ve_ratio
+        };
+        let mut p = level_craft(60.0, 300.0, 0.6); // ATMO speed
+        p.target_agl = 500.0;
+        let dt = 1.0 / 60.0;
+        let mut min_agl_over_ridge_wu = f32::INFINITY;
+        let peak_wu = PEAK_M * VERT_SCALE * ve_ratio;
+        for _ in 0..(40.0 / dt) as usize {
+            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, agl_scale, Some(&terr));
+            let (lat, lon) = crate::heightfield::Heightfield::lat_lon_of(p.position);
+            let agl_wu = p.position.length() - terr(lat, lon);
+            if (lon - LON_PEAK).abs() < LON_HW {
+                min_agl_over_ridge_wu = min_agl_over_ridge_wu.min(agl_wu);
+            }
+        }
+        println!("[scaled-wall] peak={:.1} wu ({:.0} m exaggerated) | min AGL over wall = {:.2} wu",
+            peak_wu, peak_wu * M_PER_WU, min_agl_over_ridge_wu);
+        // Cleared the wall — never plowed substantially into it.
+        assert!(min_agl_over_ridge_wu > -peak_wu * 0.05,
+            "clipped through the scaled wall: min AGL over it = {min_agl_over_ridge_wu} wu (peak {peak_wu})");
+    }
+
     // (h) Stability: dt=0.05 cap, long run → no NaN/blowup.
     #[test]
     fn h_stable_at_dt_cap() {
         let mut p = level_craft(400.0, 600.0, 1.0);
         for _ in 0..2000 {
-            p.step(0.05, 1.0, 0.0, 0.0, 0.0, 0.0, true, None);
+            p.step(0.05, 1.0, 0.0, 0.0, 0.0, 0.0, true, 1.0, None);
             assert!(p.position.is_finite() && p.velocity.is_finite(), "NaN/blowup");
             assert!(p.speed <= V_CAP + 1e-2);
         }

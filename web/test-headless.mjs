@@ -91,42 +91,47 @@ async function run() {
   console.log('Spawn screenshot saved: web/test-screenshot.png');
 
   // ── Spawn cruise SETTLES to the low AGL clearance and holds (NO input) ───────
-  // The AGL terrain-following hold targets a low clearance above the ground DIRECTLY BELOW
-  // (TARGET_AGL ≈ 60 wu), so spawning at alt 250 over the (sea-level) Mediterranean, the craft
-  // gently DESCENDS to that low skim clearance and then holds it steadily with steady speed
-  // (it must NOT plummet to the floor nor rocket to space). Then pitch-down descends and
-  // Shift+Space climbs out.
+  // The AGL terrain-following hold targets a clearance in VE-EXAGGERATED METERS (the same scale
+  // the terrain is drawn in): DEFAULT_TARGET_AGL = 500 exaggerated m. Spawning at alt 250 over the
+  // (sea-level) Mediterranean, the craft gently DESCENDS to that skim clearance and holds it. Over
+  // the sea (terrain 0) 500 exaggerated m ≈ 1.3 wu, so the ALTITUDE band sits low (a few wu) yet
+  // the HUD `agl_m()` reads ≈ 500 (the scaled clearance). It must NOT plummet to the floor (alt>0)
+  // nor rocket to space. Then pitch-down descends and Shift+Space climbs out.
   const cruise = await page.evaluate(() => {
     const eng = window._eng;
     eng.set_input(0, 0, 0, 0, 0, 0, 0, false);
     const a0 = eng.altitude();
     // Track the SETTLED band over the last 8 s (after the descent transient onto the AGL hold).
-    let amin = Infinity, amax = 0, smin = Infinity, smax = 0;
+    let amin = Infinity, amax = 0, smin = Infinity, smax = 0, aglMin = Infinity, aglMax = 0;
     const trace = [];
     for (let s = 0; s < 18; s++) {
       for (let i = 0; i < 60; i++) eng.step(1 / 60);
-      const a = eng.altitude(), sp = eng.speed();
+      const a = eng.altitude(), sp = eng.speed(), agl = eng.agl_m();
       if (s >= 10) {
         amin = Math.min(amin, a); amax = Math.max(amax, a);
         smin = Math.min(smin, sp); smax = Math.max(smax, sp);
+        aglMin = Math.min(aglMin, agl); aglMax = Math.max(aglMax, agl);
       }
-      trace.push(`t=${s + 1}s alt=${a.toFixed(0)} speed=${sp.toFixed(0)}`);
+      trace.push(`t=${s + 1}s alt=${a.toFixed(0)} agl=${agl.toFixed(0)}m speed=${sp.toFixed(0)}`);
     }
-    return { a0, aFinal: eng.altitude(), amin, amax, smin, smax, trace };
+    return { a0, aFinal: eng.altitude(), amin, amax, smin, smax, aglMin, aglMax, trace };
   });
   console.log('CRUISE: ' + cruise.trace.join(' | '));
   console.log(`CRUISE: alt start=${cruise.a0.toFixed(0)} settled band=[${cruise.amin.toFixed(0)},${cruise.amax.toFixed(0)}] ` +
-    `speed=[${cruise.smin.toFixed(0)},${cruise.smax.toFixed(0)}]`);
-  // The craft DESCENDS to the low AGL clearance (well below the alt-250 spawn) and then holds a
-  // tight settled band there with steady speed — no free-fall to the floor, no escape to space.
+    `AGL=[${cruise.aglMin.toFixed(0)},${cruise.aglMax.toFixed(0)}]m speed=[${cruise.smin.toFixed(0)},${cruise.smax.toFixed(0)}]`);
+  // The craft DESCENDS to the low AGL skim clearance and holds a tight band there with steady
+  // speed — no free-fall to the floor (alt stays > 0), no escape to space — and the HUD AGL reads
+  // ≈ 500 exaggerated m (the scaled clearance, NOT ~10000).
   if (cruise.aFinal < cruise.a0 - 100 &&
-      cruise.amin > 10 && cruise.amax < 250 &&
+      cruise.amin > 0 && cruise.amax < 250 &&
       (cruise.amax - cruise.amin) < 30 &&
+      cruise.aglMin > 100 && cruise.aglMax < 1500 &&
       cruise.smin > 100 && cruise.smax < 400) {
-    console.log('PASS: spawn cruise descends to the low AGL skim clearance and holds it (no free-fall, no escape)');
+    console.log('PASS: spawn cruise descends to the VE-scaled AGL skim clearance (~500 exag-m) and holds it');
   } else {
-    fail(`spawn cruise did not settle to low AGL hold: final ${cruise.aFinal.toFixed(0)} settled band ` +
-      `[${cruise.amin.toFixed(0)},${cruise.amax.toFixed(0)}] speed [${cruise.smin.toFixed(0)},${cruise.smax.toFixed(0)}]`,
+    fail(`spawn cruise did not settle to VE-scaled AGL hold: final ${cruise.aFinal.toFixed(0)} settled band ` +
+      `[${cruise.amin.toFixed(0)},${cruise.amax.toFixed(0)}] AGL [${cruise.aglMin.toFixed(0)},${cruise.aglMax.toFixed(0)}]m ` +
+      `speed [${cruise.smin.toFixed(0)},${cruise.smax.toFixed(0)}]`,
       browser, server, logs);
   }
 

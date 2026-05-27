@@ -198,13 +198,15 @@ impl Engine {
         self.ve_override = None;
     }
 
-    /// Set the ATMO AGL terrain-following clearance (world units above the terrain DIRECTLY
-    /// BELOW). Clamped to `[TARGET_AGL_MIN, TARGET_AGL_MAX]`. Lower = skims closer to the ground
-    /// (hugs the contour); the craft still climbs to clear upcoming walls (collision avoidance).
-    /// Driven by the web `?agl=<meters>` URL param (meters → wu via `M_PER_WU`).
-    pub fn set_target_agl(&mut self, agl_wu: f32) {
+    /// Set the ATMO AGL terrain-following clearance above the terrain DIRECTLY BELOW, in
+    /// VE-EXAGGERATED METERS (the same vertical scale the terrain is drawn in — NOT un-exaggerated
+    /// meters). Clamped to `[TARGET_AGL_MIN, TARGET_AGL_MAX]`. Lower = skims closer to the visible
+    /// ridges (hugs the contour); the craft still climbs to clear upcoming walls (collision
+    /// avoidance). Driven directly by the web `?agl=<meters>` URL param (no wu conversion — the
+    /// per-frame `ve` scaling happens inside `step`).
+    pub fn set_target_agl(&mut self, agl_m: f32) {
         self.phys.target_agl =
-            agl_wu.clamp(physics::TARGET_AGL_MIN, physics::TARGET_AGL_MAX);
+            agl_m.clamp(physics::TARGET_AGL_MIN, physics::TARGET_AGL_MAX);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -245,9 +247,12 @@ impl Engine {
             .unwrap_or_else(|| heightfield::ve_for_altitude(alt_wu));
         let hf = &self.hf;
         let terrain = move |lat: f32, lon: f32| hf.terrain_radius_at(lat, lon, ve);
+        // wu per VE-exaggerated meter of AGL clearance — same `ve` the terrain is drawn with, so
+        // the held clearance is exaggerated like the ground. = VERT_SCALE·ve/VERT_EXAGGERATION.
+        let agl_scale = heightfield::VERT_SCALE * ve / heightfield::VERT_EXAGGERATION;
         self.phys.step(
             dt, self.i_thrust, self.i_pitch, self.i_yaw, self.i_roll, self.i_boost, self.i_ftl,
-            Some(&terrain),
+            agl_scale, Some(&terrain),
         );
 
         let cam_pos = chase_cam_pos(&self.phys);
@@ -459,18 +464,21 @@ impl Engine {
         self.altitude() * M_PER_WU
     }
 
-    /// Height ABOVE GROUND in real meters: `(|pos| − terrain_radius_below) · M_PER_WU`, where the
-    /// terrain radius uses the SAME vertical exaggeration the renderer draws this frame (the
-    /// override if set, else `ve_for_altitude(altitude)`), so AGL matches the relief the player
-    /// SEES. The ATMO terrain-following hold targets this. Clamped ≥ 0 (never reports below the
-    /// ground). Distinct from `altitude_m` (height above the sea-level sphere).
+    /// Height ABOVE GROUND in **VE-EXAGGERATED METERS** — the SAME vertical scale the terrain is
+    /// drawn in, so the HUD reads ≈ the set `target_agl` when skimming (e.g. ~500, not ~10000).
+    /// `agl_m = (|pos| − terrain_radius_below) / (VERT_SCALE · ve / VERT_EXAGGERATION)` (= the wu
+    /// clearance / `agl_scale` = wu · M_PER_WU / ve), using the SAME `ve` the renderer draws this
+    /// frame (the override if set, else `ve_for_altitude(altitude)`). Clamped ≥ 0. Distinct from
+    /// `altitude_m` (height above the sea-level sphere, un-exaggerated meters).
     pub fn agl_m(&self) -> f32 {
         let alt_wu = (self.phys.position.length() - R_WORLD).max(0.0);
         let ve = self
             .ve_override
             .unwrap_or_else(|| heightfield::ve_for_altitude(alt_wu));
         let terr_r = self.hf.terrain_radius_below(self.phys.position, ve);
-        (self.phys.position.length() - terr_r).max(0.0) * M_PER_WU
+        let clearance_wu = (self.phys.position.length() - terr_r).max(0.0);
+        let agl_scale = heightfield::VERT_SCALE * ve / heightfield::VERT_EXAGGERATION;
+        clearance_wu / agl_scale.max(1e-9)
     }
 
     /// Speed in world units/sec.

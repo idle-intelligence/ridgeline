@@ -85,9 +85,11 @@ const DEFAULT_SPAWN = { lat: 38.0, lon: 8.0, altWu: 250.0, heading: 0.0 };
 const ALT_WU_MIN = 0.5;
 const ALT_WU_MAX = 12000.0;
 
-// AGL terrain-following clearance clamp (world units), mirrors core TARGET_AGL_MIN/MAX.
-const AGL_WU_MIN = 10.0;
-const AGL_WU_MAX = 1000.0;
+// AGL terrain-following clearance clamp, in VE-EXAGGERATED METERS (the same vertical scale the
+// terrain is drawn in), mirrors core TARGET_AGL_MIN/MAX. The core scales meters → wu per-frame
+// with the live render `ve`, so the held clearance skims just above the visible exaggerated ridges.
+const AGL_M_MIN = 80.0;
+const AGL_M_MAX = 60000.0;
 
 function num(params, key) {
   if (!params.has(key)) return null;
@@ -114,11 +116,13 @@ function applyUrlParams(eng) {
     eng.set_exaggeration_override(ve);
   }
 
-  // ?agl=<meters>: terrain-following clearance above the ground directly below. Convert
-  // meters → world units (M_PER_WU) and clamp to the sane skim band. No param → engine default.
+  // ?agl=<meters>: terrain-following clearance above the ground directly below, in VE-exaggerated
+  // meters (the SAME vertical scale the terrain is drawn in). Passed straight to the core (which
+  // scales it to wu per-frame with the live render `ve`); just clamp to the sane skim band. No
+  // param → engine default (DEFAULT_TARGET_AGL = 500 exaggerated m). No M_PER_WU conversion here.
   if (aglM !== null) {
-    const aglWu = Math.max(AGL_WU_MIN, Math.min(AGL_WU_MAX, aglM / M_PER_WU));
-    eng.set_target_agl(aglWu);
+    const aglClamped = Math.max(AGL_M_MIN, Math.min(AGL_M_MAX, aglM));
+    eng.set_target_agl(aglClamped);
   }
 
   // If none of the spawn params are present, keep the engine's default spawn.

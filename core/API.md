@@ -68,12 +68,16 @@ eng.clear_exaggeration_override();   // back to the altitude-coupled ve_for_alti
 // altitude-coupled behavior is unchanged. Only terrain relief is affected (occluder/camera/
 // physics/HUD scales are untouched), same as the altitude-coupled path.
 
-eng.set_target_agl(agl_wu);          // ATMO terrain-following clearance (world units).
-// Height the AGL hold maintains above the terrain DIRECTLY BELOW (contour hug; the craft still
-// climbs to clear upcoming walls). Clamped to [TARGET_AGL_MIN = 10, TARGET_AGL_MAX = 1000] wu.
-// Default = DEFAULT_TARGET_AGL = 60 wu. Preserved across set_spawn respawns. The web layer drives
-// it from the ?agl=<meters> URL param (meters → wu via M_PER_WU). Lower = skims closer / hugs
-// tighter. Only affects the ATMO hands-off altitude command; manual pitch still overrides.
+eng.set_target_agl(agl_m);           // ATMO terrain-following clearance, in VE-EXAGGERATED METERS.
+// Clearance the AGL hold maintains above the terrain DIRECTLY BELOW, expressed in the SAME
+// vertical scale the terrain is DRAWN in (VE-exaggerated meters — NOT un-exaggerated meters / wu).
+// The core converts it to wu per-frame with the live render `ve`:
+// agl_wu = agl_m · VERT_SCALE · ve/VERT_EXAGGERATION (= agl_m · ve / M_PER_WU), so the held
+// clearance is exaggerated like the ground and skims just above the visible ridges (500 exag-m ≈
+// 1.3 wu at near-surface ve). Contour hug; the craft still climbs to clear upcoming walls. Clamped
+// to [TARGET_AGL_MIN = 80, TARGET_AGL_MAX = 60000] exag-m. Default = DEFAULT_TARGET_AGL = 500
+// exag-m. Preserved across set_spawn respawns. The web ?agl=<meters> URL param passes straight
+// through (no M_PER_WU conversion). Manual pitch still overrides.
 ```
 
 ## Per-frame input (call before `step`)
@@ -124,9 +128,11 @@ Shift+Space climbs to space.
 modes crossfaded by altitude** (seamless, no discrete switch). Throttle sets a *target speed*
 (hard-capped at `V_CAP = 10000` wu/s, so the HUD km/h is always bounded). **ATMO** (`alt < 1500`):
 slow + dense fly-by-nose with **quadratic drag** (`IDLE 30 .. CRUISE_MAX 400`; cut throttle →
-speed bleeds in ~2–3 s). Hands-off, **AGL terrain-following** holds the craft a small clearance
-(default `DEFAULT_TARGET_AGL = 60 wu`, tunable via `set_target_agl` / `?agl=`) above the terrain
-DIRECTLY BELOW AS RENDERED — it HUGS THE CONTOUR (descends into valleys with the floor) and uses
+speed bleeds in ~2–3 s). Hands-off, **AGL terrain-following** holds the craft a small clearance in
+VE-exaggerated meters (default `DEFAULT_TARGET_AGL = 500` exag-m ≈ 1.3 wu near the surface, tunable
+via `set_target_agl` / `?agl=`; converted to wu per-frame with the live render `ve` so it skims
+just above the visible exaggerated ridges) above the terrain DIRECTLY BELOW AS RENDERED — it HUGS
+THE CONTOUR (descends into valleys with the floor) and uses
 the speed-scaled forward look-ahead only for COLLISION AVOIDANCE (raising the target in time to
 clear an upcoming wall), tracked by a critically-damped radial controller. Manual pitch overrides;
 auto re-engages hands-off. **ORBIT** (`1500 .. ORBIT_TOP = 12000`): thin air, faster
@@ -239,12 +245,14 @@ painter's back-to-front order is no longer required.
 - `eng.altitude_m()` → f32 (real meters above sea level) = `altitude() × M_PER_WU`, where
   `M_PER_WU = EARTH_RADIUS_M / R_WORLD ≈ 1061.8` m/wu. Uses the HORIZONTAL planet scale
   (not VERT_SCALE) so altitudes read as plausible orbital/atmospheric heights.
-- `eng.agl_m()` → f32 (real meters ABOVE GROUND) = `(|pos| − terrain_radius_below) × M_PER_WU`,
-  clamped ≥ 0. The terrain radius uses the SAME vertical exaggeration the renderer draws this
-  frame (`ve_for_altitude(altitude)`, or the exaggeration override if set), so AGL matches the
-  relief the player SEES. Distinct from `altitude_m` (height above the sea-level sphere); over
-  ocean (terrain = 0) the two coincide. The ATMO terrain-following hold targets this. The web HUD
-  shows `AGL nnnm` in ATMO (alongside `ALT`).
+- `eng.agl_m()` → f32 (**VE-EXAGGERATED meters** ABOVE GROUND) =
+  `(|pos| − terrain_radius_below) / (VERT_SCALE · ve/VERT_EXAGGERATION)` (= wu clearance × M_PER_WU
+  / ve), clamped ≥ 0, using the SAME `ve` the renderer draws this frame (`ve_for_altitude`, or the
+  exaggeration override). Reported in the terrain's OWN exaggerated vertical scale, so the ATMO
+  terrain-following hold (which targets this) reads ≈ the set clearance — e.g. ~500 over flat
+  ground at the default, NOT ~10000. Distinct from `altitude_m` (height above the sea-level sphere,
+  un-exaggerated meters); over ocean the *wu* heights coincide but the reported scales differ. The
+  web HUD shows `AGL nnnm` in ATMO (alongside `ALT`).
 - `eng.speed()` → f32 (world units/sec).
 - `eng.speed_kmh()` → f32 (km/h) = `speed() × M_PER_WU × 3.6` (same horizontal planet scale).
 - `eng.throttle()` → f32 in `[0, 1]` — current engine throttle (gas pedal). The web HUD shows
