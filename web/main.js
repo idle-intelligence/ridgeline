@@ -138,10 +138,18 @@ async function main() {
   }
   window.addEventListener('resize', resize);
 
-  try {
-    renderer = new Renderer(canvas);
-  } catch (e) {
-    fatal(e.message, 'WebGL2 requires a modern browser (Chrome 56+, Edge 79+, Firefox 51+).');
+  // The WebGPU prototype (flag-gated) needs the canvas's 'webgpu' context, which is mutually
+  // exclusive with 'webgl2' on the same canvas. So when ?webgpu=1 we DEFER renderer
+  // construction until after the engine is built (WebGPU needs it to upload the heightfield),
+  // and only construct the WebGL2 Renderer up front in the default (no-flag) path — keeping
+  // that default path byte-for-byte unchanged.
+  const wantWebGPU = new URLSearchParams(location.search).has('webgpu');
+  if (!wantWebGPU) {
+    try {
+      renderer = new Renderer(canvas);
+    } catch (e) {
+      fatal(e.message, 'WebGL2 requires a modern browser (Chrome 56+, Edge 79+, Firefox 51+).');
+    }
   }
 
   resize();
@@ -178,6 +186,34 @@ async function main() {
   //   ve           — fixed vertical-exaggeration override (optional)
   // Missing pieces fall back to the engine's default spawn.
   applyUrlParams(eng);
+
+  // --- Optional WebGPU renderer (flag-gated prototype) ---
+  // Activates ONLY with ?webgpu=1 AND a working WebGPU adapter. On ANY failure (or no adapter)
+  // we construct the WebGL2 Renderer here as the fallback, so main stays flyable everywhere.
+  if (wantWebGPU) {
+    let ok = false;
+    if (navigator.gpu) {
+      try {
+        const { WebGPURenderer } = await import('./renderer-webgpu.js');
+        const gpu = await WebGPURenderer.create(canvas, eng, wasmMemory);
+        gpu.resize(canvas.width, canvas.height);
+        renderer = gpu;
+        ok = true;
+        console.log('[webgpu] WebGPU renderer active (compute → indirect line draw).');
+      } catch (e) {
+        console.warn('[webgpu] init failed — falling back to WebGL2:', e.message);
+      }
+    } else {
+      console.warn('[webgpu] navigator.gpu unavailable — falling back to WebGL2.');
+    }
+    if (!ok) {
+      try {
+        renderer = new Renderer(canvas);
+      } catch (e) {
+        fatal(e.message, 'WebGL2 requires a modern browser.');
+      }
+    }
+  }
 
   // Upload aircraft wireframe geometry (static, uploaded once).
   const aircraftScale = eng.aircraft_scale();

@@ -253,6 +253,20 @@ painter's back-to-front order is no longer required.
   position projected onto the globe. `lat = asin(cam.y / |cam|)`, `lon = atan2(-cam.z, cam.x)`,
   both in degrees. Shows what the camera is above.
 
+## WebGPU prototype getters (additive — used ONLY by the flag-gated `?webgpu=1` path)
+These are additive read-only getters for the experimental `web/renderer-webgpu.js` compute
+prototype, which ports the LINE-channel `emit_ring` geometry to a WGSL compute shader. The
+WebGL2 default path does NOT use them; they don't affect the existing contract above.
+- `eng.cam_forward()` → `Float32Array` length 3 — the freelook-aware camera forward (world
+  space), the SAME direction the geometry frustum/sight cull uses this frame.
+- `eng.current_ve()` → `f32` — the vertical exaggeration used to draw terrain this frame
+  (override if set, else the altitude-coupled ramp). = `ve / VERT_EXAGGERATION` upstream.
+- `eng.elev_world_max()` → `f32` — max terrain elevation (world units) for elevation→brightness
+  normalization (matches `line_elevations`).
+- `eng.heightfield_ptr()/_len()` → `u32` — pointer/len into WASM memory of the f32 world-unit
+  elevation grid (row-major, row 0 = north, len = width*height). Uploaded ONCE to the GPU.
+- `eng.grid_width()/grid_height()` → `u32` — heightfield grid dimensions.
+
 ## Rendering contract (web side)
 - Enable depth test (LEQUAL). Draw the dark occluder-sphere fills (they write depth and hide
   the far hemisphere), then the bright latitude-ring lines on top. Background-colored fills +

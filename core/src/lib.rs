@@ -309,6 +309,47 @@ impl Engine {
         arr
     }
 
+    /// Freelook-aware camera forward (world space), the SAME direction the geometry
+    /// frustum/sight cull uses this frame (see `step`). Additive getter for the WebGPU
+    /// compute prototype, which ports the cull math to WGSL. WebGL2 path does not use this.
+    pub fn cam_forward(&self) -> Float32Array {
+        let look_offset =
+            Quat::from_rotation_y(-self.look_yaw) * Quat::from_rotation_x(self.look_pitch);
+        let fwd = ((self.phys.orientation * look_offset) * Vec3::NEG_Z).normalize_or_zero();
+        let arr = Float32Array::new_with_length(3);
+        arr.copy_from(&[fwd.x, fwd.y, fwd.z]);
+        arr
+    }
+
+    /// Vertical exaggeration used to draw terrain THIS frame (override if set, else the
+    /// altitude-coupled ramp). Additive getter for the WebGPU compute prototype.
+    pub fn current_ve(&self) -> f32 {
+        let alt_wu = (self.phys.position.length() - R_WORLD).max(0.0);
+        self.ve_override
+            .unwrap_or_else(|| heightfield::ve_for_altitude(alt_wu))
+    }
+
+    /// Max terrain elevation (world units) used to normalize elevation→brightness. Additive
+    /// getter for the WebGPU compute prototype (matches `Heightfield::elev_norm`).
+    pub fn elev_world_max(&self) -> f32 {
+        self.hf.elev_world_max
+    }
+
+    /// Pointer to the heightfield elevation buffer (f32 world units, row-major, row 0 = north).
+    /// len = width*height. Additive: lets the WebGPU prototype upload the heightfield once.
+    pub fn heightfield_ptr(&self) -> u32 {
+        self.hf.elev.as_ptr() as u32
+    }
+    pub fn heightfield_len(&self) -> u32 {
+        self.hf.elev.len() as u32
+    }
+    pub fn grid_width(&self) -> u32 {
+        self.hf.width
+    }
+    pub fn grid_height(&self) -> u32 {
+        self.hf.height
+    }
+
     pub fn model_matrix(&self) -> Float32Array {
         let mat = Mat4::from_rotation_translation(self.phys.orientation, self.phys.position);
         let arr = Float32Array::new_with_length(16);
