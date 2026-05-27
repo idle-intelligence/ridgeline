@@ -478,6 +478,20 @@ impl Engine {
         self.altitude() * M_PER_WU
     }
 
+    /// Distance to the GROUND directly below, in RAW WORLD UNITS (NOT VE-scaled, NOT meters):
+    /// `|pos| − terrain_radius_below`, clamped ≥ 0. Uses the SAME `ve` the renderer draws this
+    /// frame so the terrain radius matches what's on screen. Small when skimming (~1–50 wu).
+    /// The ATMO HUD shows this as `GND <n> wu` — the gravitationally dominant body in ATMO is
+    /// the ground. Distinct from `agl_m` (VE-exaggerated meters) and `altitude_m` (sea-level m).
+    pub fn ground_dist_wu(&self) -> f32 {
+        let alt_wu = (self.phys.position.length() - R_WORLD).max(0.0);
+        let ve = self
+            .ve_override
+            .unwrap_or_else(|| heightfield::ve_for_altitude(alt_wu));
+        let terr_r = self.hf.terrain_radius_below(self.phys.position, ve);
+        (self.phys.position.length() - terr_r).max(0.0)
+    }
+
     /// Height ABOVE GROUND in **VE-EXAGGERATED METERS** — the SAME vertical scale the terrain is
     /// drawn in, so the HUD reads ≈ the set `target_agl` when skimming (e.g. ~500, not ~10000).
     /// `agl_m = (|pos| − terrain_radius_below) / (VERT_SCALE · ve / VERT_EXAGGERATION)` (= the wu

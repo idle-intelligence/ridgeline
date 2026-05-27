@@ -263,7 +263,6 @@ async function main() {
 
     // HUD
     const kmh = Math.round(eng.speed_kmh());
-    const alt = Math.round(eng.altitude_m());
     const ll = eng.lat_lon();
     const latVal = ll[0], lonVal = ll[1];
     const latStr = `${Math.abs(latVal).toFixed(1)}°${latVal >= 0 ? 'N' : 'S'}`;
@@ -271,11 +270,25 @@ async function main() {
     const modeIdx = eng.flight_mode();
     const mode = ['ATMO', 'ORBIT', 'INTERPLANETARY'][modeIdx] || 'ATMO';
     const thr = Math.round(eng.throttle() * 100);
-    // AGL (height above the terrain below) — most useful in ATMO where terrain-following holds
-    // it. Show AGL alongside ALT in ATMO; ALT alone higher up (AGL == ALT over ocean anyway).
-    const aglStr =
-      modeIdx === 0 ? `AGL ${Math.round(eng.agl_m())}m   ` : '';
-    hud.textContent = `${kmh} km/h   THR ${thr}%   ${aglStr}ALT ${alt}m   ${latStr} ${lonStr} · ${mode}`;
+    // Context-aware "distance to the gravitationally dominant body", chosen by flight mode —
+    // the label names whose gravity well the player is in.
+    //   ATMO  → distance to GROUND, raw world units (small when skimming): GND <n> wu
+    //   ORBIT → distance to the PLANET surface, integer km w/ separators:  PLANET <n> km
+    //   INTERPLANETARY → distance from the planet, megameters: EARTH <n> Mm  (placeholder)
+    let distStr;
+    if (modeIdx === 1) {
+      const km = Math.round(eng.altitude_m() / 1000);
+      distStr = `PLANET ${km.toLocaleString('en-US')} km`;
+    } else if (modeIdx === 2) {
+      // TODO: there is no sun body yet. When one exists, this becomes the distance to the SUN
+      // as `SUN <n> AU`. Until then, show distance FROM THE PLANET in megameters as a placeholder.
+      const mm = eng.altitude_m() / 1e6;
+      distStr = `EARTH ${mm.toFixed(1)} Mm`;
+    } else {
+      const gnd = eng.ground_dist_wu();
+      distStr = `GND ${gnd < 10 ? gnd.toFixed(1) : Math.round(gnd)} wu`;
+    }
+    hud.textContent = `${kmh} km/h · THR ${thr}% · ${distStr} · ${latStr} ${lonStr} · ${mode}`;
 
     requestAnimationFrame(frame);
   }

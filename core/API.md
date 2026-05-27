@@ -253,8 +253,13 @@ painter's back-to-front order is no longer required.
   exaggeration override). Reported in the terrain's OWN exaggerated vertical scale, so the ATMO
   terrain-following hold (which targets this) reads ≈ the set clearance — e.g. ~500 over flat
   ground at the default, NOT ~10000. Distinct from `altitude_m` (height above the sea-level sphere,
-  un-exaggerated meters); over ocean the *wu* heights coincide but the reported scales differ. The
-  web HUD shows `AGL nnnm` in ATMO (alongside `ALT`).
+  un-exaggerated meters); over ocean the *wu* heights coincide but the reported scales differ.
+- `eng.ground_dist_wu()` → f32 (**RAW WORLD UNITS** to the GROUND below) = `|pos| − terrain_radius_below`,
+  clamped ≥ 0, using the SAME `ve` the renderer draws this frame. NOT VE-scaled, NOT meters — raw wu,
+  small when skimming (~1–50 wu). The web HUD shows this as `GND <n> wu` in ATMO (1 decimal if <10),
+  the context-aware "distance to the gravitationally dominant body" (the ground in ATMO). ORBIT uses
+  `altitude_m()/1000` → `PLANET <n> km`; INTERPLANETARY uses `altitude_m()/1e6` → `EARTH <n> Mm`
+  (placeholder until a sun body exists, then it becomes `SUN <n> AU`).
 - `eng.speed()` → f32 (world units/sec).
 - `eng.speed_kmh()` → f32 (km/h) = `speed() × M_PER_WU × 3.6` (same horizontal planet scale).
 - `eng.throttle()` → f32 in `[0, 1]` — current engine throttle (gas pedal). The web HUD shows

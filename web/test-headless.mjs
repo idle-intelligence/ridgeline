@@ -175,7 +175,7 @@ async function run() {
 
   // ── HUD populated ──────────────────────────────────────────────────────────
   const hudText = await page.$eval('#hud', el => el.textContent.trim());
-  if (hudText && hudText.includes('km/h') && hudText.includes('ALT')) {
+  if (hudText && hudText.includes('km/h') && hudText.includes('GND')) {
     console.log(`PASS: HUD populated — "${hudText}"`);
   } else {
     fail(`HUD text unexpected: "${hudText}"`, browser, server, logs);
