@@ -67,6 +67,13 @@ eng.clear_exaggeration_override();   // back to the altitude-coupled ve_for_alti
 // VE(altitude), so the player can hold a constant relief at any altitude. When unset, the
 // altitude-coupled behavior is unchanged. Only terrain relief is affected (occluder/camera/
 // physics/HUD scales are untouched), same as the altitude-coupled path.
+
+eng.set_target_agl(agl_wu);          // ATMO terrain-following clearance (world units).
+// Height the AGL hold maintains above the terrain DIRECTLY BELOW (contour hug; the craft still
+// climbs to clear upcoming walls). Clamped to [TARGET_AGL_MIN = 10, TARGET_AGL_MAX = 1000] wu.
+// Default = DEFAULT_TARGET_AGL = 60 wu. Preserved across set_spawn respawns. The web layer drives
+// it from the ?agl=<meters> URL param (meters → wu via M_PER_WU). Lower = skims closer / hugs
+// tighter. Only affects the ATMO hands-off altitude command; manual pitch still overrides.
 ```
 
 ## Per-frame input (call before `step`)
@@ -106,7 +113,7 @@ offset is view-only.
 **Spawn**: ship cruising LEVEL inside the atmosphere at `CRUISE_ALT = 250` wu over the
 western/central Mediterranean (38°N, 8°E), heading NORTH toward Europe. (Configurable at
 runtime via `set_spawn` — see "Spawn + setters" above; the web layer maps URL query params
-`?lat=&lon=&alt=&heading=&ve=` onto it.) The orientation is built from a radial basis
+`?lat=&lon=&alt=&heading=&ve=&agl=` onto it.) The orientation is built from a radial basis
 (up = radial, forward = north tangent), and the craft is seeded with a forward velocity
 (`CRUISE_SPEED = 450` wu/s) and a cruise throttle (`CRUISE_THROTTLE = 0.527`) whose target
 speed equals `CRUISE_SPEED`. With no thrust input the throttle holds, so from frame 1 the
@@ -117,10 +124,12 @@ Shift+Space climbs to space.
 modes crossfaded by altitude** (seamless, no discrete switch). Throttle sets a *target speed*
 (hard-capped at `V_CAP = 10000` wu/s, so the HUD km/h is always bounded). **ATMO** (`alt < 1500`):
 slow + dense fly-by-nose with **quadratic drag** (`IDLE 30 .. CRUISE_MAX 400`; cut throttle →
-speed bleeds in ~2–3 s). Hands-off, **AGL terrain-following** holds the craft a fixed clearance
-(`TARGET_AGL = 250 wu`) above the terrain AS RENDERED: it samples terrain radii along the forward
-ground track over a speed-scaled look-ahead, takes the MAX (climbs BEFORE peaks), and tracks it
-with a critically-damped radial controller. Manual pitch overrides; auto re-engages hands-off. **ORBIT** (`1500 .. ORBIT_TOP = 12000`): thin air, faster
+speed bleeds in ~2–3 s). Hands-off, **AGL terrain-following** holds the craft a small clearance
+(default `DEFAULT_TARGET_AGL = 60 wu`, tunable via `set_target_agl` / `?agl=`) above the terrain
+DIRECTLY BELOW AS RENDERED — it HUGS THE CONTOUR (descends into valleys with the floor) and uses
+the speed-scaled forward look-ahead only for COLLISION AVOIDANCE (raising the target in time to
+clear an upcoming wall), tracked by a critically-damped radial controller. Manual pitch overrides;
+auto re-engages hands-off. **ORBIT** (`1500 .. ORBIT_TOP = 12000`): thin air, faster
 (`1000 .. 3000`), a gentle critically-damped hold keeps a **near-circular** path that's easy to
 raise/lower with pitch and easy to escape (point out + accelerate). **INTERPLANETARY**
 (`> 12000`): free Newtonian (coasts; gravity + nose-thrust) up to `V_CAP`. Per-mode caps

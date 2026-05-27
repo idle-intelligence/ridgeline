@@ -85,6 +85,10 @@ const DEFAULT_SPAWN = { lat: 38.0, lon: 8.0, altWu: 250.0, heading: 0.0 };
 const ALT_WU_MIN = 0.5;
 const ALT_WU_MAX = 12000.0;
 
+// AGL terrain-following clearance clamp (world units), mirrors core TARGET_AGL_MIN/MAX.
+const AGL_WU_MIN = 10.0;
+const AGL_WU_MAX = 1000.0;
+
 function num(params, key) {
   if (!params.has(key)) return null;
   const v = parseFloat(params.get(key));
@@ -104,9 +108,17 @@ function applyUrlParams(eng) {
   const altKm = num(params, 'alt');
   const heading = num(params, 'heading');
   const ve = num(params, 've');
+  const aglM = num(params, 'agl');
 
   if (ve !== null) {
     eng.set_exaggeration_override(ve);
+  }
+
+  // ?agl=<meters>: terrain-following clearance above the ground directly below. Convert
+  // meters → world units (M_PER_WU) and clamp to the sane skim band. No param → engine default.
+  if (aglM !== null) {
+    const aglWu = Math.max(AGL_WU_MIN, Math.min(AGL_WU_MAX, aglM / M_PER_WU));
+    eng.set_target_agl(aglWu);
   }
 
   // If none of the spawn params are present, keep the engine's default spawn.
@@ -179,11 +191,12 @@ async function main() {
   eng.set_aspect(canvas.width / canvas.height);
 
   // --- URL query params (phone-friendly start config) ---
-  // ?lat=&lon=&alt=&heading=&ve=
+  // ?lat=&lon=&alt=&heading=&ve=&agl=
   //   lat, lon     — degrees (spawn location)
   //   alt          — KILOMETERS above sea level (converted to world units below)
   //   heading      — degrees, 0 = north, 90 = east (optional, default north)
   //   ve           — fixed vertical-exaggeration override (optional)
+  //   agl          — METERS of terrain-following clearance above the ground below (optional)
   // Missing pieces fall back to the engine's default spawn.
   applyUrlParams(eng);
 

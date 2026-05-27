@@ -90,48 +90,57 @@ async function run() {
   await page.screenshot({ path: join(__dir, 'test-screenshot.png') });
   console.log('Spawn screenshot saved: web/test-screenshot.png');
 
-  // ── Spawn cruise holds altitude (NO input, just seeded cruise throttle) ──────
-  // Step ~18 s with zero input and confirm the craft holds a tight altitude band and
-  // steady speed (it must NOT plummet to the floor nor rocket to space), then confirm
-  // pitch-down descends and Shift+Space climbs out.
+  // ── Spawn cruise SETTLES to the low AGL clearance and holds (NO input) ───────
+  // The AGL terrain-following hold targets a low clearance above the ground DIRECTLY BELOW
+  // (TARGET_AGL ≈ 60 wu), so spawning at alt 250 over the (sea-level) Mediterranean, the craft
+  // gently DESCENDS to that low skim clearance and then holds it steadily with steady speed
+  // (it must NOT plummet to the floor nor rocket to space). Then pitch-down descends and
+  // Shift+Space climbs out.
   const cruise = await page.evaluate(() => {
     const eng = window._eng;
     eng.set_input(0, 0, 0, 0, 0, 0, 0, false);
     const a0 = eng.altitude();
-    let amin = a0, amax = a0, smin = eng.speed(), smax = eng.speed();
+    // Track the SETTLED band over the last 8 s (after the descent transient onto the AGL hold).
+    let amin = Infinity, amax = 0, smin = Infinity, smax = 0;
     const trace = [];
     for (let s = 0; s < 18; s++) {
       for (let i = 0; i < 60; i++) eng.step(1 / 60);
       const a = eng.altitude(), sp = eng.speed();
-      amin = Math.min(amin, a); amax = Math.max(amax, a);
-      smin = Math.min(smin, sp); smax = Math.max(smax, sp);
+      if (s >= 10) {
+        amin = Math.min(amin, a); amax = Math.max(amax, a);
+        smin = Math.min(smin, sp); smax = Math.max(smax, sp);
+      }
       trace.push(`t=${s + 1}s alt=${a.toFixed(0)} speed=${sp.toFixed(0)}`);
     }
-    return { a0, amin, amax, smin, smax, trace };
+    return { a0, aFinal: eng.altitude(), amin, amax, smin, smax, trace };
   });
   console.log('CRUISE: ' + cruise.trace.join(' | '));
-  console.log(`CRUISE: alt start=${cruise.a0.toFixed(0)} band=[${cruise.amin.toFixed(0)},${cruise.amax.toFixed(0)}] ` +
+  console.log(`CRUISE: alt start=${cruise.a0.toFixed(0)} settled band=[${cruise.amin.toFixed(0)},${cruise.amax.toFixed(0)}] ` +
     `speed=[${cruise.smin.toFixed(0)},${cruise.smax.toFixed(0)}]`);
-  const a0 = cruise.a0;
-  if (Math.abs(cruise.amin - a0) < 150 && Math.abs(cruise.amax - a0) < 150 &&
-      cruise.amin > 200 && cruise.amax < 1500 &&
+  // The craft DESCENDS to the low AGL clearance (well below the alt-250 spawn) and then holds a
+  // tight settled band there with steady speed — no free-fall to the floor, no escape to space.
+  if (cruise.aFinal < cruise.a0 - 100 &&
+      cruise.amin > 10 && cruise.amax < 250 &&
+      (cruise.amax - cruise.amin) < 30 &&
       cruise.smin > 100 && cruise.smax < 400) {
-    console.log('PASS: spawn cruise holds altitude + speed with no input (no free-fall, no escape)');
+    console.log('PASS: spawn cruise descends to the low AGL skim clearance and holds it (no free-fall, no escape)');
   } else {
-    fail(`spawn cruise did not hold: alt band [${cruise.amin.toFixed(0)},${cruise.amax.toFixed(0)}] ` +
-      `speed [${cruise.smin.toFixed(0)},${cruise.smax.toFixed(0)}]`, browser, server, logs);
+    fail(`spawn cruise did not settle to low AGL hold: final ${cruise.aFinal.toFixed(0)} settled band ` +
+      `[${cruise.amin.toFixed(0)},${cruise.amax.toFixed(0)}] speed [${cruise.smin.toFixed(0)},${cruise.smax.toFixed(0)}]`,
+      browser, server, logs);
   }
 
   // Pitch-down should descend; Shift+Space should climb out — quick sanity (fresh reloads).
   const maneuver = await page.evaluate(() => {
     const eng = window._eng;
     // Reset to spawn by reloading state is not exposed; instead measure deltas from current.
-    // Pitch nose DOWN (KeyW = pitch down → negative in input mapping is handled in input.js;
-    // here we feed the raw pitch arg: -1 = nose down) for 4 s.
+    // Pitch nose DOWN (raw pitch arg -1 = nose down). Since the craft now skims LOW (AGL hold
+    // ≈ 60 wu), a short pitch-down dive is enough; track the MINIMUM altitude reached (a long
+    // hold would loop the nose back up). Manual pitch overrides terrain-follow.
     const aStart = eng.altitude();
     eng.set_input(0, 0, 0, -1, 0, 0, 0, false);
-    for (let i = 0; i < 4 * 60; i++) eng.step(1 / 60);
-    const aDown = eng.altitude();
+    let aDown = aStart;
+    for (let i = 0; i < 1.5 * 60; i++) { eng.step(1 / 60); aDown = Math.min(aDown, eng.altitude()); }
     // Now Shift+Space: full thrust + afterburner, nose UP for 6 s.
     eng.set_input(1, 0, 0, 1, 0, 0, 0, true);
     for (let i = 0; i < 6 * 60; i++) eng.step(1 / 60);

@@ -142,19 +142,33 @@ const ALT_HOLD_RATE: f32 = 80.0;
 /// relief grows/relaxes with altitude the peak reference moves with it; TARGET_AGL is the
 /// clearance above THAT exaggerated terrain. At low cruise VE is near `VE_NEAR` (realistic),
 /// so the clearance reads as a stable height over the relief in view.
-const TARGET_AGL: f32 = 250.0;
+/// DEFAULT target height ABOVE GROUND (wu) the AGL controller holds in ATMO. This is now the
+/// clearance above the terrain DIRECTLY BELOW (contour-hugging), NOT above the peak ahead — so
+/// over a valley the craft descends WITH the valley floor instead of staying at the upcoming
+/// peak's height. Lowered substantially from the old 250 wu so the craft SKIMS close to the
+/// ground (≈ 60·M_PER_WU ≈ 64 km arcade-compressed; reads as hugging the relief). Runtime-tunable
+/// per craft via `Physics::target_agl` / `Engine::set_target_agl` (the `?agl=<meters>` URL param).
+pub const DEFAULT_TARGET_AGL: f32 = 60.0;
+/// Hard clamp on the runtime-settable target AGL (wu): a sane skim floor up to well within the
+/// ATMO band. Prevents a URL param from burying the craft in the ground or shoving it to space.
+pub const TARGET_AGL_MIN: f32 = 10.0;
+pub const TARGET_AGL_MAX: f32 = 1000.0;
 
 /// Look-ahead time (s): the forward ground-track window scales with speed,
 /// `LOOKAHEAD = clamp(speed·LOOKAHEAD_TIME, LOOKAHEAD_MIN, LOOKAHEAD_MAX)`. Faster ⇒ look
-/// farther ⇒ climb earlier (direct port of ArduPilot's ground-speed scaling).
+/// farther ⇒ react earlier (direct port of ArduPilot's ground-speed scaling). Now used ONLY for
+/// COLLISION AVOIDANCE (raising the target to clear an upcoming wall), not as the hold reference.
 const LOOKAHEAD_TIME: f32 = 3.0;
 /// Minimum / maximum look-ahead distance (wu) so the window is sane at a crawl and bounded at
 /// speed. MIN keeps a useful horizon when slow; MAX caps how far peaks can pre-trigger a climb.
 const LOOKAHEAD_MIN: f32 = 30.0;
 const LOOKAHEAD_MAX: f32 = 600.0;
-/// Number of samples along the forward ground track (plus the one directly below). The MAX over
-/// these (anti-smoothing) is the climb reference so a sharp ridge is not averaged away.
+/// Number of samples along the forward ground track (plus the one directly below). Each ahead
+/// sample is checked as a COLLISION THREAT (raise the target if we can't out-climb it in time).
 const AGL_SAMPLES: usize = 8;
+/// Extra clearance (wu) demanded above an upcoming terrain sample that would otherwise be hit —
+/// the collision-avoidance safety margin (cleared with a cushion, not scraped).
+const AGL_SAFETY_MARGIN: f32 = 30.0;
 
 /// AGL controller gain (s⁻¹). The fly-by-nose altitude-hold has near-full authority each step
 /// (it snaps the velocity's radial component onto the command in one frame), so the AGL command
@@ -273,6 +287,9 @@ pub struct Physics {
     pub velocity: Vec3,
     /// Scalar speed (wu/s) = |velocity|, cached for the HUD.
     pub speed: f32,
+    /// Target height above the terrain DIRECTLY BELOW (wu) the ATMO AGL controller holds.
+    /// Runtime-tunable (the `?agl=` URL param); defaults to `DEFAULT_TARGET_AGL`.
+    pub target_agl: f32,
 }
 
 impl Physics {
@@ -288,6 +305,7 @@ impl Physics {
             throttle: 0.0,
             velocity: fwd * speed,
             speed,
+            target_agl: DEFAULT_TARGET_AGL,
         }
     }
 
@@ -430,12 +448,16 @@ impl Physics {
                 // terrain-follow yields. Auto re-engages the instant pitch is released.
                 nose.dot(radial_out)
             } else if let Some(terr) = terrain {
-                // AGL TERRAIN-FOLLOWING (ATMO). Project velocity onto the local tangent plane to
-                // get the ground track, sample terrain radii along it out to a speed-scaled
-                // LOOKAHEAD, take the MAX (+ the terrain directly below) so we climb BEFORE a
-                // peak. A critically-damped radial controller holds desired_r = peak + TARGET_AGL.
-                // The whole command crossfades to the ORBIT level-hold (0) by orbit_w so there is
-                // no discontinuity at the ATMO/ORBIT boundary.
+                // AGL TERRAIN-FOLLOWING (ATMO). The hold reference is the terrain DIRECTLY BELOW
+                // plus the clearance (`target_agl`), so the craft HUGS THE CONTOUR — it descends
+                // into valleys instead of staying at an upcoming peak's height. The look-ahead is
+                // now COLLISION AVOIDANCE only: for each forward sample, the craft can climb at
+                // AGL_MAX_CLIMB and will reach the sample in `t = d/speed`, so to clear it it must
+                // already be at radius ≥ `terrain_ahead + safety − AGL_MAX_CLIMB·t` NOW. We take
+                // the MAX of the ground-below baseline and every sample's required-now radius, so
+                // rolling/valley terrain leaves the target at ground-below (descend with it) while
+                // a steep wall at speed RAISES the target in time to pull up. Crossfades to the
+                // ORBIT level-hold (0) by orbit_w (no discontinuity at the ATMO/ORBIT boundary).
                 let ground = self.velocity - radial_out * self.velocity.dot(radial_out);
                 let track = if ground.length_squared() > 1e-6 {
                     ground.normalize()
@@ -445,19 +467,25 @@ impl Physics {
                 };
                 let lookahead =
                     (speed * LOOKAHEAD_TIME).clamp(LOOKAHEAD_MIN, LOOKAHEAD_MAX);
-                // Terrain directly below, then the look-ahead samples; take the MAX radius.
+                // Baseline: hug the terrain directly below + the held clearance.
                 let (lat0, lon0) = crate::heightfield::Heightfield::lat_lon_of(self.position);
-                let mut peak = terr(lat0, lon0);
+                let terrain_below = terr(lat0, lon0);
+                let mut desired_r = terrain_below + self.target_agl;
+                // Collision avoidance: only RAISE the target where an upcoming sample can't be
+                // out-climbed in the time it takes to reach it.
                 if track != Vec3::ZERO {
                     for i in 1..=AGL_SAMPLES {
                         let d = lookahead * (i as f32 / AGL_SAMPLES as f32);
                         let probe = self.position + track * d;
                         let (lat, lon) =
                             crate::heightfield::Heightfield::lat_lon_of(probe);
-                        peak = peak.max(terr(lat, lon));
+                        let terrain_ahead = terr(lat, lon);
+                        let t = d / speed.max(1.0); // time to reach this sample
+                        let need_now =
+                            terrain_ahead + AGL_SAFETY_MARGIN - AGL_MAX_CLIMB * t;
+                        desired_r = desired_r.max(need_now);
                     }
                 }
-                let desired_r = peak + TARGET_AGL;
                 let err = desired_r - r_dist;
                 let climb = (AGL_K * err).clamp(-AGL_MAX_SINK, AGL_MAX_CLIMB);
                 // Convert the climb RATE (wu/s) to a radial direction fraction, then fade out by
@@ -586,6 +614,9 @@ impl Physics {
 mod scenarios {
     use super::*;
     use crate::heightfield::M_PER_WU;
+
+    // The default clearance the AGL controller holds (renamed from the old `TARGET_AGL`).
+    const TARGET_AGL: f32 = DEFAULT_TARGET_AGL;
 
     fn alt(p: &Physics) -> f32 {
         p.position.length() - R_WORLD
@@ -1168,76 +1199,180 @@ mod scenarios {
         assert!((amax - amin) < 0.05, "AGL bobbed on flat terrain: band [{amin},{amax}]");
     }
 
-    // (v) RISING terrain (mountain ahead): the craft CLIMBS BEFORE the peak (look-ahead
-    // max-window), clears it (AGL ≥ ~target over the crest, never clips), then glides gently
-    // DOWN after — damped, no overshoot still climbing.
+    // (v) COLLISION AVOIDANCE: facing a steep WALL at speed, the look-ahead RAISES the target in
+    // time so the craft climbs and clears the wall (does not crash through / below it), then
+    // glides back down to the contour clearance after the crest.
     #[test]
-    fn v_agl_ridge_climb_before_glide_after() {
+    fn v_agl_wall_collision_avoidance() {
         // A ridge centered at lon = LON_PEAK, half-width LON_HW, peak elevation PEAK_WU.
-        // elev(lon) = PEAK_WU * max(0, 1 - |lon - LON_PEAK|/LON_HW). The craft starts at lon 0
-        // heading into rising lon, so it approaches the ridge.
         const LON_PEAK: f32 = 12.0;
         const LON_HW: f32 = 9.0;
-        const PEAK_WU: f32 = 600.0; // tall ridge, well above the TARGET_AGL cruise clearance
+        const PEAK_WU: f32 = 600.0; // tall wall, well above the cruise clearance
         let terr = move |_lat: f32, lon: f32| {
             let t = (1.0 - (lon - LON_PEAK).abs() / LON_HW).max(0.0);
             R_WORLD + PEAK_WU * t
         };
         let mut p = level_craft(TARGET_AGL, 300.0, 0.6);
-        // Trace AGL + altitude as it approaches, crosses, and leaves the ridge.
         let dt = 1.0 / 60.0;
         let mut min_agl_over_ridge = f32::INFINITY;
-        let mut climbed_before_peak = false;
         let mut alt_at_peak = 0.0_f32;
         let mut alt_after = 0.0_f32;
         let a0 = p.position.length() - R_WORLD;
         let mut last_lon = 0.0_f32;
-        let mut prev_alt_before = a0;
         for _ in 0..(40.0 / dt) as usize {
             p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, Some(&terr));
             let (_lat, lon) = crate::heightfield::Heightfield::lat_lon_of(p.position);
             let alt = p.position.length() - R_WORLD;
             let agl = agl_below(&p, &terr);
-            // Did we start climbing while still well BEFORE the rising flank begins
-            // (lon < LON_PEAK - LON_HW)? i.e. anticipatory climb from look-ahead.
-            if lon < LON_PEAK - LON_HW && alt > prev_alt_before + 0.5 {
-                climbed_before_peak = true;
-            }
-            if lon < LON_PEAK - LON_HW {
-                prev_alt_before = alt;
-            }
-            // Over the ridge body, track the min clearance (must not clip the peak).
             if (lon - LON_PEAK).abs() < LON_HW {
                 min_agl_over_ridge = min_agl_over_ridge.min(agl);
             }
             if (lon - LON_PEAK).abs() < 0.3 {
                 alt_at_peak = alt;
             }
-            // Well past the ridge, record altitude (should have glided back down).
             if lon > LON_PEAK + LON_HW + 2.0 {
                 alt_after = alt;
             }
             if (lon - last_lon).abs() > 1.0 {
-                println!("[agl-ridge] lon={:.1}° alt={:.1} AGL={:.1} terr_below={:.1}",
+                println!("[agl-wall] lon={:.1}° alt={:.1} AGL={:.1} terr_below={:.1}",
                     lon, alt, agl, terr(0.0, lon) - R_WORLD);
                 last_lon = lon;
             }
         }
-        println!("[agl-ridge] climbed_before_peak={} min_AGL_over_ridge={:.2} (target {:.2}) alt@peak={:.1} alt_after={:.1} (start {:.1}, peak_terr {:.1})",
-            climbed_before_peak, min_agl_over_ridge, TARGET_AGL, alt_at_peak, alt_after, a0, PEAK_WU);
-        assert!(climbed_before_peak, "did not climb BEFORE the rising flank (look-ahead failed)");
-        // Essentially CLEARED the peak: clearance stays ≥ target everywhere except (at most) a
-        // sliver at the literal crest of this very steep wall, where the discrete terrain peak
-        // passes right under the fast tangential motion. The craft never plows into the
-        // mountain (min AGL stays well above a deep gouge), having climbed ~the full peak height.
+        println!("[agl-wall] min_AGL_over_wall={:.2} alt@peak={:.1} alt_after={:.1} (start {:.1}, peak_terr {:.1})",
+            min_agl_over_ridge, alt_at_peak, alt_after, a0, PEAK_WU);
+        // Climbed to clear the wall: never plowed substantially into it.
         assert!(min_agl_over_ridge > -PEAK_WU * 0.05,
-            "clipped substantially into the ridge: min AGL over it = {min_agl_over_ridge} (peak {PEAK_WU})");
-        // Climbed essentially the full peak height to clear it.
-        assert!(alt_at_peak > a0 + PEAK_WU * 0.95, "did not climb enough to clear the ridge: alt@peak={alt_at_peak}");
-        // Glided gently DOWN after the crest (did not keep climbing / overshoot upward).
+            "crashed into the wall: min AGL over it = {min_agl_over_ridge} (peak {PEAK_WU})");
+        // Climbed essentially the full wall height to clear the crest.
+        assert!(alt_at_peak > a0 + PEAK_WU * 0.9, "did not climb to clear the wall: alt@peak={alt_at_peak}");
+        // After the crest it descends back toward the contour clearance (not still climbing).
         assert!(alt_after < alt_at_peak - PEAK_WU * 0.4,
-            "did not descend after the crest (overshoot-still-climbing): alt@peak={alt_at_peak} alt_after={alt_after}");
-        assert!(alt_after > a0 - 50.0, "overshot DOWN past the start altitude: alt_after={alt_after}");
+            "did not descend after the wall: alt@peak={alt_at_peak} alt_after={alt_after}");
+        assert!(alt_after < a0 + 50.0, "did not return to the low contour clearance: alt_after={alt_after}");
+    }
+
+    // (v2) VALLEY HUG: over a profile that RISES (hill) then FALLS (valley), the craft descends
+    // INTO the valley tracking the floor + clearance — reaching a LOWER altitude over the valley
+    // than the old peak-window behavior (which stayed at the hill's height). Asserts the
+    // valley-floor clearance settles ≈ TARGET_AGL.
+    #[test]
+    fn v2_agl_valley_hug() {
+        // A broad gentle hill then a return to sea level (the "valley" floor). Half-widths are
+        // wide so slopes are shallow enough that collision-avoidance never kicks in — the craft
+        // simply hugs the contour up and back down.
+        const LON_HILL: f32 = 10.0;
+        const LON_HW: f32 = 8.0;
+        const HILL_WU: f32 = 200.0;
+        let terr = move |_lat: f32, lon: f32| {
+            let t = (1.0 - (lon - LON_HILL).abs() / LON_HW).max(0.0);
+            R_WORLD + HILL_WU * t
+        };
+        let mut p = level_craft(TARGET_AGL, 150.0, 0.5);
+        let dt = 1.0 / 60.0;
+        let mut alt_at_hill = 0.0_f32;
+        let mut valley_floor_agl = f32::INFINITY;
+        let mut alt_in_valley = f32::INFINITY;
+        let mut last_lon = 0.0_f32;
+        for _ in 0..(60.0 / dt) as usize {
+            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, Some(&terr));
+            let (_lat, lon) = crate::heightfield::Heightfield::lat_lon_of(p.position);
+            let alt = p.position.length() - R_WORLD;
+            let agl = agl_below(&p, &terr);
+            if (lon - LON_HILL).abs() < 0.3 {
+                alt_at_hill = alt;
+            }
+            // The valley floor: well PAST the hill (back to sea level).
+            if lon > LON_HILL + LON_HW + 4.0 {
+                valley_floor_agl = valley_floor_agl.min(agl);
+                alt_in_valley = alt_in_valley.min(alt);
+            }
+            if (lon - last_lon).abs() > 2.0 {
+                println!("[agl-valley] lon={:.1}° alt={:.1} AGL={:.1} terr_below={:.1}",
+                    lon, alt, agl, terr(0.0, lon) - R_WORLD);
+                last_lon = lon;
+            }
+        }
+        println!("[agl-valley] alt@hill={:.1} (hill_terr {:.0}) valley_floor_AGL={:.2} alt_in_valley={:.1} (target {:.2})",
+            alt_at_hill, HILL_WU, valley_floor_agl, alt_in_valley, TARGET_AGL);
+        // Climbed with the hill...
+        assert!(alt_at_hill > TARGET_AGL + HILL_WU * 0.8, "did not hug up the hill: alt@hill={alt_at_hill}");
+        // ...then DESCENDED into the valley far below the hill's height (the new contour-hug).
+        assert!(alt_in_valley < alt_at_hill - HILL_WU * 0.6,
+            "did not descend into the valley (stayed at peak height): valley alt {alt_in_valley} vs hill {alt_at_hill}");
+        // Valley-floor clearance settles ≈ TARGET_AGL.
+        assert!((valley_floor_agl - TARGET_AGL).abs() < TARGET_AGL * 0.5,
+            "valley-floor clearance not ≈ TARGET_AGL: {valley_floor_agl} vs {TARGET_AGL}");
+    }
+
+    // (v3) LOW SKIM via set_target_agl: a SMALL clearance over rolling terrain holds a tight
+    // band without bobbing.
+    #[test]
+    fn v3_agl_low_skim() {
+        const AMP: f32 = 6.0;
+        let terr = |_lat: f32, lon: f32| {
+            R_WORLD + AMP * (0.5 + 0.5 * (lon.to_radians() * 3.0).sin())
+        };
+        const SKIM: f32 = 25.0; // tight low clearance
+        let mut p = level_craft(SKIM, 200.0, 0.5);
+        p.target_agl = SKIM;
+        run_terr(&mut p, 12.0, 0.0, 0.0, &terr); // settle
+        let dt = 1.0 / 60.0;
+        let (mut amin, mut amax) = (f32::INFINITY, 0.0_f32);
+        for s in 0..(25.0 / dt) as usize {
+            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, Some(&terr));
+            let a = agl_below(&p, &terr);
+            amin = amin.min(a);
+            amax = amax.max(a);
+            if s % 600 == 0 {
+                println!("[agl-skim] t={:.0}s AGL={:.1}", s as f32 * dt, a);
+            }
+        }
+        println!("[agl-skim] target={:.0} AGL band [{:.2},{:.2}] span={:.2}", SKIM, amin, amax, amax - amin);
+        assert!(amin > 0.0, "skim dropped to/through the ground: min {amin}");
+        assert!((amin - SKIM).abs() < SKIM && (amax - SKIM).abs() < SKIM,
+            "skim clearance not tight near target: band [{amin},{amax}] target {SKIM}");
+        assert!((amax - amin) < SKIM, "skim bobbed: band [{amin},{amax}]");
+    }
+
+    // (v4) Combined HILL → VALLEY → WALL trace: prints the AGL + altitude trace, proving the
+    // craft descends into the valley yet climbs to clear the wall.
+    #[test]
+    fn v4_agl_hill_valley_wall_trace() {
+        // hill at lon 8 (gentle, 150 wu), valley (sea level) lon ~16-26, steep wall at lon 32.
+        let terr = |_lat: f32, lon: f32| {
+            let hill = (1.0 - (lon - 8.0).abs() / 6.0).max(0.0) * 150.0;
+            let wall = (1.0 - (lon - 32.0).abs() / 4.0).max(0.0) * 500.0;
+            R_WORLD + hill.max(wall)
+        };
+        let mut p = level_craft(TARGET_AGL, 250.0, 0.55);
+        let dt = 1.0 / 60.0;
+        let mut last_lon = -10.0_f32;
+        let mut min_agl_at_wall = f32::INFINITY;
+        let mut min_alt_in_valley = f32::INFINITY;
+        for _ in 0..(60.0 / dt) as usize {
+            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, Some(&terr));
+            let (_lat, lon) = crate::heightfield::Heightfield::lat_lon_of(p.position);
+            let alt = p.position.length() - R_WORLD;
+            let agl = agl_below(&p, &terr);
+            if (16.0..26.0).contains(&lon) {
+                min_alt_in_valley = min_alt_in_valley.min(alt);
+            }
+            if (lon - 32.0).abs() < 4.0 {
+                min_agl_at_wall = min_agl_at_wall.min(agl);
+            }
+            if lon - last_lon >= 2.0 {
+                println!("[agl-hvw] lon={:.1}° terr={:.0} alt={:.1} AGL={:.1}",
+                    lon, terr(0.0, lon) - R_WORLD, alt, agl);
+                last_lon = lon;
+            }
+        }
+        println!("[agl-hvw] min_alt_in_valley={:.1} min_AGL_at_wall={:.2}", min_alt_in_valley, min_agl_at_wall);
+        // Descended into the valley (low altitude, near TARGET_AGL above sea level).
+        assert!(min_alt_in_valley < TARGET_AGL + 60.0,
+            "did not descend into the valley: min alt {min_alt_in_valley}");
+        // Cleared the wall (did not plow through).
+        assert!(min_agl_at_wall > -500.0 * 0.05, "crashed into the wall: min AGL {min_agl_at_wall}");
     }
 
     // (w) ROLLING terrain: no bob/oscillation (critical damping). Sinusoidal gentle hills →

@@ -11,8 +11,9 @@ flips at a boundary; the physics is continuous — no discrete switch, no NaN):
   (∝ density·v²) makes the top speed asymptotic and bleeds speed to idle in ~2–3 s when you cut
   throttle (the "dense, hard to leave" feel). The craft flies where its nose points; a level
   nose holds altitude, pitch climbs/dives, below `STALL_SPEED` the wings give up. Hands-off the
-  nose auto-levels. Hands-off, **AGL terrain-following** holds a fixed clearance above the
-  terrain (see "AGL terrain-following" below); manual pitch overrides it.
+  nose auto-levels. Hands-off, **AGL terrain-following** holds a small clearance above the
+  terrain DIRECTLY BELOW (hugs the contour, dips into valleys) while still climbing to clear
+  upcoming walls (see "AGL terrain-following" below); manual pitch overrides it.
 - **ORBIT** (`alt ~ATMOSPHERE_TOP .. ORBIT_TOP = 12000` wu) — faster, thin air (low drag),
   speed envelope `ORBIT_IDLE 1000 .. ORBIT_CAP 3000`. A **gentle critically-damped altitude
   hold** (`ORBIT_HOLD_RATE`, crossfaded down from the stiff ATMO hold) curves the velocity to
@@ -116,21 +117,29 @@ The same fly-by-nose term serves both ATMO and ORBIT; per-mode behavior crossfad
 ## AGL terrain-following (ATMO)
 
 Hands-off in ATMO, the altitude-hold's commanded radial is set by an **above-ground-level (AGL)
-terrain-following** controller — the craft holds a fixed clearance above the terrain instead of a
-fixed sea-level altitude, climbing **before** peaks (look-ahead) and gliding gently down after.
+terrain-following** controller — the craft holds a small clearance above the terrain **directly
+below** (it HUGS THE CONTOUR: it descends into valleys with the floor, not stuck at the upcoming
+peak's height), while still climbing in time to clear an upcoming steep wall (collision
+avoidance).
 
 Per step (only when the pilot is NOT pitching; manual pitch overrides and terrain-follow yields,
 re-engaging the instant pitch is released):
 
 1. **Ground track**: project velocity onto the local tangent plane → the forward ground track.
-2. **Look-ahead max-window**: sample `AGL_SAMPLES = 8` terrain radii evenly along the track out
-   to `LOOKAHEAD = clamp(speed·LOOKAHEAD_TIME, LOOKAHEAD_MIN, LOOKAHEAD_MAX)`, PLUS the terrain
-   directly below, and take the **MAX** radius (`peak`). The max (not a mean) means a sharp ridge
-   is never smoothed away, and looking ahead makes the craft **climb before the peak**, not after
-   — fixing the documented "overshoot-the-crest-still-climbing" failure of a naive
-   match-terrain-below controller. The window scales with speed (faster ⇒ look farther).
-3. **Critically-damped radial controller**: `desired_r = peak + TARGET_AGL`,
-   `err = desired_r − |pos|`, `climb = clamp(AGL_K · err, −AGL_MAX_SINK, AGL_MAX_CLIMB)`. Because
+2. **Hold reference = ground below.** Sample the terrain radius DIRECTLY BELOW (`terrain_below`)
+   and set the baseline `desired_r = terrain_below + target_agl`. So over a valley the target
+   drops with the valley floor (contour hug), instead of staying at the peak ahead.
+3. **Look-ahead = collision avoidance only.** Sample `AGL_SAMPLES = 8` terrain radii evenly along
+   the track out to `LOOKAHEAD = clamp(speed·LOOKAHEAD_TIME, LOOKAHEAD_MIN, LOOKAHEAD_MAX)`. For
+   each ahead sample at distance `d`, the time to reach it is `t = d/speed`; climbing at most
+   `AGL_MAX_CLIMB` the craft must ALREADY be at radius ≥ `terrain_ahead + AGL_SAFETY_MARGIN −
+   AGL_MAX_CLIMB·t` now to clear it. The target is `desired_r = max(ground-below baseline,
+   max_i(required-now_i))`. So rolling/valley terrain (low ahead samples) leaves the target at
+   ground-below (you descend with it), while a steep wall at speed RAISES the target early enough
+   to pull up — replacing the old peak-max-window (which kept you at peak height over valleys).
+   The window scales with speed (faster ⇒ react earlier).
+4. **Critically-damped radial controller**: `err = desired_r − |pos|`,
+   `climb = clamp(AGL_K · err, −AGL_MAX_SINK, AGL_MAX_CLIMB)`. Because
    the fly-by-nose altitude-hold has near-full authority each step (it snaps the velocity's radial
    component onto the command in one frame), the AGL command is effectively a **velocity** command,
    so a first-order proportional command (`AGL_K · err`) is **inherently critically damped** — it
@@ -139,7 +148,7 @@ re-engaging the instant pitch is released):
    command — would instead *destabilise* this one-frame velocity command, so it's folded into the
    first-order response. The rate clamp is asymmetric (climbs harder than it sinks) so it clears
    rising terrain crisply and glides down gently after a crest.
-4. **Feed the seam**: `commanded_radial = clamp(climb/max(speed,1), −1, 1) · (1 − orbit_w)`. The
+5. **Feed the seam**: `commanded_radial = clamp(climb/max(speed,1), −1, 1) · (1 − orbit_w)`. The
    `(1 − orbit_w)` crossfade fades terrain-follow out across the ATMO/ORBIT boundary into the
    ORBIT level near-circular hold — no discontinuity.
 
@@ -148,20 +157,24 @@ re-engaging the instant pitch is released):
 exaggeration `ve = ve_for_altitude(altitude)` the renderer draws (or the exaggeration override if
 set), so "hold `TARGET_AGL` above ground" matches what the player SEES.
 
-**Scale note on `TARGET_AGL`.** At the horizontal scale `M_PER_WU ≈ 1061.8 m/wu`, a literal 500 m
-is only ≈ 0.47 wu — sub-world-unit, basically on the surface. But ATMO is arcade-compressed
-(`ATMOSPHERE_TOP = 1500 wu`, spawn cruise `CRUISE_ALT = 250 wu`), so we hold the established
-arcade cruise clearance `TARGET_AGL = 250 wu` (the spawn framing/FOV were tuned around it).
+**Low, tunable clearance.** The default clearance is `DEFAULT_TARGET_AGL = 60 wu` — substantially
+lower than the old 250 wu so the craft SKIMS close to the ground and hugs the relief. It is
+runtime-tunable per craft via `Physics::target_agl` / `Engine::set_target_agl(agl_wu)`, clamped to
+`[TARGET_AGL_MIN = 10, TARGET_AGL_MAX = 1000]` wu. The web layer exposes it as the **`?agl=<meters>`
+URL param** (meters → wu via `M_PER_WU`, then clamped). No param → the default. `set_spawn`
+preserves a runtime-set value across respawns.
 
 **HUD-AGL**: `Engine::agl_m()` = `(|pos| − terrain_radius_below) · M_PER_WU` (clamped ≥ 0, same
 `ve`), shown in the web HUD as `AGL nnnm` in ATMO alongside `ALT`. Over ocean (terrain 0) AGL == ALT.
 
 | Constant | Value | Notes |
 |---|---|---|
-| `TARGET_AGL` | 250 wu | held clearance above the (rendered) terrain in ATMO |
-| `LOOKAHEAD_TIME` | 3 s | forward window = `clamp(speed·time, min, max)` |
+| `DEFAULT_TARGET_AGL` | 60 wu | default clearance above the terrain DIRECTLY BELOW (contour hug); runtime-tunable |
+| `TARGET_AGL_MIN` / `MAX` | 10 / 1000 wu | clamp on the runtime-settable target AGL (`set_target_agl` / `?agl=`) |
+| `LOOKAHEAD_TIME` | 3 s | forward window = `clamp(speed·time, min, max)` (collision avoidance) |
 | `LOOKAHEAD_MIN` / `MAX` | 30 / 600 wu | look-ahead distance clamp |
-| `AGL_SAMPLES` | 8 | samples along the track (MAX-windowed) + the one directly below |
+| `AGL_SAMPLES` | 8 | collision-avoidance samples along the forward track |
+| `AGL_SAFETY_MARGIN` | 30 wu | extra clearance demanded above an upcoming wall |
 | `AGL_K` | 4.0 s⁻¹ | first-order velocity-command gain (inherently critically damped) |
 | `AGL_MAX_CLIMB` / `SINK` | 200 / 50 wu/s | asymmetric climb/sink rate clamp (climb-fast, glide-gentle) |
 
@@ -265,8 +278,12 @@ ratio ≈ 1:7.5:25) · `p` ATMO drag bleed (full throttle then cut → ~idle in 
 easy escape (nose out + afterburner → climbs past `ORBIT_TOP`) · `s` smooth transitions (sweep
 altitude → `eff_cap`/`density`/`orbit_blend` continuous, bounded per-sample delta, no NaN) · `t`
 banking (a roll induces a heading change — coordinated turn) · `u` AGL flat (hands-off holds
-~`TARGET_AGL` steady over flat terrain, no bob) · `v` AGL ridge (climbs BEFORE a tall peak via the
-look-ahead max-window, essentially clears it, then glides gently DOWN after the crest — no
-overshoot-still-climbing) · `w` AGL rolling (gentle hills → bounded clearance, no growing
-bob/ringing — critical damping) · `x` AGL manual override (pitch-up climbs ABOVE the follow
-altitude; releasing re-engages terrain-follow back toward `TARGET_AGL`).
+~`DEFAULT_TARGET_AGL` steady over flat terrain, no bob) · `v` AGL wall collision-avoidance (climbs
+in time to clear a steep wall, then glides back to the low contour clearance) · `v2` AGL valley hug
+(hill→valley: descends INTO the valley tracking the floor + clearance, reaching a LOWER altitude
+than peak-window would; valley-floor clearance ≈ `DEFAULT_TARGET_AGL`) · `v3` AGL low skim
+(`set_target_agl` to a small clearance → tight band over rolling terrain, no bob) · `v4` AGL
+hill→valley→wall trace (descends into the valley yet clears the wall) · `w` AGL rolling (gentle
+hills → bounded clearance, no growing bob/ringing — critical damping) · `x` AGL manual override
+(pitch-up climbs ABOVE the follow altitude; releasing re-engages terrain-follow back toward
+`DEFAULT_TARGET_AGL`).

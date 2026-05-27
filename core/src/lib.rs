@@ -165,7 +165,9 @@ impl Engine {
     pub fn set_spawn(&mut self, lat_deg: f32, lon_deg: f32, alt_wu: f32, heading_deg: f32) {
         let pos = Heightfield::sphere_point(lat_deg, lon_deg, alt_wu);
         let (fwd, up) = spawn_basis_at(pos, heading_deg);
+        let prev_target_agl = self.phys.target_agl;
         let mut phys = Physics::new(pos, fwd);
+        phys.target_agl = prev_target_agl; // preserve a runtime-set AGL across respawns
         // LEVEL orientation from the radial basis, forward velocity at cruise speed, and the
         // seeded throttle that balances drag so speed + altitude hold without input.
         let view = Mat4::look_to_rh(Vec3::ZERO, fwd, up);
@@ -194,6 +196,15 @@ impl Engine {
     /// behavior.
     pub fn clear_exaggeration_override(&mut self) {
         self.ve_override = None;
+    }
+
+    /// Set the ATMO AGL terrain-following clearance (world units above the terrain DIRECTLY
+    /// BELOW). Clamped to `[TARGET_AGL_MIN, TARGET_AGL_MAX]`. Lower = skims closer to the ground
+    /// (hugs the contour); the craft still climbs to clear upcoming walls (collision avoidance).
+    /// Driven by the web `?agl=<meters>` URL param (meters → wu via `M_PER_WU`).
+    pub fn set_target_agl(&mut self, agl_wu: f32) {
+        self.phys.target_agl =
+            agl_wu.clamp(physics::TARGET_AGL_MIN, physics::TARGET_AGL_MAX);
     }
 
     #[allow(clippy::too_many_arguments)]
