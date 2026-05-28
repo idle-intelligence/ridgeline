@@ -78,15 +78,93 @@ fn chase_cam_pos(phys: &Physics) -> Vec3 {
     phys.position + cam_offset
 }
 
+/// Altitude above the sea-level sphere (wu) at which the camera framing has fully
+/// crossfaded from the ATMO forward-chase to the orbital look-down. Tied to the physics
+/// ATMOSPHERE_TOP (1500 wu) so the framing reframes exactly as the craft enters ORBIT.
+const ORBIT_FRAME_TOP: f32 = physics::ATMOSPHERE_TOP;
+/// Altitude (wu) where the orbital framing begins to blend in (half the band) — a smooth
+/// crossfade, no hard snap.
+const ORBIT_FRAME_BOT: f32 = ORBIT_FRAME_TOP * 0.5;
+
+/// Smooth orbit framing weight ∈ [0,1] from camera altitude (wu): 0 in ATMO (forward chase),
+/// ramping to 1 by ORBIT_FRAME_TOP (look-down framing). Smoothstep so there's no snap.
+#[inline]
+fn orbit_frame_weight(alt_wu: f32) -> f32 {
+    let t = ((alt_wu - ORBIT_FRAME_BOT) / (ORBIT_FRAME_TOP - ORBIT_FRAME_BOT)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// The camera LOOK basis (forward, up) for this frame, BEFORE the freelook offset. Blends the
+/// ATMO forward-chase (look along ship-forward) into the orbital look-DOWN framing by the
+/// altitude-driven `orbit_frame_weight`:
+///   * ATMO (w=0): forward = ship-forward, up = ship-up — the existing chase framing.
+///   * ORBIT/INTERPLANETARY (w→1): forward tilts toward the planet center (down the gravity
+///     axis) but kept slightly off nadir toward the ship-forward tangent, so the VESSEL sits
+///     HIGH in the frame and a big piece of Earth fills the lower view. up = the gravity-radial
+///     (away from center), so "up" on screen is away from the planet.
+///
+/// Returns NORMALIZED (forward, up). The same forward drives both the view matrix and the
+/// geometry sight-cull (so the look-down hemisphere is actually generated, never culled away).
+fn cam_look_basis(phys: &Physics) -> (Vec3, Vec3) {
+    let cam_pos = chase_cam_pos(phys);
+    let ship_fwd = (phys.orientation * Vec3::NEG_Z).normalize_or_zero();
+    let ship_up = (phys.orientation * Vec3::Y).normalize_or_zero();
+
+    let alt = (cam_pos.length() - R_WORLD).max(0.0);
+    let w = orbit_frame_weight(alt);
+    if w <= 0.0 {
+        return (ship_fwd, ship_up);
+    }
+
+    // Orbital framing. Nadir = straight toward the globe center.
+    let radial = cam_pos.normalize_or_zero(); // away from center
+    let nadir = -radial;
+    // Keep the look slightly OFF pure nadir, tilted toward the ship-forward tangent, so the
+    // vessel (ahead of + above the look ray) rides near the TOP of the frame and Earth fills
+    // below. Project ship_fwd onto the tangent plane (remove the radial component).
+    let tangent = (ship_fwd - radial * ship_fwd.dot(radial)).normalize_or_zero();
+    // Tilt slightly off pure nadir toward the forward tangent so the planet's disc center
+    // drops into the LOWER frame (a big piece of Earth fills the lower view) while the VESSEL
+    // rides HIGH near the top — but not so far that the planet falls off the bottom. ~17° off
+    // nadir keeps the disc center in the lower frame with the curved terrain limb in view
+    // (relief reads in silhouette at the limb) and the vessel riding high above it.
+    const OFF_NADIR: f32 = 0.30; // radians ≈ 17°
+    let orbit_fwd = (nadir * OFF_NADIR.cos() + tangent * OFF_NADIR.sin()).normalize_or_zero();
+    // Screen-up = radial (away from the planet), so the globe sits low and "up" is space.
+    let orbit_up = radial;
+
+    // Crossfade ATMO → orbital. Slerp-ish via normalized lerp (the angle is modest and this
+    // stays continuous), then re-orthonormalize the up against the blended forward.
+    let fwd = (ship_fwd.lerp(orbit_fwd, w)).normalize_or_zero();
+    let up_raw = ship_up.lerp(orbit_up, w);
+    // Gram–Schmidt: make up perpendicular to fwd.
+    let up = (up_raw - fwd * up_raw.dot(fwd)).normalize_or_zero();
+    let up = if up.length_squared() < 1e-6 { orbit_up } else { up };
+    (fwd, up)
+}
+
+/// Freelook-aware camera forward (world space) for this frame — the SAME direction the
+/// geometry frustum/sight-cull uses (see `step`) and the view matrix uses. Applies the
+/// orbital look-down framing (`cam_look_basis`) then the freelook offset on top.
+fn cam_forward_dir(phys: &Physics, look_yaw: f32, look_pitch: f32) -> Vec3 {
+    let (fwd, up) = cam_look_basis(phys);
+    let right = fwd.cross(up).normalize_or_zero();
+    // Freelook offset relative to the (possibly reframed) look basis: positive d_yaw = right,
+    // positive d_pitch = up. Build the rotation in the look frame, not the ship frame, so
+    // freelook still works after the orbital reframe.
+    let look = Quat::from_axis_angle(up, -look_yaw) * Quat::from_axis_angle(right, look_pitch);
+    (look * fwd).normalize_or_zero()
+}
+
 fn compute_view_proj(phys: &Physics, look_yaw: f32, look_pitch: f32, aspect: f32) -> [f32; 16] {
     let cam_pos = chase_cam_pos(phys);
-    // Negate look_yaw: Mat4::look_to_rh's basis makes from_rotation_y(+yaw) turn the view
-    // LEFT, but set_look's contract is "positive d_yaw = look RIGHT". Flip here so a positive
-    // d_yaw rotates the view right (world slides left), consistently for mouse + touch.
-    let look_offset = Quat::from_rotation_y(-look_yaw) * Quat::from_rotation_x(look_pitch);
-    let cam_orient = phys.orientation * look_offset;
-    let fwd = cam_orient * Vec3::NEG_Z;
-    let up = cam_orient * Vec3::Y;
+    let (base_fwd, base_up) = cam_look_basis(phys);
+    let right = base_fwd.cross(base_up).normalize_or_zero();
+    // Freelook in the look basis. Negate look_yaw so positive d_yaw rotates the view RIGHT
+    // (world slides left) — matching set_look's contract, consistently for mouse + touch.
+    let look = Quat::from_axis_angle(base_up, -look_yaw) * Quat::from_axis_angle(right, look_pitch);
+    let fwd = (look * base_fwd).normalize_or_zero();
+    let up = (look * base_up).normalize_or_zero();
     let view = Mat4::look_to_rh(cam_pos, fwd, up);
     let proj = Mat4::perspective_rh(FOV_Y_RAD, aspect, Z_NEAR, Z_FAR);
     (proj * view).to_cols_array()
@@ -185,7 +263,7 @@ impl Engine {
         self.look_pitch = 0.0;
 
         let cam_pos = chase_cam_pos(&self.phys);
-        let cam_fwd = self.phys.orientation * Vec3::NEG_Z;
+        let cam_fwd = cam_forward_dir(&self.phys, 0.0, 0.0);
         geometry::generate_into(&mut self.geom, &self.hf, cam_pos, cam_fwd, self.ve_override);
         self.view_proj_mat = compute_view_proj(&self.phys, 0.0, 0.0, self.aspect);
     }
@@ -261,11 +339,10 @@ impl Engine {
 
         let cam_pos = chase_cam_pos(&self.phys);
         // cam_fwd IS used by the geometry frustum/sight cull, so it MUST match the view's
-        // look direction in compute_view_proj (note the negated look_yaw) — otherwise
-        // freelooking sideways clips terrain on the side you turn toward.
-        let look_offset =
-            Quat::from_rotation_y(-self.look_yaw) * Quat::from_rotation_x(self.look_pitch);
-        let cam_fwd = (self.phys.orientation * look_offset) * Vec3::NEG_Z;
+        // look direction in compute_view_proj — including the ORBITAL look-down reframe and
+        // the freelook offset — otherwise the hemisphere we now look at gets culled away
+        // (missing terrain) or freelooking sideways clips terrain on the side you turn toward.
+        let cam_fwd = cam_forward_dir(&self.phys, self.look_yaw, self.look_pitch);
         geometry::generate_into(&mut self.geom, &self.hf, cam_pos, cam_fwd, self.ve_override);
         self.view_proj_mat =
             compute_view_proj(&self.phys, self.look_yaw, self.look_pitch, self.aspect);
@@ -282,7 +359,7 @@ impl Engine {
         self.look_yaw = 0.0;
         self.look_pitch = 0.0;
         let cam_pos = chase_cam_pos(&self.phys);
-        let cam_fwd = self.phys.orientation * Vec3::NEG_Z;
+        let cam_fwd = cam_forward_dir(&self.phys, 0.0, 0.0);
         geometry::generate_into(&mut self.geom, &self.hf, cam_pos, cam_fwd, self.ve_override);
         self.view_proj_mat = compute_view_proj(&self.phys, 0.0, 0.0, self.aspect);
     }
@@ -305,7 +382,7 @@ impl Engine {
         self.look_yaw = 0.0;
         self.look_pitch = 0.0;
         let cam_pos = chase_cam_pos(&self.phys);
-        let cam_fwd = self.phys.orientation * Vec3::NEG_Z;
+        let cam_fwd = cam_forward_dir(&self.phys, 0.0, 0.0);
         geometry::generate_into(&mut self.geom, &self.hf, cam_pos, cam_fwd, self.ve_override);
         self.view_proj_mat = compute_view_proj(&self.phys, 0.0, 0.0, self.aspect);
     }
@@ -333,9 +410,7 @@ impl Engine {
     /// frustum/sight cull uses this frame (see `step`). Additive getter for the WebGPU
     /// compute prototype, which ports the cull math to WGSL. WebGL2 path does not use this.
     pub fn cam_forward(&self) -> Float32Array {
-        let look_offset =
-            Quat::from_rotation_y(-self.look_yaw) * Quat::from_rotation_x(self.look_pitch);
-        let fwd = ((self.phys.orientation * look_offset) * Vec3::NEG_Z).normalize_or_zero();
+        let fwd = cam_forward_dir(&self.phys, self.look_yaw, self.look_pitch).normalize_or_zero();
         let arr = Float32Array::new_with_length(3);
         arr.copy_from(&[fwd.x, fwd.y, fwd.z]);
         arr

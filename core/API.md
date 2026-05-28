@@ -20,11 +20,12 @@ cell (row → latitude φ, col → longitude λ, elev_m) maps to a 3D point on a
   are scaled per-frame by `VE(altitude)` so the planet is dramatic from space and relaxes
   toward realistic on approach (engineering apparent-size constancy: apparent height ∝
   rendered_height/distance ∝ VE/altitude ≈ const through the ramp):
-  `VE(alt) = clamp(VE_K · altitude_wu, VE_NEAR, VE_FAR)` with **VE_NEAR = 1.0**,
-  **VE_FAR = 8.0**, **VE_K = 0.0007**, `altitude_wu = max(|cam_pos| − R_WORLD, 0)`. The ramp
-  leaves the near clamp at ~1429 wu and saturates at the 8× cap by ~11429 wu. Low cruise
-  (~500 wu) renders ~1× (realistic), mid altitudes ramp through ~2–6×, space caps at 8×.
-  Measured: alt 472 wu → VE 1.00, alt 4972 wu → VE 3.48, alt 11972 wu → VE 8.00.
+  `VE(alt) = clamp(VE_K · altitude_wu, VE_NEAR, VE_FAR)` with **VE_NEAR = 2.75**,
+  **VE_FAR = 14.0**, **VE_K = 0.0007**, `altitude_wu = max(|cam_pos| − R_WORLD, 0)`. The ramp
+  leaves the near clamp at ~3929 wu and saturates at the 14× cap by 20000 wu. Low cruise sits
+  at the realistic floor (2.75×), mid altitudes ramp through ~3–10×, and from orbit/space the
+  relief pops hard at the 14× cap ("scale more when far"). VE_FAR was raised 8 → 14 so terrain
+  relief reads dramatically from orbit; only the FAR end moved, so the ATMO look is unchanged.
   This is a single smooth global radial multiplier per frame, so nothing swims (lat/lon grid
   indices and distance-based LOD strides are unchanged). Only the rendered TERRAIN relief
   scales; the OCCLUDER sphere stays at R_WORLD, and camera/physics/floor and all HUD/altitude/
@@ -114,9 +115,22 @@ Mouse drives freelook only (`set_look`); flight controls are keyboard-only.
 ## Camera (third-person chase, free 3D around the globe)
 The camera is positioned behind and above the ship in ship-local space:
 `cam_pos = ship_pos + ship_orientation * (0, CHASE_UP=6, CHASE_BACK=28)`.
-View direction = ship orientation + freelook offset (`set_look`). Flight physics
-(`phys.position`, `phys.orientation`) are the **ship** transform; the camera
+Flight physics (`phys.position`, `phys.orientation`) are the **ship** transform; the camera
 offset is view-only.
+
+**Look framing — ATMO forward-chase ↔ ORBITAL look-down (altitude crossfade).** The camera
+LOOK direction blends by an altitude-driven `orbit_frame_weight` (smoothstep over
+`ORBIT_FRAME_BOT = ATMOSPHERE_TOP·0.5 = 750` → `ORBIT_FRAME_TOP = ATMOSPHERE_TOP = 1500` wu,
+so it reframes exactly as the craft enters ORBIT — no hard snap):
+- **ATMO (w = 0):** look along **ship-forward**, up = ship-up — the existing forward chase.
+- **ORBIT / INTERPLANETARY (w → 1):** look **toward the planet** — down the gravity axis
+  (toward globe center), tilted **~17° off nadir** toward the ship-forward tangent so the
+  **vessel rides HIGH** in the frame and **a big piece of Earth fills the lower view**;
+  screen-up = the gravity-radial (away from center, so "up" is space).
+The freelook offset (`set_look`) is applied **on top** of this blended basis (yaw about the
+look-up axis, pitch about the look-right axis). **CRITICAL:** the geometry sight-cull uses the
+SAME blended + freelook-aware forward (`cam_forward_dir`), so the hemisphere the orbital
+look-down now frames is actually generated — no culled-away planet / missing terrain.
 
 **Spawn**: ship cruising LEVEL inside the atmosphere at `CRUISE_ALT = 250` wu over the
 western/central Mediterranean (38°N, 8°E), heading NORTH toward Europe. (Configurable at
@@ -172,9 +186,11 @@ latitude rings** (line). Depth test (not painter's order) resolves occlusion, so
 within a channel does not matter; back-to-front is no longer required.
 
 **FILL channel — dark occluder sphere.** A coarse lat/lon tessellation of the visible
-hemisphere at radius `R_WORLD * 0.999` (slightly below sea level so it never z-fights the
-h=0 ocean rings). Drawn in the dark background fill color, it hides the far side of the globe
-via the depth test.
+hemisphere at radius `R_WORLD * 0.985` (~88 wu below sea level). Set well below sea level so
+it never z-fights the h=0 ocean rings AND — at ORBITAL distance, where the depth buffer
+(Z_NEAR 1, Z_FAR 200000) has almost no resolution — the dark dome can never depth-win over the
+bright terrain rings and flatten the orbit globe into a featureless disc. Drawn in the dark
+background fill color, it hides the far side of the globe via the depth test.
 - `eng.fill_vertices()` → `Float32Array`, packed `[x,y,z, ...]`. One TRIANGLE_STRIP per
   occluder latitude band (alternating lat_a / lat_b vertices along longitude).
 - `eng.fill_draws()` → `Uint32Array`, flat pairs `[start,count, ...]`. JS issues
@@ -233,12 +249,19 @@ The `init()` default export's return value carries `.memory`; `web/main.js` pass
 back to the legacy copying getters (`fill_vertices()` etc.) + per-strip `drawArrays`. Both the
 copying getters and the new ptr/len + index getters are present.
 
-**LOD + culling.** Index-anchored, power-of-two strides chosen by camera altitude (distance
-to the surface): far → coarse rings/longitude (cheap whole globe), close → fine. Because the
-same stride set is applied globe-wide and rows/cols are sampled at index multiples of the
-stride, the rendered set changes only at discrete power-of-two boundaries — nothing swims.
-**Horizon cull is view-independent**: a surface point P is kept iff
-`dot(normalize(P), normalize(cam_pos)) > R_WORLD/|cam_pos| − margin`.
+**LOD + culling.** Index-anchored, power-of-two strides chosen per-ring by DISTANCE to the
+camera (near → fine, far → coarse), then multiplied by a global altitude `lod_boost`. The
+boost is **1 for ATMO + ORBIT (alt < 12000 wu)** and **2 for INTERPLANETARY (alt ≥ 12000)**:
+the orbit/far view is nearly free, so it now renders at full per-distance detail (recognizable
+continents with clear relief, ~80k verts / a few ms gen at ~6000 km orbit), bounded by the far
+band's own coarse (16,16) stride; only from deep space does the ×2 boost kick in. ATMO is
+unchanged. Because the same stride set is applied globe-wide and rows/cols are sampled at index
+multiples of the stride, the rendered set changes only at discrete power-of-two boundaries —
+nothing swims. **Horizon cull is view-independent**: a surface point P is kept iff
+`dot(normalize(P), normalize(cam_pos)) > R_WORLD/|cam_pos| − margin`. **The sight (frustum)
+cull follows the freelook-aware LOOK forward** (`cam_forward_dir` — incl. the orbital look-down
+reframe), so the orbital down-framing generates the hemisphere it points at, not the ship's
+heading hemisphere.
 
 **Alpha blending contract**: enable `gl.BLEND` with `gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)`.
 Occlusion is resolved by the DEPTH TEST (the dark occluder sphere hides the far side), so

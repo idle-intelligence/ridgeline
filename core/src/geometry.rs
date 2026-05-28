@@ -47,8 +47,15 @@
 use crate::heightfield::{ve_for_altitude, Heightfield, R_WORLD};
 use glam::Vec3;
 
-/// Occluder sphere radius — just below sea level so it never z-fights ocean rings.
-const OCCLUDER_R: f32 = R_WORLD * 0.999;
+/// Occluder sphere radius — below sea level so it never z-fights ocean rings AND so the dark
+/// dome can never depth-win over the bright terrain rings at ORBITAL distance, where the depth
+/// buffer (Z_NEAR 1, Z_FAR 200000) has almost no resolution: a 6-wu sea-level/dome gap there
+/// quantizes to the same depth and the coarse dome facets occlude the front-side rings (the
+/// orbit globe read as a featureless dark disc). Pushed to 0.985 (~88 wu below sea level) so the
+/// terrain rings sit comfortably nearer the camera than the dome at any altitude — the rings
+/// always win the depth test and the orbital relief shows. The dome still solidly hides the far
+/// hemisphere (it's a full sphere) and the inset is far below the smallest visible relief.
+const OCCLUDER_R: f32 = R_WORLD * 0.985;
 
 /// Gate (radians) for emitting the dark occluder dome: only when the globe's disc half-angle
 /// asin(R/|cam|) is below this — i.e. the globe reads as a disc and the back-side rings could
@@ -169,12 +176,19 @@ fn strides_for_distance(dist_wu: f32, boost: u32) -> (u32, u32) {
 /// you are far away.
 #[inline]
 fn lod_boost_for_altitude(alt_wu: f32) -> u32 {
-    if alt_wu < 1500.0 {
-        1 // near surface: full detail, budget easily met
-    } else if alt_wu < 6000.0 {
-        2
+    if alt_wu < 12000.0 {
+        // ATMO + ORBIT: full per-distance detail (boost 1). The far view is nearly free
+        // (~0.6 ms / ~7k verts at the OLD boost-4 — see docs/reports/trace-20260528.md), so
+        // the old high-altitude boost OVER-COARSENED the orbital globe into a featureless
+        // disc. At boost 1 the orbit view renders at the same index-anchored strides used near
+        // the surface — recognizable continents with clear relief, ~80k verts / a few ms gen,
+        // still bounded by the far band's own coarse (16,16) stride. ATMO is unchanged (it was
+        // already boost 1 below 1500). No swimming (strides stay power-of-two index multiples).
+        1
     } else {
-        4 // orbit / far: whole hemisphere — coarsest (you are far away)
+        // INTERPLANETARY (alt > ORBIT_TOP ≈ 12000): the whole globe shrinks to a small disc,
+        // so a ×2 boost keeps the from-deep-space frame cheap with no perceptible detail loss.
+        2
     }
 }
 

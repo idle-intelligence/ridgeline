@@ -55,14 +55,16 @@ pub const M_PER_WU: f32 = EARTH_RADIUS_M / R_WORLD;
 /// read over land at low altitude (a touch above true 1× scale, not spiky).
 pub const VE_NEAR: f32 = 2.75;
 
-/// Vertical exaggeration far out in space — dramatic relief that draws the eye in.
-pub const VE_FAR: f32 = 8.0;
+/// Vertical exaggeration far out in space — dramatic relief that draws the eye in. Bumped
+/// from 8 → 14 so terrain RELIEF pops hard from orbit ("scale more when far"): the
+/// altitude-coupled ramp already increases VE with altitude; this raises only the far cap,
+/// leaving the near end (VE_NEAR) — and therefore the unchanged ATMO look — untouched.
+pub const VE_FAR: f32 = 14.0;
 
-/// Slope of the VE ramp (exaggeration per world unit of altitude). With VE_NEAR=1
-/// the ramp leaves the near clamp at altitude = VE_NEAR/VE_K ≈ 1429 wu and reaches the
-/// VE_FAR=8 cap at altitude = VE_FAR/VE_K ≈ 11429 wu. So low cruise (alt ~500 wu) sits
-/// at the realistic floor, mid altitudes (a few thousand wu) ramp through ~2–6×, and
-/// from space (>~11k wu) it saturates at the dramatic 8× cap.
+/// Slope of the VE ramp (exaggeration per world unit of altitude). The ramp leaves the
+/// near clamp (VE_NEAR) at altitude = VE_NEAR/VE_K ≈ 3929 wu and reaches the VE_FAR=14 cap
+/// at altitude = VE_FAR/VE_K = 20000 wu. So low cruise sits at the realistic floor, mid
+/// altitudes ramp through ~3–10×, and from orbit/space it saturates at the dramatic 14× cap.
 pub const VE_K: f32 = 0.0007;
 
 /// Vertical exaggeration for a given camera altitude (world units above the sea-level
