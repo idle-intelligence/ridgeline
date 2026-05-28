@@ -57,6 +57,26 @@ const PITCH_RATE: f32 = 1.6;
 const YAW_RATE: f32 = 1.6;
 const ROLL_RATE: f32 = 2.5;
 
+// ── Rotational inertia ─────────────────────────────────────────────────────────────
+// The attitude has ROTATIONAL MASS: the input command sets a TARGET angular velocity (per
+// axis, body frame) and the ACTUAL angular velocity eases toward it with a first-order lag, so
+// starting/stopping a turn RAMPS UP/DOWN instead of snapping. The orientation is integrated from
+// the EASED rate, not the raw input — the craft feels weighty but still responsive.
+//
+// First-order lag with time constant τ: each step
+//   `ang_vel += (target − ang_vel) · (1 − exp(−dt/τ))`.
+// Smaller τ = snappier; larger τ = heavier/laggier. The blend uses `exp` so it is exact at any
+// dt (stable at the dt=0.05 cap, no overshoot).
+//
+/// Attitude time constant (s) at ATMO speeds — "weighty but responsive". A step input reaches
+/// ~63 % of the commanded rate in τ and ~95 % in 3τ. The single feel knob: lower for snappier,
+/// higher for heavier.
+const ATTITUDE_TAU: f32 = 0.22;
+/// Extra time constant (s) added at high speed: the lag scales up toward this as speed climbs
+/// into the ORBIT envelope, so the very fast ORBIT craft SETTLES (damps the "bounces around"
+/// feel) instead of darting on instant input. Blended in by `speed/ORBIT_CAP` (clamped 0..1).
+const ATTITUDE_TAU_FAST_EXTRA: f32 = 0.18;
+
 // ── Speed tiers (wu/s). Planet circumference ≈ 2π·R_WORLD ≈ 37700 wu. Per-mode caps are
 //    crossfaded by altitude (ATMO_CAP → ORBIT_CAP → V_CAP, ratio ≈ 1 : 7.5 : 25).
 /// Hands-off / zero-throttle floor speed in ATMO (the engine never fully stops in atmosphere).
@@ -315,6 +335,10 @@ pub struct Physics {
     /// per-frame in `step` via the live `agl_scale = VERT_SCALE·ve/VERT_EXAGGERATION`.
     /// Runtime-tunable (the `?agl=` URL param); defaults to `DEFAULT_TARGET_AGL`.
     pub target_agl: f32,
+    /// ACTUAL body-frame angular velocity (rad/s): `(pitch, yaw, roll)`. The input command sets a
+    /// TARGET; this eases toward it under a first-order lag (`ATTITUDE_TAU`) and the orientation is
+    /// integrated from this eased rate — the rotational-inertia feel. Persists between steps.
+    pub ang_vel: Vec3,
 }
 
 impl Physics {
@@ -331,6 +355,7 @@ impl Physics {
             velocity: fwd * speed,
             speed,
             target_agl: DEFAULT_TARGET_AGL,
+            ang_vel: Vec3::ZERO,
         }
     }
 
@@ -397,9 +422,23 @@ impl Physics {
         };
         let y = (y + bank_yaw).clamp(-YAW_RATE, YAW_RATE);
 
-        let dq_pitch = Quat::from_axis_angle(Vec3::X, p * dt);
-        let dq_yaw = Quat::from_axis_angle(Vec3::Y, y * dt);
-        let dq_roll = Quat::from_axis_angle(Vec3::NEG_Z, r * dt);
+        // --- ROTATIONAL INERTIA: the (clamped, bank-coupled) input commands are a TARGET angular
+        // velocity; the ACTUAL angular velocity eases toward it with a first-order lag so a turn
+        // RAMPS UP when input begins and RAMPS DOWN (coasts to a stop) when released — the craft
+        // has rotational mass. The orientation is integrated from the EASED rate, so attitude
+        // change LAGS the raw stick. The lag's time constant grows a touch with speed so the very
+        // fast ORBIT craft settles (no "bouncing") while ATMO stays responsive. The A/E rudder
+        // (yaw) gets the SAME gentle inertia — consistent, not sluggish.
+        let target_rate = Vec3::new(p, y, r);
+        let spd_frac = (self.speed / ORBIT_CAP).clamp(0.0, 1.0);
+        let tau = ATTITUDE_TAU + ATTITUDE_TAU_FAST_EXTRA * spd_frac;
+        let blend = 1.0 - (-dt / tau).exp(); // exact first-order step, stable at any dt
+        self.ang_vel += (target_rate - self.ang_vel) * blend;
+        let (av_p, av_y, av_r) = (self.ang_vel.x, self.ang_vel.y, self.ang_vel.z);
+
+        let dq_pitch = Quat::from_axis_angle(Vec3::X, av_p * dt);
+        let dq_yaw = Quat::from_axis_angle(Vec3::Y, av_y * dt);
+        let dq_roll = Quat::from_axis_angle(Vec3::NEG_Z, av_r * dt);
         self.orientation = (self.orientation * dq_yaw * dq_pitch * dq_roll).normalize();
 
         let nose = self.orientation * Vec3::NEG_Z;
@@ -1229,6 +1268,63 @@ mod scenarios {
         let turn = fwd0.dot(fwd1).clamp(-1.0, 1.0).acos().to_degrees();
         println!("[banking] heading turned {:.1}° from a roll (no rudder)", turn);
         assert!(turn > 5.0, "roll did not induce a turn: {turn}°");
+    }
+
+    // (ri) ROTATIONAL INERTIA: a step pitch input RAMPS the angular velocity up over a few frames
+    // (not instant), the orientation change LAGS the raw input (less than a no-inertia craft would
+    // turn in one frame), and after the input is RELEASED the angular velocity RAMPS DOWN (coasts,
+    // no instant stop).
+    #[test]
+    fn ri_attitude_inertia_ramps() {
+        let mut p = level_craft(400.0, 300.0, 0.5);
+        let dt = 1.0 / 60.0;
+        let cmd = 0.8_f32; // commanded pitch rate (rad/s)
+
+        // --- Ramp UP: the actual rate climbs over several frames toward the command. ---
+        p.step(dt, 0.0, cmd, 0.0, 0.0, 0.0, false, 1.0, None);
+        let rate_1 = p.ang_vel.x;
+        // First frame: well below the command (inertia), and strictly positive (it started).
+        assert!(rate_1 > 0.0, "rate did not start ramping: {rate_1}");
+        assert!(rate_1 < cmd * 0.5, "rate snapped instantly (no inertia): {rate_1} vs cmd {cmd}");
+
+        let mut prev = rate_1;
+        for _ in 0..8 {
+            p.step(dt, 0.0, cmd, 0.0, 0.0, 0.0, false, 1.0, None);
+            assert!(p.ang_vel.x > prev - 1e-6, "rate not monotonically ramping up: {} -> {}", prev, p.ang_vel.x);
+            prev = p.ang_vel.x;
+        }
+        let rate_settled = p.ang_vel.x;
+        println!("[inertia] frame-1 rate={:.3} settled rate={:.3} (cmd {:.2})", rate_1, rate_settled, cmd);
+        // After ~9 frames (~0.15 s ≈ τ at this speed) it's risen substantially toward the command.
+        assert!(rate_settled > rate_1 * 2.0, "rate did not keep ramping up: {rate_1} -> {rate_settled}");
+        assert!(rate_settled <= cmd + 1e-4, "rate overshot the command: {rate_settled}");
+
+        // --- Orientation change LAGS the raw input: over one frame the attitude rotated by the
+        // EASED rate, strictly less than the cmd·dt a no-inertia craft would snap to. ---
+        let mut q = level_craft(400.0, 300.0, 0.5);
+        let nose0 = q.orientation * Vec3::NEG_Z;
+        q.step(dt, 0.0, cmd, 0.0, 0.0, 0.0, false, 1.0, None);
+        let nose1 = q.orientation * Vec3::NEG_Z;
+        let turned = nose0.dot(nose1).clamp(-1.0, 1.0).acos();
+        let instant = cmd * dt; // what a direct (old) application would have rotated
+        println!("[inertia] one-frame attitude turn={:.5} rad vs instant cmd·dt={:.5} rad", turned, instant);
+        assert!(turned < instant * 0.6, "attitude did not lag the raw input: {turned} vs instant {instant}");
+
+        // --- Ramp DOWN: release the input → the rate decays toward zero (no instant stop). ---
+        let rate_before_release = p.ang_vel.x;
+        p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, 1.0, None); // input released
+        let rate_after_release = p.ang_vel.x;
+        println!("[inertia] release: rate {:.3} -> {:.3}", rate_before_release, rate_after_release);
+        assert!(rate_after_release > 0.0, "rate stopped instantly on release (no inertia): {rate_after_release}");
+        assert!(rate_after_release < rate_before_release, "rate did not decay after release: {rate_before_release} -> {rate_after_release}");
+        // It keeps coasting down over the next frames.
+        let mut prev = rate_after_release;
+        for _ in 0..8 {
+            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, 1.0, None);
+            assert!(p.ang_vel.x < prev + 1e-6, "rate not decaying after release: {} -> {}", prev, p.ang_vel.x);
+            prev = p.ang_vel.x;
+        }
+        assert!(prev < rate_after_release * 0.7, "rate did not coast down toward zero: {rate_after_release} -> {prev}");
     }
 
     // ===== AGL TERRAIN-FOLLOWING tests =====

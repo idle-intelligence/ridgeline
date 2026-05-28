@@ -30,6 +30,17 @@ flips at a boundary; the physics is continuous — no discrete switch, no NaN):
 band boundaries (no jump). A **hard speed cap** (`V_CAP`) clamps `|velocity|` every step in all
 modes, so thrust in vacuum can never run away (kills the old "billion km/h" bug).
 
+**Rotational inertia (attitude):** the attitude has rotational MASS. The pitch/yaw/roll input
+commands set a *target* body-frame angular velocity; the *actual* angular velocity (`ang_vel`)
+eases toward it with a **first-order lag** (`ang_vel += (target − ang_vel)·(1 − e^(−dt/τ))`), and
+the orientation is integrated from the EASED rate. So starting a turn RAMPS UP and releasing it
+RAMPS DOWN (coasts to a stop) instead of snapping — the craft feels weighty but responsive, and
+attitude change LAGS the raw stick. The time constant `τ = ATTITUDE_TAU + ATTITUDE_TAU_FAST_EXTRA
+· clamp(speed/ORBIT_CAP, 0, 1)` grows a touch with speed, so the very fast ORBIT craft SETTLES
+(no "bouncing on instant input") while ATMO stays nimble. The same gentle lag applies to the A/E
+rudder (yaw) — consistent, not sluggish. The `exp` form is exact at any `dt` (stable at the
+`dt = 0.05` cap). See "Rotational inertia" below for the tunable knobs.
+
 **Coordinated banking:** in ATMO/ORBIT a roll-induced bank angle couples into yaw
 (`yaw += BANK_GAIN · sin(bank) · clamp(speed/CRUISE_MAX,0,1) · fly_w`), so rolling banks you into
 a turn (reads as "a plane," no rudder needed). Faded out in free space.
@@ -43,6 +54,7 @@ a turn (reads as "a plane," no rudder needed). Faded out in free space.
 | `velocity` | `Vec3` | World-space velocity (wu/s) |
 | `throttle` | `f32 ∈ [0, 1]` | Engine throttle (gas pedal) |
 | `speed` | `f32 ≥ 0` | `|velocity|`, cached for the HUD |
+| `ang_vel` | `Vec3` | ACTUAL body-frame angular velocity `(pitch, yaw, roll)` rad/s — eased toward the input command (rotational inertia) |
 
 ## Speed model (throttle → target, hard cap)
 
@@ -80,6 +92,40 @@ The target speed crossfades per mode: `idle = lerp(IDLE_SPEED, ORBIT_IDLE, orbit
 
 Planet circumference ≈ `2π·R_WORLD ≈ 37700 wu`, so the tiers give pleasant lap times rather
 than a fraction of a second.
+
+## Rotational inertia (attitude feel)
+
+The attitude is NOT applied instantly. Per step, the (clamped, bank-coupled) pitch/yaw/roll input
+is a **target** body-frame angular velocity `target_rate`; the persisted **actual** rate `ang_vel`
+eases toward it with an exact first-order lag, and the orientation integrates from the eased rate:
+
+```
+spd_frac = clamp(speed / ORBIT_CAP, 0, 1)
+τ        = ATTITUDE_TAU + ATTITUDE_TAU_FAST_EXTRA · spd_frac     (time constant, s)
+blend    = 1 − exp(−dt / τ)
+ang_vel += (target_rate − ang_vel) · blend
+orientation = orientation · yaw(ang_vel.y·dt) · pitch(ang_vel.x·dt) · roll(ang_vel.z·dt)
+```
+
+A step input reaches ~63 % of the commanded rate in `τ` and ~95 % in `3τ`, so a turn **ramps up**
+when the stick goes over and **ramps down** (coasts) when it's released — the craft has rotational
+mass. The time constant **grows with speed** so the very fast ORBIT craft SETTLES rather than
+darting on instant input (kills the "bounces around" feel), while ATMO stays responsive. The A/E
+rudder (yaw) gets the SAME gentle lag — weighty, not sluggish.
+
+The engage gates that read the RAW input (afterburner ascent-assist, hands-off auto-level,
+manual-pitch altitude-hold override) are **unchanged** — they still key off the raw command, so
+releasing the stick re-engages auto-level immediately while the residual `ang_vel` coasts the
+nose to a smooth stop. The `exp` form is exact at any `dt` (no overshoot; stable at the
+`dt = 0.05` cap).
+
+This is a **feel feature** — `ATTITUDE_TAU` is the single knob (lower = snappier, higher =
+heavier); `ATTITUDE_TAU_FAST_EXTRA` adds the extra orbit-speed damping.
+
+| Constant | Value | Notes |
+|---|---|---|
+| `ATTITUDE_TAU` | 0.22 s | attitude lag time constant at ATMO speeds ("weighty but responsive") |
+| `ATTITUDE_TAU_FAST_EXTRA` | 0.18 s | extra τ blended in by `speed/ORBIT_CAP` (orbit damping → settles, no bounce) |
 
 ## ATMO + ORBIT regime (fly-by-nose)
 
@@ -343,7 +389,9 @@ ratio ≈ 1:7.5:25) · `p` ATMO drag bleed (full throttle then cut → ~idle in 
 `q` ORBIT loosely holds altitude (no input → near-circular, < 15 % drift over 40 s) · `r` ORBIT
 easy escape (nose out + afterburner → climbs past `ORBIT_TOP`) · `s` smooth transitions (sweep
 altitude → `eff_cap`/`density`/`orbit_blend` continuous, bounded per-sample delta, no NaN) · `t`
-banking (a roll induces a heading change — coordinated turn) · `u` AGL flat (hands-off holds
+banking (a roll induces a heading change — coordinated turn) · `ri` rotational inertia (a step
+pitch input RAMPS the angular velocity up over several frames, the one-frame attitude change LAGS
+the raw input, and releasing the input RAMPS the rate down — no instant start/stop) · `u` AGL flat (hands-off holds
 ~`DEFAULT_TARGET_AGL` steady over flat terrain, no bob) · `v` AGL wall collision-avoidance (climbs
 in time to clear a steep wall, then glides back to the low contour clearance) · `v2` AGL valley hug
 (hill→valley: descends INTO the valley tracking the floor + clearance, reaching a LOWER altitude
