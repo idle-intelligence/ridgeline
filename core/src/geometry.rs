@@ -21,8 +21,17 @@
 //   camera (not a single global altitude). Near the camera → fine (stride 1–2, dense lon);
 //   far across the globe / near the limb → coarse. Distances are quantized into bands and
 //   strides are powers of two anchored to grid index, so the rendered set changes only at
-//   discrete band boundaries (nothing swims). When the whole globe is in view (far away) all
-//   rings land in roughly the same distance band, so the from-afar view is unchanged.
+//   discrete band boundaries (nothing swims).
+//
+// HARD GEOMETRY BUDGET (bounds gen cost at ~constant for ANY altitude):
+//   The per-distance LOD coarsens FAR geometry but never caps the TOTAL emitted vertex count,
+//   so as the camera climbs and more of the hemisphere becomes visible the per-frame work
+//   used to balloon (the trace's 42 ms → 208 ms climb). To bound it, ALL per-distance strides
+//   are multiplied by a power-of-two global `lod_boost` chosen from the QUANTIZED camera
+//   altitude (lod_boost_for_altitude): near the surface boost = 1 (full detail, budget easily
+//   met); higher up the whole-frame mesh coarsens so the emitted count stays bounded (the
+//   from-altitude globe is coarser — fine, you're far away). Sub-ring interpolation is forced
+//   off above low altitude (subring_cap). Bands are quantized → no per-frame reselection crawl.
 //
 // Horizon / back-face cull (view-independent): a surface point P is visible iff
 //   dot(normalize(P), normalize(cam_pos)) > R_world/|cam_pos| − margin.
@@ -122,8 +131,8 @@ fn build_restart_indices(draws: &[u32], out: &mut Vec<u32>) {
 /// thousands of wu away. From afar (spawn, cam ~18000 from center) every ring is ~12000+
 /// wu away → all land in the coarsest band, matching the old whole-globe LOD.
 #[inline]
-fn strides_for_distance(dist_wu: f32) -> (u32, u32) {
-    if dist_wu < 150.0 {
+fn strides_for_distance(dist_wu: f32, boost: u32) -> (u32, u32) {
+    let (r, c) = if dist_wu < 150.0 {
         (1, 2) // right under / in front of the camera: full detail
     } else if dist_wu < 400.0 {
         (2, 4)
@@ -135,6 +144,37 @@ fn strides_for_distance(dist_wu: f32) -> (u32, u32) {
         (16, 32)
     } else {
         (16, 16) // far: whole-globe view — same as the legacy from-afar LOD
+    };
+    // Global LOD boost (power of two, quantized by altitude band — see lod_boost_for_altitude).
+    // Multiplying BOTH strides keeps the rendered set index-anchored (still stride multiples
+    // of a power of two), so coarsening to stay under budget never makes geometry swim.
+    (r * boost, c * boost)
+}
+
+/// HARD GEOMETRY BUDGET — global LOD boost.
+///
+/// `eng.step()` cost is ~linear in the emitted vertex count, and that count grows as the
+/// camera climbs (more of the hemisphere becomes visible) — the per-distance LOD coarsens
+/// far geometry but never caps the TOTAL work, so a high-altitude frame emitted ~3× the
+/// vertices of a low one (the trace's 42 ms → 208 ms climb). To bound the cost at ~constant
+/// regardless of altitude (and of data resolution) we multiply ALL per-distance strides by a
+/// power-of-two `boost` chosen from the camera ALTITUDE. Higher altitude → more visible →
+/// bigger boost → coarser whole-frame mesh → roughly constant emitted vertex count.
+///
+/// The boost is keyed to QUANTIZED altitude bands (not a continuous function) so the rendered
+/// stride set changes only at discrete boundaries — nothing crawls/shimmers as you climb.
+/// Near the surface boost = 1 (detail unchanged: the budget is easily met there). The bands
+/// are tuned so the worst regimes (mid-to-orbit, where the whole hemisphere is in the sight
+/// cone) stay under the vertex budget; the from-altitude globe is coarser, which is fine —
+/// you are far away.
+#[inline]
+fn lod_boost_for_altitude(alt_wu: f32) -> u32 {
+    if alt_wu < 1500.0 {
+        1 // near surface: full detail, budget easily met
+    } else if alt_wu < 6000.0 {
+        2
+    } else {
+        4 // orbit / far: whole hemisphere — coarsest (you are far away)
     }
 }
 
@@ -144,8 +184,8 @@ fn strides_for_distance(dist_wu: f32) -> (u32, u32) {
 /// factor ramps DOWN with distance so the added density stays bounded — only the nearest
 /// bands get extra rings; far geometry renders at the raw data rows.
 #[inline]
-fn subring_factor_for_distance(dist_wu: f32) -> u32 {
-    if dist_wu < 150.0 {
+fn subring_factor_for_distance(dist_wu: f32, cap: u32) -> u32 {
+    let f = if dist_wu < 150.0 {
         4 // right under / in front of the camera: dense intermediate rings
     } else if dist_wu < 400.0 {
         3
@@ -153,7 +193,11 @@ fn subring_factor_for_distance(dist_wu: f32) -> u32 {
         2
     } else {
         1 // far: raw data rows only
-    }
+    };
+    // Sub-rings are only useful when skimming the surface; at mid/high altitude they are pure
+    // cost (extra interpolated rings that add no readable detail from far away). The per-frame
+    // `cap` (1 above low altitude) forces them off there.
+    f.min(cap.max(1))
 }
 
 /// Visibility strength of a surface point given the camera direction and horizon threshold.
@@ -245,6 +289,17 @@ pub fn generate_into(
     // altitude-coupled ramp.
     let ve = ve_override.unwrap_or_else(|| ve_for_altitude(cam_len - R_WORLD));
 
+    // ── HARD GEOMETRY BUDGET ────────────────────────────────────────────────────
+    // Global LOD boost + sub-ring cap, both keyed to the QUANTIZED camera altitude. These
+    // bound the per-frame emitted vertex count to ~constant at ANY altitude (and independent
+    // of data resolution): higher altitude → coarser whole-frame strides + sub-rings off, so
+    // the climb no longer balloons gen time. Quantized bands → no per-frame reselection crawl.
+    let altitude = cam_len - R_WORLD;
+    let lod_boost = lod_boost_for_altitude(altitude);
+    // Sub-ring interpolation is only worth its cost when skimming the surface; force it off
+    // (cap = 1) above low altitude. Below the first LOD band keep the full near-surface density.
+    let subring_cap = if altitude < 1500.0 { u32::MAX } else { 1 };
+
     // Reused persistent buffers (cleared above): refer to them through locals for brevity.
     let fill_verts = &mut buf.fill_verts;
     let fill_draws = &mut buf.fill_draws;
@@ -305,7 +360,7 @@ pub fn generate_into(
                 }
             }
 
-            let (lat_stride, lon_stride) = strides_for_distance(nearest);
+            let (lat_stride, lon_stride) = strides_for_distance(nearest, lod_boost);
             // occluder needs coarser-than-terrain tessellation; scale the terrain strides
             // down to the occluder grid (it's lower res to begin with).
             let lat_step = lat_stride.max(1);
@@ -380,13 +435,13 @@ pub fn generate_into(
         // probing many longitudes and is camera-deterministic → still index-anchored.
         let p = Heightfield::sphere_point(hf.row_lat(row), cam_lon_deg, 0.0);
         let nearest = (p - cam_pos).length();
-        let (row_step, ring_col_stride) = strides_for_distance(nearest);
+        let (row_step, ring_col_stride) = strides_for_distance(nearest, lod_boost);
 
         // Sub-ring subdivision: render `factor` rings across this [row, row+row_step] gap,
         // at fixed fractional indices `row + k·row_step/factor` (index-anchored → no swimming),
         // interpolating elevation between the bracketing data rows. Density ramps down with
         // distance via `subring_factor_for_distance` so the cost stays bounded.
-        let factor = subring_factor_for_distance(nearest);
+        let factor = subring_factor_for_distance(nearest, subring_cap);
         let sub_count = factor.max(1);
 
         for sub in 0..sub_count {
@@ -421,7 +476,7 @@ pub fn generate_into(
         while frow < hf.height {
             let p = Heightfield::sphere_point(hf.row_lat(frow), cam_lon_deg, 0.0);
             let nearest = (p - cam_pos).length();
-            let (row_step, ring_col_stride) = strides_for_distance(nearest);
+            let (row_step, ring_col_stride) = strides_for_distance(nearest, lod_boost);
             let fill_row_step = (row_step * FILL_COARSEN).max(1);
             let fill_col_stride = (ring_col_stride * FILL_COARSEN).max(1);
             let lat = hf.row_lat(frow);
