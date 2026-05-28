@@ -348,6 +348,30 @@ impl Engine {
             compute_view_proj(&self.phys, self.look_yaw, self.look_pitch, self.aspect);
     }
 
+    /// Advance the simulation by `dt` seconds doing PHYSICS + CAMERA ONLY — it does NOT run the
+    /// CPU per-frame geometry generation (`generate_into`). For the WebGPU renderer, which
+    /// generates the visible geometry on the GPU (a WGSL compute pass) and so does not need the
+    /// CPU vertex emission at all. This is the whole perf win: the CPU `step` cost (the trace's
+    /// 70–200 ms `generate_into`) drops to the physics integrator + the two camera matrices
+    /// (microseconds). The WebGL2 path keeps using `step` (above), which still emits CPU
+    /// geometry, so the fallback is behaviorally unchanged. The same `view_proj`, `camera_position`,
+    /// `cam_forward`, `current_ve`, etc. getters drive the GPU compute (renderer-agnostic).
+    pub fn step_physics_only(&mut self, dt: f32) {
+        let alt_wu = (self.phys.position.length() - R_WORLD).max(0.0);
+        let ve = self
+            .ve_override
+            .unwrap_or_else(|| heightfield::ve_for_altitude(alt_wu));
+        let hf = &self.hf;
+        let terrain = move |lat: f32, lon: f32| hf.terrain_radius_at(lat, lon, ve);
+        let agl_scale = heightfield::VERT_SCALE * ve / heightfield::VERT_EXAGGERATION;
+        self.phys.step(
+            dt, self.i_thrust, self.i_pitch, self.i_yaw, self.i_roll, self.i_boost, self.i_ftl,
+            agl_scale, Some(&terrain),
+        );
+        self.view_proj_mat =
+            compute_view_proj(&self.phys, self.look_yaw, self.look_pitch, self.aspect);
+    }
+
     /// Debug/test helper: teleport the ship to the radial through (lat,lon) at `dist` wu
     /// from center, oriented to look at the globe center. Regenerates geometry. Used by the
     /// headless multi-angle recognizability test to orbit the camera around the globe.
@@ -447,6 +471,24 @@ impl Engine {
     }
     pub fn heightfield_len(&self) -> u32 {
         self.hf.elev.len() as u32
+    }
+
+    /// Pointer/len of the RAW int16 elevation grid (meters, row-major, row 0 = north) directly in
+    /// WASM memory — NO f32 materialization. The WebGPU renderer uploads this i16 buffer ONCE
+    /// (~151 MB for 12288×6144, vs ~302 MB as f32) and converts meters → world units in WGSL via
+    /// `* VERT_SCALE` (matching `Heightfield::sample`). `_len` is the ELEMENT count (i16 count =
+    /// width*height); the byte length is `2 * len`. ptr is a byte offset into `wasm.memory.buffer`.
+    /// Preferred over `heightfield_ptr` (the f32 path), which is kept only as a fallback.
+    pub fn heightfield_i16_ptr(&self) -> u32 {
+        self.hf.elev.as_ptr() as u32
+    }
+    pub fn heightfield_i16_len(&self) -> u32 {
+        self.hf.elev.len() as u32
+    }
+    /// VERT_SCALE (world units per meter of elevation) so the WebGPU WGSL can convert the raw
+    /// int16 meters to world units exactly as `Heightfield::sample` does (`m * VERT_SCALE`).
+    pub fn vert_scale(&self) -> f32 {
+        heightfield::VERT_SCALE
     }
     pub fn grid_width(&self) -> u32 {
         self.hf.width
