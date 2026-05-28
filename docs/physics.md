@@ -201,6 +201,47 @@ exaggerated meters, ALT in un-exaggerated meters).
 | `AGL_K` | 4.0 s⁻¹ | first-order velocity-command gain (inherently critically damped) |
 | `AGL_MAX_CLIMB` / `SINK` | 200 / 50 wu/s | asymmetric climb/sink rate clamp (climb-fast, glide-gentle) |
 
+## Afterburner ascent-assist (one-button climb to orbit / escape)
+
+Holding the afterburner (`ftl` = Space) with **no manual attitude input** engages a hands-off
+**gravity-turn climb**: a one-button arc from ATMO up to ORBIT, and — held longer — on to escape.
+
+**Engage / disengage.** The assist is engaged when `ftl` is held AND BOTH `|pitch|` and `|roll|`
+input commands are within `ASSIST_INPUT_DEADZONE`. Any real pitch/roll **disengages** it (the
+afterburner then just raises the speed cap → normal manual flight); it **re-engages** the instant
+steering stops while `ftl` is still held.
+
+**Gravity-turn auto-pitch.** While engaged, the nose eases toward a CLIMB attitude above the local
+horizon — `climb_angle = lerp(ASCENT_CLIMB_STEEP_DEG, ASCENT_CLIMB_SHALLOW_DEG, t)` where
+`t = smoothstep(ATMOSPHERE_TOP·0.5, ATMOSPHERE_TOP + 0.3·(ORBIT_TOP−ATMOSPHERE_TOP), alt)`. So it's
+STEEP (60°) near the surface and has SHALLOWED to near-horizontal (5°) by ~30 % into the orbit band.
+The nose eases toward this target at `ASCENT_PITCH_RATE` (gentle, a few seconds) so the trajectory
+is a smooth curved ARC, not a kink. The altitude-hold's commanded radial follows the (climbing)
+nose — exactly the manual-pitch path — so the velocity actually arcs upward, and the afterburner
+(FTL cap) builds speed during the climb. The hands-off auto-level is suppressed while engaged.
+
+**Level into orbit.** Because the climb has shallowed to near-horizontal by the lower part of the
+orbit band, the gentle ORBIT altitude-hold (`ORBIT_HOLD_RATE`) catches the craft and it **settles**
+into orbit rather than shooting straight past. From an ATMO cruise, holding `ftl` crosses into the
+ORBIT band in **~2–3 s** and stabilizes there; easing `ftl` then holds the orbit.
+
+**Escape on sustained hold.** Keep holding `ftl` (with throttle up) and speed keeps building (FTL
+cap) and the shallow climb keeps gaining altitude → past `ORBIT_TOP` into INTERPLANETARY in **~5–6
+s** (escape the gravity well). So a **tap ≈ orbit, a long hold ≈ escape**. Above `ORBIT_TOP` the
+fly-by-nose term has faded and the Newtonian space term carries the climb (thrust along the nose).
+
+**Release.** Dropping `ftl` ends the assist; the craft settles into the current mode (ORBIT holds
+altitude near-circular, etc.) — it does not fall back to the ground.
+
+| Constant | Value | Notes |
+|---|---|---|
+| `ASSIST_INPUT_DEADZONE` | 1e-3 rad/s | engage only when both |pitch| and |roll| are under this |
+| `ASCENT_CLIMB_STEEP_DEG` | 60° | climb angle above horizon near the surface (steep pull-up) |
+| `ASCENT_CLIMB_SHALLOW_DEG` | 5° | climb angle entering ORBIT (near-level → orbit hold catches it) |
+| `ASCENT_PITCH_RATE` | 1.2 s⁻¹ | rate the nose eases toward the climb attitude (smooth arc) |
+
+This is a **feel feature** — the angles, ease rate, and shallowing band are tunable knobs.
+
 ## Space regime (Newtonian)
 
 ```
@@ -281,7 +322,9 @@ planet-derived where sensible so another planet can override them.
 ## Inputs (unchanged mapping)
 
 Throttle: `ShiftLeft/Right` (+1) / `CtrlLeft/Right` (−1). Pitch: `W/S`. Yaw (rudder): `Q/E`.
-Roll: `A/D`. Afterburner: `Space` (held). Mouse drives freelook only (view-only).
+Roll: `A/D`. Afterburner: `Space` (held) — also the **ascent-assist**: hold it with no pitch/roll
+input for a hands-off gravity-turn climb to orbit / escape (see "Afterburner ascent-assist" above).
+Mouse drives freelook only (view-only).
 
 ## Scenario tests (`cargo test --lib`)
 
@@ -313,4 +356,9 @@ hills → bounded clearance, no growing bob/ringing — critical damping) · `x`
 → holds ~500 exag-m ≈ 1.2–1.4 wu just above the visible exaggerated ridges, hugs valleys, no bob) ·
 `y2` HUD consistency (over flat ground `agl_m()` reads ≈ the set 500 exag-m, not ~10000) · `y3`
 scaled wall collision-avoidance (a 4808 m VE-exaggerated alpine wall is cleared at ATMO speed — no
-clip-through).
+clip-through) · `z1` ascent arc to orbit (ftl + zero steering → smooth monotonic ATMO→ORBIT arc in
+~2–3 s, then easing ftl settles into the orbit band) · `z2` sustained hold escapes (ftl + throttle
+held ~15 s → past `ORBIT_TOP` into INTERPLANETARY in ~5–6 s, speed ≤ `V_CAP`) · `z3` manual override
+(holding ftl WHILE pitching → assist disengages, the nose follows the manual pitch, not the
+auto-climb) · `z4` release settles in orbit (release ftl mid-ascent in the orbit band → settles via
+orbit-hold, does not fall to the ground).

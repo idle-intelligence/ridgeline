@@ -98,7 +98,9 @@ eng.set_input(
   yaw,      // f32 rad/s  KeyQ = left, KeyE = right (rudder)
   roll,     // f32 rad/s  KeyA = left, KeyD = right
   boost,    // f32        unused (pass 0); throttle controlled by thrust axis
-  ftl       // bool       Space-hold = afterburner
+  ftl       // bool       Space-hold = afterburner; ALSO the hands-off ascent-assist:
+            //            held with no pitch/roll input → a gravity-turn climb to orbit /
+            //            escape (any steering disengages it). See docs/physics.md.
 );
 eng.step(dt); // f32 seconds — advances quaternion physics + regenerates visible geometry
 ```

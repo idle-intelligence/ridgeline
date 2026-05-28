@@ -201,6 +201,29 @@ const G_SURFACE: f32 = 60.0;
 /// Tiny epsilon above the sea-level sphere for the anti-fall-through floor (wu).
 const FLOOR_EPS: f32 = 0.5;
 
+// ── Afterburner ascent-assist (one-button climb to orbit / escape) ────────────────
+// Holding afterburner (`ftl`) with NO manual attitude input (pitch + roll both near zero)
+// engages a hands-off GRAVITY-TURN climb: the nose eases toward a climb attitude above the
+// local horizon — STEEP near the surface, SHALLOWING with altitude — while the afterburner
+// (FTL cap) builds speed. The craft arcs ATMO → ORBIT on a smooth curve, the ORBIT
+// altitude-hold catches it near-horizontal, and sustained holding climbs past ORBIT_TOP to
+// escape into INTERPLANETARY. ANY pitch/roll input DISENGAGES it (afterburner then just raises
+// the speed cap; manual flight). It re-engages the instant steering stops while ftl is held.
+//
+/// Deadzone (rad/s of input) below which an attitude axis counts as "no input": the assist
+/// engages only when BOTH |pitch| and |roll| commands are under this. Generous so a still
+/// stick reliably engages, tight enough that any real steering disengages.
+const ASSIST_INPUT_DEADZONE: f32 = 1e-3;
+/// Climb angle above the local horizon at the BOTTOM of the ATMO→ORBIT band (near the surface):
+/// a STEEP initial pull-up so the ascent leaves the ground decisively (gravity-turn start).
+const ASCENT_CLIMB_STEEP_DEG: f32 = 60.0;
+/// Climb angle above the local horizon at the TOP of the band (entering ORBIT): SHALLOW so the
+/// craft is nearly level as the ORBIT altitude-hold catches it and it settles into orbit.
+const ASCENT_CLIMB_SHALLOW_DEG: f32 = 5.0;
+/// Rate (s⁻¹) at which the nose eases toward the gravity-turn climb attitude while engaged.
+/// Deliberately gentle so the trajectory is a smooth curved ARC (a few seconds), not a kink.
+const ASCENT_PITCH_RATE: f32 = 1.2;
+
 // ── Capture zone / planetary-mode assist ─────────────────────────────────────────
 /// Top of the CAPTURE ZONE as an ALTITUDE above the sea-level sphere (wu) = R_WORLD·FRAC.
 /// GENEROUS (10× the planet radius ≈ 60,000 wu ≈ 60,000 km) so returning from deep space is
@@ -381,11 +404,55 @@ impl Physics {
 
         let nose = self.orientation * Vec3::NEG_Z;
 
+        // --- Afterburner ascent-assist engage gate: ftl held AND no manual attitude input
+        // (both pitch and roll commands within the deadzone). Engaged → a hands-off
+        // gravity-turn climb (eases the nose to a climb attitude below) instead of auto-level;
+        // any steering disengages it (falls through to normal manual flight + afterburner cap),
+        // re-engaging the instant the stick is released while ftl is still held. ---
+        let ascent_assist =
+            ftl && pitch.abs() < ASSIST_INPUT_DEADZONE && roll.abs() < ASSIST_INPUT_DEADZONE;
+
+        if ascent_assist && fly_w > 0.0 {
+            // GRAVITY TURN: ease the nose toward a CLIMB attitude above the local horizon —
+            // STEEP near the surface, SHALLOWING with altitude across the ATMO→ORBIT band — so
+            // the craft arcs up on a smooth curve and arrives near-horizontal for the ORBIT hold
+            // to catch. `t` is the altitude fraction across ATMOSPHERE_TOP→ORBIT_TOP.
+            let alt = r_dist - R_WORLD;
+            // `t` is the climb's progress, mapped so the nose has SHALLOWED to near-horizontal by
+            // the LOWER part of the orbit band — the ascent begins below ATMOSPHERE_TOP (already
+            // pulling up at cruise) and is essentially level by ~30 % into the band, so the gentle
+            // ORBIT altitude-hold catches it and it SETTLES into orbit rather than shooting past.
+            let lo = ATMOSPHERE_TOP * 0.5;
+            let hi = ATMOSPHERE_TOP + (ORBIT_TOP - ATMOSPHERE_TOP) * 0.3;
+            let t = smoothstep(lo, hi, alt);
+            let climb_deg = ASCENT_CLIMB_STEEP_DEG
+                + (ASCENT_CLIMB_SHALLOW_DEG - ASCENT_CLIMB_STEEP_DEG) * t;
+            let climb = climb_deg.to_radians();
+            // Target nose: the local horizontal (heading) tilted up by `climb` toward the radial.
+            let mut horiz = self.velocity - radial_out * self.velocity.dot(radial_out);
+            if horiz.length_squared() < 1e-6 {
+                horiz = nose - radial_out * nose.dot(radial_out);
+            }
+            let horiz = horiz.normalize_or_zero();
+            if horiz != Vec3::ZERO {
+                let target = (horiz * climb.cos() + radial_out * climb.sin()).normalize_or_zero();
+                if target != Vec3::ZERO {
+                    let frac = (ASCENT_PITCH_RATE * dt).clamp(0.0, 1.0);
+                    let new_nose = nose.lerp(target, frac).normalize_or_zero();
+                    if new_nose != Vec3::ZERO {
+                        let reaim = Quat::from_rotation_arc(nose, new_nose);
+                        self.orientation = (reaim * self.orientation).normalize();
+                    }
+                }
+            }
+        }
+
         // --- Hands-off auto-level (atmosphere only): with no pitch/roll input, rotate the
         // nose toward the LOCAL HORIZONTAL (velocity projected onto the tangent plane) so
         // level cruise holds altitude as the planet curves beneath. Disabled in space (free
-        // 6DOF) and bypassed when the pilot is actively pitching/rolling. ---
-        if fly_w > 0.0 && pitch.abs() < 1e-3 && roll.abs() < 1e-3 {
+        // 6DOF) and bypassed when the pilot is actively pitching/rolling OR the ascent-assist
+        // is steering the nose up. ---
+        if !ascent_assist && fly_w > 0.0 && pitch.abs() < 1e-3 && roll.abs() < 1e-3 {
             let mut horiz = self.velocity - radial_out * self.velocity.dot(radial_out);
             if horiz.length_squared() < 1e-6 {
                 horiz = nose - radial_out * nose.dot(radial_out);
@@ -451,9 +518,11 @@ impl Physics {
             // a matching climb/dive. Decouples altitude from speed and kills the slow drift.
             // (AGL terrain-following will later replace this 0 with a terrain-tracked command —
             // a clean seam: only the `commanded_radial` value changes.)
-            let commanded_radial = if pitch.abs() >= 1e-3 {
-                // MANUAL OVERRIDE: the pilot is pitching → climb/dive to match the nose;
-                // terrain-follow yields. Auto re-engages the instant pitch is released.
+            let commanded_radial = if pitch.abs() >= 1e-3 || ascent_assist {
+                // MANUAL OVERRIDE or ASCENT-ASSIST: climb/dive to match the nose. For manual
+                // pitch the pilot drives the nose; for the ascent-assist the gravity-turn block
+                // above eased the nose to the climb attitude — either way the velocity follows
+                // it. Auto-level / terrain-follow re-engage the instant both are released.
                 nose.dot(radial_out)
             } else if let Some(terr) = terrain {
                 // AGL TERRAIN-FOLLOWING (ATMO). The hold reference is the terrain DIRECTLY BELOW
@@ -1563,6 +1632,123 @@ mod scenarios {
         // Cleared the wall — never plowed substantially into it.
         assert!(min_agl_over_ridge_wu > -peak_wu * 0.05,
             "clipped through the scaled wall: min AGL over it = {min_agl_over_ridge_wu} wu (peak {peak_wu})");
+    }
+
+    // ===== AFTERBURNER ASCENT-ASSIST tests =====
+
+    // (z1) ASCENT: from ATMO cruise, hold ftl + ZERO steering → smooth monotonic arc up,
+    // ATMO→ORBIT within a few seconds, and it LEVELS into the orbit band (settles when ftl eased).
+    #[test]
+    fn z1_ascent_arc_to_orbit() {
+        let mut p = spawn_cruise();
+        let dt = 1.0 / 60.0;
+        let a0 = alt(&p);
+        let mut last_alt = a0;
+        let mut monotonic = true;
+        let mut t_orbit = None;
+        let mut t = 0.0;
+        for i in 0..(6.0 / dt) as usize {
+            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, true, 1.0, None); // ftl, no steering
+            t += dt;
+            let a = alt(&p);
+            if a < last_alt - 1.0 {
+                monotonic = false;
+            }
+            last_alt = a;
+            if t_orbit.is_none() && p.flight_mode() == 1 {
+                t_orbit = Some(t);
+            }
+            if i % 60 == 0 {
+                println!("[ascent] t={:.0}s alt={:.0} speed={:.0} mode={}", t, a, p.speed, p.flight_mode());
+            }
+        }
+        let to = t_orbit.expect("never reached ORBIT band within 6 s");
+        println!("[ascent] reached ORBIT at t={:.1}s, alt now {:.0} speed {:.0}", to, alt(&p), p.speed);
+        assert!(monotonic, "ascent was not a smooth monotonic climb (dipped)");
+        assert!(alt(&p) > ATMOSPHERE_TOP, "did not climb into ORBIT band");
+        assert!((3.0..=6.0).contains(&to) || to < 6.0, "ATMO→ORBIT not within a few seconds: {to}s");
+        assert_eq!(p.flight_mode(), 1, "did not end in ORBIT");
+        // Now EASE ftl: the ORBIT altitude-hold should catch it and stabilize (not shoot past).
+        let a_settle0 = alt(&p);
+        let (mut amin, mut amax) = (a_settle0, a_settle0);
+        for _ in 0..(10.0 / dt) as usize {
+            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, 1.0, None); // ftl released
+            let a = alt(&p);
+            amin = amin.min(a);
+            amax = amax.max(a);
+        }
+        println!("[ascent] after release: settle band [{:.0},{:.0}] mode={}", amin, amax, p.flight_mode());
+        assert_eq!(p.flight_mode(), 1, "fell out of ORBIT after release");
+        assert!((amax - amin) < ORBIT_TOP * 0.25, "did not stabilize into orbit: band [{amin},{amax}]");
+    }
+
+    // (z2) ESCAPE: keep holding ftl ~15 s → climbs past ORBIT_TOP into INTERPLANETARY (mode 2).
+    #[test]
+    fn z2_sustained_hold_escapes() {
+        let mut p = spawn_cruise();
+        let dt = 1.0 / 60.0;
+        let mut t_escape = None;
+        let mut t = 0.0;
+        for i in 0..(15.0 / dt) as usize {
+            p.step(dt, 1.0, 0.0, 0.0, 0.0, 0.0, true, 1.0, None); // ftl + throttle, no steering
+            t += dt;
+            if t_escape.is_none() && p.flight_mode() == 2 {
+                t_escape = Some(t);
+            }
+            if i % 120 == 0 {
+                println!("[escape-assist] t={:.0}s alt={:.0} speed={:.0} mode={}", t, alt(&p), p.speed, p.flight_mode());
+            }
+        }
+        println!("[escape-assist] FINAL alt={:.0} (ORBIT_TOP={:.0}) speed={:.0} mode={} t_escape={:?}",
+            alt(&p), ORBIT_TOP, p.speed, p.flight_mode(), t_escape);
+        assert_eq!(p.flight_mode(), 2, "did not escape to INTERPLANETARY within 15 s");
+        assert!(alt(&p) > ORBIT_TOP, "did not climb past ORBIT_TOP: {}", alt(&p));
+        assert!(p.speed <= V_CAP + 1e-2);
+    }
+
+    // (z3) MANUAL OVERRIDE: holding ftl WHILE giving pitch input → assist disengages, the nose
+    // follows the MANUAL pitch (here pitch DOWN → descends), not the auto-climb.
+    #[test]
+    fn z3_manual_override_disengages() {
+        let mut assisted = spawn_cruise();
+        let mut manual = spawn_cruise();
+        let dt = 1.0 / 60.0;
+        for _ in 0..(2.0 / dt) as usize {
+            assisted.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, true, 1.0, None); // ftl, no steering → climbs
+            manual.step(dt, 0.0, -0.5, 0.0, 0.0, 0.0, true, 1.0, None); // ftl + pitch DOWN → manual
+        }
+        println!("[override] ftl-only alt={:.0} vs ftl+pitch-down alt={:.0}", alt(&assisted), alt(&manual));
+        // Auto-climb rose; manual pitch-down dove (or at least did NOT auto-climb) → assist off.
+        assert!(alt(&assisted) > alt(&manual) + 100.0,
+            "manual pitch did not override the ascent-assist: assisted {} vs manual {}", alt(&assisted), alt(&manual));
+        assert!(alt(&manual) < alt(&assisted), "manual nose-down should not auto-climb");
+    }
+
+    // (z4) RELEASE mid-ascent in the orbit band → settles (orbit-hold), doesn't fall to the ground.
+    #[test]
+    fn z4_release_settles_in_orbit() {
+        let mut p = spawn_cruise();
+        let dt = 1.0 / 60.0;
+        // Climb until we cross into the orbit band.
+        for _ in 0..(10.0 / dt) as usize {
+            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, true, 1.0, None);
+            if p.flight_mode() == 1 && alt(&p) > ATMOSPHERE_TOP + (ORBIT_TOP - ATMOSPHERE_TOP) * 0.2 {
+                break;
+            }
+        }
+        assert_eq!(p.flight_mode(), 1, "test setup: never reached mid-orbit band");
+        let a_release = alt(&p);
+        println!("[release] releasing ftl at alt={:.0} mode={}", a_release, p.flight_mode());
+        let (mut amin, mut amax) = (a_release, a_release);
+        for _ in 0..(20.0 / dt) as usize {
+            p.step(dt, 0.0, 0.0, 0.0, 0.0, 0.0, false, 1.0, None); // ftl released
+            let a = alt(&p);
+            amin = amin.min(a);
+            amax = amax.max(a);
+        }
+        println!("[release] settle band [{:.0},{:.0}] final mode={}", amin, amax, p.flight_mode());
+        assert!(amin > ATMOSPHERE_TOP * 0.5, "fell back toward the ground after release: min {amin}");
+        assert_eq!(p.flight_mode(), 1, "did not settle in ORBIT after release");
     }
 
     // (h) Stability: dt=0.05 cap, long run → no NaN/blowup.
