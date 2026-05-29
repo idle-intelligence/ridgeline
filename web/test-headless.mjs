@@ -185,16 +185,30 @@ async function run() {
   // Scan the whole framebuffer; count non-sky pixels and measure their bounding box +
   // centroid. The planet should be a compact, roughly circular cluster (not full-screen,
   // not empty) near the center of the frame.
-  const disc = await page.evaluate(() => {
+  const disc = await page.evaluate(async () => {
     const c = document.getElementById('c');
-    const gl = c.getContext('webgl2');
-    if (!gl) return { ok: false, reason: 'no webgl2' };
-    // Force a synchronous render so readPixels sees the current frame (the rAF-rendered
-    // backbuffer is swapped/cleared by the time we read outside the loop).
-    if (window._renderer && window._eng) window._renderer.draw(window._eng, window._wasmMemory);
-    const W = c.width, H = c.height;
-    const px = new Uint8Array(W * H * 4);
-    gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    let W, H, px;
+    if (window._useWebGPU) {
+      // WebGPU canvas: render into an owned texture and read it back. The renderer returns
+      // pixels top-to-bottom (Y down); flip to bottom-up so the centroid logic below (shared
+      // with the gl.readPixels Y-up convention) reads "lower frame" the same way.
+      const r = await window._renderer.readbackPixels(window._eng, window._wasmMemory);
+      W = r.width; H = r.height;
+      px = new Uint8Array(W * H * 4);
+      for (let y = 0; y < H; y++) {
+        const sy = (H - 1 - y) * W * 4, dy = y * W * 4;
+        px.set(r.pixels.subarray(sy, sy + W * 4), dy);
+      }
+    } else {
+      const gl = c.getContext('webgl2');
+      if (!gl) return { ok: false, reason: 'no webgl2' };
+      // Force a synchronous render so readPixels sees the current frame (the rAF-rendered
+      // backbuffer is swapped/cleared by the time we read outside the loop).
+      if (window._renderer && window._eng) window._renderer.draw(window._eng, window._wasmMemory);
+      W = c.width; H = c.height;
+      px = new Uint8Array(W * H * 4);
+      gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    }
     // sky ~ (10,10,20). Anything meaningfully brighter is planet (fill or line).
     let minX = W, minY = H, maxX = 0, maxY = 0, n = 0, sx = 0, sy = 0;
     for (let y = 0; y < H; y += 2) {
@@ -274,6 +288,34 @@ async function run() {
     console.warn(`WARN: step() slow (${perf.avgMs.toFixed(1)} ms)`);
   } else {
     console.log(`PASS: step() performance acceptable (${perf.avgMs.toFixed(2)} ms/frame)`);
+  }
+
+  // ── WebGPU: CPU step is physics-only (the geometry-gen bypass) ───────────────
+  // The whole point of the WebGPU path: the production loop drives the engine with
+  // step_physics_only(dt) (physics + camera only), so the CPU per-frame cost collapses from
+  // the full generate_into (tens of ms, unbounded at low altitude) to ~microseconds. Confirm
+  // step_physics_only is dramatically cheaper than the full step, and the GPU draw is bounded.
+  if (await page.evaluate(() => window._useWebGPU)) {
+    const gpu = await page.evaluate(async () => {
+      const eng = window._eng, r = window._renderer;
+      eng.set_spawn(38, 8, 250, 0); eng.set_input(0, 0, 0, 0, 0, 0, 0, false);
+      // Fly low + forward for a while — the violation case (more terrain exposed = the old
+      // CPU balloon). With step_physics_only this must stay cheap.
+      for (let i = 0; i < 360; i++) eng.step_physics_only(1 / 60);
+      const N = 60;
+      let t = performance.now(); for (let i = 0; i < N; i++) eng.step_physics_only(1 / 60); const phys = (performance.now() - t) / N;
+      t = performance.now(); for (let i = 0; i < N; i++) eng.step(1 / 60); const full = (performance.now() - t) / N;
+      // GPU geometry counts (reserved high-water — bounded under the buffer caps → no dropped rings).
+      const rb = await r.debugReadback();
+      return { phys, full, rb };
+    });
+    console.log(`WEBGPU: low-alt CPU step_physics_only=${gpu.phys.toFixed(3)} ms vs full generate_into=${gpu.full.toFixed(2)} ms | ` +
+      `GPU lineVerts(reserved)=${gpu.rb.lineVerts} fillVerts=${gpu.rb.fillVerts}`);
+    if (gpu.phys < 2.0 && gpu.phys < gpu.full * 0.25) {
+      console.log('PASS: WebGPU CPU step is physics-only — geometry-gen cost eliminated (no low-altitude balloon)');
+    } else {
+      fail(`WebGPU step_physics_only not cheap enough: ${gpu.phys.toFixed(3)} ms (full ${gpu.full.toFixed(2)} ms)`, browser, server, logs);
+    }
   }
 
   // ── Motion stability (no swimming) ───────────────────────────────────────────

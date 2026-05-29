@@ -154,15 +154,22 @@ async function main() {
   }
   window.addEventListener('resize', resize);
 
-  // The WebGPU prototype (flag-gated) needs the canvas's 'webgpu' context, which is mutually
-  // exclusive with 'webgl2' on the same canvas. So when ?webgpu=1 we DEFER renderer
-  // construction until after the engine is built (WebGPU needs it to upload the heightfield),
-  // and only construct the WebGL2 Renderer up front in the default (no-flag) path — keeping
-  // that default path byte-for-byte unchanged.
-  const wantWebGPU = new URLSearchParams(location.search).has('webgpu');
-  if (!wantWebGPU) {
+  // Renderer selection: the WebGPU compute renderer is the DEFAULT when available (it moves the
+  // expensive per-frame geometry generation off the CPU → 60 fps + rich detail at all altitudes).
+  // WebGL2 is the automatic fallback. The 'webgpu' canvas context is mutually exclusive with
+  // 'webgl2' on the same canvas, so we DEFER renderer construction until after the engine is
+  // built (WebGPU needs it to upload the heightfield) whenever WebGPU is a candidate.
+  //   ?webgpu=0          → force WebGL2 (skip WebGPU entirely).
+  //   otherwise (default)→ try WebGPU; on no-adapter / init failure, fall back to WebGL2.
+  const params = new URLSearchParams(location.search);
+  const forceWebGL2 = params.get('webgpu') === '0';
+  // Only attempt WebGPU when not forced off AND the API is present. We must probe the adapter
+  // (requestAdapter) here too — but that's async, so we defer the whole WebGPU attempt below.
+  const tryWebGPU = !forceWebGL2 && !!navigator.gpu;
+  if (forceWebGL2 || !navigator.gpu) {
     try {
       renderer = new Renderer(canvas);
+      console.log(`[renderer] WebGL2 active (${forceWebGL2 ? '?webgpu=0' : 'navigator.gpu unavailable'}).`);
     } catch (e) {
       fatal(e.message, 'WebGL2 requires a modern browser (Chrome 56+, Edge 79+, Firefox 51+).');
     }
@@ -206,28 +213,25 @@ async function main() {
   // Missing pieces fall back to the engine's default spawn.
   applyUrlParams(eng);
 
-  // --- Optional WebGPU renderer (flag-gated prototype) ---
-  // Activates ONLY with ?webgpu=1 AND a working WebGPU adapter. On ANY failure (or no adapter)
-  // we construct the WebGL2 Renderer here as the fallback, so main stays flyable everywhere.
-  if (wantWebGPU) {
-    let ok = false;
-    if (navigator.gpu) {
-      try {
-        const { WebGPURenderer } = await import('./renderer-webgpu.js');
-        const gpu = await WebGPURenderer.create(canvas, eng, wasmMemory);
-        gpu.resize(canvas.width, canvas.height);
-        renderer = gpu;
-        ok = true;
-        console.log('[webgpu] WebGPU renderer active (compute → indirect line draw).');
-      } catch (e) {
-        console.warn('[webgpu] init failed — falling back to WebGL2:', e.message);
-      }
-    } else {
-      console.warn('[webgpu] navigator.gpu unavailable — falling back to WebGL2.');
+  // --- WebGPU renderer (DEFAULT when available) ---
+  // Try the WebGPU compute renderer; on ANY init/runtime failure (or no adapter) construct the
+  // WebGL2 Renderer here as the automatic fallback, so main stays flyable everywhere.
+  let useWebGPU = false;
+  if (tryWebGPU) {
+    try {
+      const { WebGPURenderer } = await import('./renderer-webgpu.js');
+      const gpu = await WebGPURenderer.create(canvas, eng, wasmMemory);
+      gpu.resize(canvas.width, canvas.height);
+      renderer = gpu;
+      useWebGPU = true;
+      console.log('[webgpu] WebGPU compute renderer active (geometry generated on the GPU; CPU step is physics-only).');
+    } catch (e) {
+      console.warn('[webgpu] init failed — falling back to WebGL2:', e.message);
     }
-    if (!ok) {
+    if (!useWebGPU) {
       try {
         renderer = new Renderer(canvas);
+        console.log('[renderer] WebGL2 active (WebGPU fallback).');
       } catch (e) {
         fatal(e.message, 'WebGL2 requires a modern browser.');
       }
@@ -244,6 +248,7 @@ async function main() {
   window._eng = eng;
   window._renderer = renderer;
   window._wasmMemory = wasmMemory;
+  window._useWebGPU = useWebGPU;
 
   const input_state = new InputHandler(canvas);
 
@@ -257,7 +262,10 @@ async function main() {
     const [thrust, strafe, lift, pitch, yaw, roll, boost, ftl] = input;
     eng.set_look(lookDX, lookDY);
     eng.set_input(thrust, strafe, lift, pitch, yaw, roll, boost, ftl);
-    eng.step(dt);
+    // WebGPU generates geometry on the GPU, so skip the expensive CPU vertex emission
+    // (generate_into): physics + camera only. WebGL2 still needs the CPU geometry.
+    if (useWebGPU) eng.step_physics_only(dt);
+    else eng.step(dt);
 
     renderer.draw(eng, wasmMemory);
 

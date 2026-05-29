@@ -302,20 +302,37 @@ painter's back-to-front order is no longer required.
   position projected onto the globe. `lat = asin(cam.y / |cam|)`, `lon = atan2(-cam.z, cam.x)`,
   both in degrees. Shows what the camera is above.
 
-## WebGPU prototype getters (additive — used ONLY by the flag-gated `?webgpu=1` path)
-These are additive read-only getters for the experimental `web/renderer-webgpu.js` compute
-prototype, which ports the LINE-channel `emit_ring` geometry to a WGSL compute shader. The
-WebGL2 default path does NOT use them; they don't affect the existing contract above.
+## WebGPU renderer getters + step (additive — used by the WebGPU compute renderer)
+The WebGPU renderer (`web/renderer-webgpu.js`) is the DEFAULT when a WebGPU adapter is available
+(WebGL2 is the automatic fallback; `?webgpu=0` forces WebGL2). It generates the LINE + FILL
+geometry on the GPU via WGSL compute passes (porting `emit_ring` / `emit_fill_strip`), so it does
+NOT need the CPU per-frame geometry getters at all. These additive getters/methods feed the GPU
+compute; the WebGL2 path does not use them and the existing contract above is unchanged.
+
+- `eng.step_physics_only(dt)` — advance PHYSICS + CAMERA matrices ONLY; does NOT run the CPU
+  `generate_into` vertex emission. The WebGPU loop calls THIS instead of `step(dt)`, so the CPU
+  per-frame cost drops from the full `generate_into` (tens of ms, unbounded at low altitude — the
+  traces' rAF violations) to ~microseconds (the physics integrator + the two camera matrices). All
+  the camera getters below (`view_proj`, `camera_position`, `cam_forward`, `current_ve`) are valid
+  after it, so the GPU compute is driven identically to `step`. WebGL2 keeps using `step(dt)`.
 - `eng.cam_forward()` → `Float32Array` length 3 — the freelook-aware camera forward (world
   space), the SAME direction the geometry frustum/sight cull uses this frame.
 - `eng.current_ve()` → `f32` — the vertical exaggeration used to draw terrain this frame
-  (override if set, else the altitude-coupled ramp). = `ve / VERT_EXAGGERATION` upstream.
+  (override if set, else the altitude-coupled ramp). This is the RAW `ve` (e.g. 2.75..14); the
+  renderer divides by `VERT_EXAGGERATION` to get the `ve_ratio` used in `sphere_point_scaled`.
 - `eng.elev_world_max()` → `f32` — max terrain elevation (world units) for elevation→brightness
   normalization (matches `line_elevations`).
-- `eng.heightfield_ptr()/_len()` → `u32` — pointer/len into WASM memory of the f32 world-unit
-  elevation grid (row-major, row 0 = north, len = width*height). Uploaded ONCE to the GPU. The
-  grid is stored as i16 meters; `heightfield_ptr()` lazily materializes an f32 world-unit copy on
-  first call (`&mut self`), so this f32 buffer only exists when the WebGPU prototype requests it.
+- `eng.heightfield_i16_ptr()/_len()` → `u32` — **PREFERRED** upload path: pointer/len of the RAW
+  int16 elevation grid (meters, row-major, row 0 = north, `_len` = i16 element count = width*height;
+  byte length = 2·len) directly in WASM memory — NO f32 materialization. The renderer uploads this
+  i16 buffer ONCE (~151 MB for 12288×6144, vs ~302 MB f32 — under `maxStorageBufferBindingSize`,
+  which the device requests bumped from the adapter) and converts meters → world units in WGSL via
+  `* vert_scale()` (matching `Heightfield::sample`).
+- `eng.vert_scale()` → `f32` — `VERT_SCALE` (world units per meter); WGSL multiplies the raw int16
+  meters by this to get world-unit elevations.
+- `eng.heightfield_ptr()/_len()` → `u32` — LEGACY f32 upload path (kept as a fallback): pointer/len
+  of an f32 world-unit grid that `heightfield_ptr()` lazily materializes on first call (`&mut self`).
+  Larger (~302 MB) and may exceed `maxStorageBufferBindingSize`; prefer the i16 path above.
 - `eng.grid_width()/grid_height()` → `u32` — heightfield grid dimensions.
 
 ## Rendering contract (web side)
