@@ -25,5 +25,8 @@ venv/
 /data/bake/cache/
 /data/srtm-cache/
 
+# Agent-dashboard worktree metadata
+/.claude/
+
 # OS
 .DS_Store
