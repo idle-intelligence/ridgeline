@@ -91,6 +91,8 @@ const ALT_WU_MAX = 12000.0;
 const AGL_M_MIN = 80.0;
 const AGL_M_MAX = 60000.0;
 
+let atmoTargetAgl = 500.0; // exag-meters, matches physics DEFAULT_TARGET_AGL
+
 function num(params, key) {
   if (!params.has(key)) return null;
   const v = parseFloat(params.get(key));
@@ -123,6 +125,7 @@ function applyUrlParams(eng) {
   if (aglM !== null) {
     const aglClamped = Math.max(AGL_M_MIN, Math.min(AGL_M_MAX, aglM));
     eng.set_target_agl(aglClamped);
+    atmoTargetAgl = aglClamped; // keep JS in sync
   }
 
   // If none of the spawn params are present, keep the engine's default spawn.
@@ -261,7 +264,12 @@ async function main() {
     const { input, lookDX, lookDY } = input_state.sample();
     const [thrust, strafe, lift, pitch, yaw, roll, boost, ftl] = input;
     eng.set_look(lookDX, lookDY);
-    eng.set_input(thrust, strafe, lift, pitch, yaw, roll, boost, ftl);
+    const modeIdx = eng.flight_mode();
+    if (modeIdx === 0 && Math.abs(pitch) > 0.01) {
+      atmoTargetAgl = Math.max(AGL_M_MIN, Math.min(AGL_M_MAX, atmoTargetAgl - pitch * 5000.0 * dt));
+      eng.set_target_agl(atmoTargetAgl);
+    }
+    eng.set_input(thrust, strafe, lift, modeIdx === 0 ? 0.0 : pitch, yaw, roll, boost, ftl);
     // WebGPU generates geometry on the GPU, so skip the expensive CPU vertex emission
     // (generate_into): physics + camera only. WebGL2 still needs the CPU geometry.
     if (useWebGPU) eng.step_physics_only(dt);
@@ -275,7 +283,7 @@ async function main() {
     const latVal = ll[0], lonVal = ll[1];
     const latStr = `${Math.abs(latVal).toFixed(1)}°${latVal >= 0 ? 'N' : 'S'}`;
     const lonStr = `${Math.abs(lonVal).toFixed(1)}°${lonVal >= 0 ? 'E' : 'W'}`;
-    const modeIdx = eng.flight_mode();
+    // modeIdx already declared above
     const mode = ['ATMO', 'ORBIT', 'INTERPLANETARY'][modeIdx] || 'ATMO';
     const thr = Math.round(eng.throttle() * 100);
     // Context-aware "distance to the gravitationally dominant body", chosen by flight mode —

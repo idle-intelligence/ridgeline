@@ -236,13 +236,13 @@ const FLOOR_EPS: f32 = 0.5;
 const ASSIST_INPUT_DEADZONE: f32 = 1e-3;
 /// Climb angle above the local horizon at the BOTTOM of the ATMO→ORBIT band (near the surface):
 /// a STEEP initial pull-up so the ascent leaves the ground decisively (gravity-turn start).
-const ASCENT_CLIMB_STEEP_DEG: f32 = 60.0;
+const ASCENT_CLIMB_STEEP_DEG: f32 = 15.0;
 /// Climb angle above the local horizon at the TOP of the band (entering ORBIT): SHALLOW so the
 /// craft is nearly level as the ORBIT altitude-hold catches it and it settles into orbit.
 const ASCENT_CLIMB_SHALLOW_DEG: f32 = 5.0;
 /// Rate (s⁻¹) at which the nose eases toward the gravity-turn climb attitude while engaged.
 /// Deliberately gentle so the trajectory is a smooth curved ARC (a few seconds), not a kink.
-const ASCENT_PITCH_RATE: f32 = 1.2;
+const ASCENT_PITCH_RATE: f32 = 0.30;
 
 // ── Capture zone / planetary-mode assist ─────────────────────────────────────────
 /// Top of the CAPTURE ZONE as an ALTITUDE above the sea-level sphere (wu) = R_WORLD·FRAC.

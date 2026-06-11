@@ -38,17 +38,14 @@ const FILL_COARSEN = 3;          // per-ring fill coarsen vs lines — matches g
 const FILL_R_INSET = 0.999;      // fill pushed inward — matches geometry.rs
 
 function stridesForDistance(d) {
-  if (d < 150.0) return [1, 2];
-  if (d < 400.0) return [2, 4];
-  if (d < 900.0) return [4, 8];
-  if (d < 1800.0) return [8, 16];
-  if (d < 4000.0) return [16, 32];
-  return [16, 16];
+  if (d < 1200.0) return [2, 4];   // near→horizon: uniform "second level", no visible bands
+  if (d < 2500.0) return [4, 8];   // low orbit
+  if (d < 4500.0) return [8, 16];  // mid orbit
+  if (d < 7500.0) return [16, 24]; // high orbit
+  return [16, 16];                  // deep space
 }
 function subringFactorForDistance(d) {
-  if (d < 150.0) return 4;
-  if (d < 400.0) return 3;
-  if (d < 900.0) return 2;
+  if (d < 600.0) return 2;
   return 1;
 }
 function lodBoostForAltitude(alt) {
@@ -193,7 +190,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   if (vh < 0.0) { return; }
 
   let lon_span = cam.lon_max - cam.lon_min;
-  let window_half = vh + 40.0;
+  let window_half = vh + 70.0;
   let full = (window_half >= 180.0) || (lon_span < 360.0 - 1e-3);
   let cam_lon = atan2(-cam.cam_pos.z, cam.cam_pos.x) * (180.0 / PI);
 
@@ -292,7 +289,7 @@ fn fillmain(@builtin(global_invocation_id) gid : vec3<u32>) {
   if (hb > vh) { vh = hb; }
 
   let lon_span = cam.lon_max - cam.lon_min;
-  let window_half = vh + 40.0;
+  let window_half = vh + 70.0;
   let full = (window_half >= 180.0) || (lon_span < 360.0 - 1e-3);
   let cam_lon = atan2(-cam.cam_pos.z, cam.cam_pos.x) * (180.0 / PI);
 
@@ -947,7 +944,8 @@ export class WebGPURenderer {
       rp.draw(3);
     }
 
-    // occluder DOME — only in the disc/from-afar regime (matches geometry.rs gate)
+    // occluder DOME — only in the disc/from-afar regime; at low altitude the dome's near
+    // surface becomes visible from outside and creates a dark band across the terrain.
     if (!emitFills) {
       const occU = new Float32Array(20);
       occU.set(mvp, 0); occU.set(PALETTE.fill, 16);
