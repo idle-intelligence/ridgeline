@@ -21,7 +21,12 @@ const ASPECT_DEFAULT: f32 = 16.0 / 9.0;
 // --- Chase camera offsets (ship-local space) ---
 // Camera sits behind (+z) and above (+y) the ship. Small craft as a foreground silhouette.
 const CHASE_UP: f32 = 6.0;
-const CHASE_BACK: f32 = 28.0;
+const CHASE_BACK: f32 = 36.0;
+// --- Orbit camera offsets (planet-frame) ---
+// In orbit the camera lifts radially above the ship and moves behind along the velocity tangent,
+// so ship-local roll/pitch/yaw still appear visually correct (camera stays "behind" the craft).
+const ORBIT_CAM_HEIGHT: f32 = 80.0; // wu above ship, radially outward
+const ORBIT_CAM_BACK: f32 = 60.0;   // wu behind ship, opposing velocity tangent
 
 /// Scale for the normalized aircraft model (length ≈ 1.0) → world units.
 /// Tiny against a 6000 wu planet — a small foreground silhouette.
@@ -106,38 +111,37 @@ fn orbit_frame_weight(alt_wu: f32) -> f32 {
 /// Returns NORMALIZED (forward, up). The same forward drives both the view matrix and the
 /// geometry sight-cull (so the look-down hemisphere is actually generated, never culled away).
 fn cam_look_basis(phys: &Physics) -> (Vec3, Vec3) {
-    let cam_pos = chase_cam_pos(phys);
     let ship_fwd = (phys.orientation * Vec3::NEG_Z).normalize_or_zero();
     let ship_up = (phys.orientation * Vec3::Y).normalize_or_zero();
 
-    let alt = (cam_pos.length() - R_WORLD).max(0.0);
+    let alt = (phys.position.length() - R_WORLD).max(0.0);
     let w = orbit_frame_weight(alt);
     if w <= 0.0 {
         return (ship_fwd, ship_up);
     }
 
-    // Orbital framing. Nadir = straight toward the globe center.
-    let radial = cam_pos.normalize_or_zero(); // away from center
-    let nadir = -radial;
-    // Keep the look slightly OFF pure nadir, tilted toward the ship-forward tangent, so the
-    // vessel (ahead of + above the look ray) rides near the TOP of the frame and Earth fills
-    // below. Project ship_fwd onto the tangent plane (remove the radial component).
-    let tangent = (ship_fwd - radial * ship_fwd.dot(radial)).normalize_or_zero();
-    // Tilt slightly off pure nadir toward the forward tangent so the planet's disc center
-    // drops into the LOWER frame (a big piece of Earth fills the lower view) while the VESSEL
-    // rides HIGH near the top — but not so far that the planet falls off the bottom. ~17° off
-    // nadir keeps the disc center in the lower frame with the curved terrain limb in view
-    // (relief reads in silhouette at the limb) and the vessel riding high above it.
-    const OFF_NADIR: f32 = 0.30; // radians ≈ 17°
-    let orbit_fwd = (nadir * OFF_NADIR.cos() + tangent * OFF_NADIR.sin()).normalize_or_zero();
-    // Screen-up = radial (away from the planet), so the globe sits low and "up" is space.
+    let radial = phys.position.normalize_or_zero();
+
+    // Orbit camera sits ORBIT_CAM_HEIGHT above + ORBIT_CAM_BACK behind the ship (opposing the
+    // velocity tangent). The look direction is from that camera position toward the ship:
+    //   orbit_cam = ship_pos + radial*H - vel_tang_norm*B
+    //   orbit_fwd = ship_pos - orbit_cam = -radial*H + vel_tang_norm*B  (normalized)
+    // This keeps ship-local roll/pitch/yaw visually correct: "right" on screen stays
+    // the ship's right regardless of planet orientation.
+    let vel_tang = phys.velocity - radial * phys.velocity.dot(radial);
+    let vel_tang_norm = if vel_tang.length_squared() > 0.01 {
+        vel_tang.normalize()
+    } else {
+        // No tangential velocity: use ship's forward direction as proxy
+        (ship_fwd - radial * ship_fwd.dot(radial)).normalize_or_zero()
+    };
+    let orbit_fwd = (-radial * ORBIT_CAM_HEIGHT + vel_tang_norm * ORBIT_CAM_BACK).normalize_or_zero();
+    // Screen-up = radial (away from planet): planet always below, stars above.
     let orbit_up = radial;
 
-    // Crossfade ATMO → orbital. Slerp-ish via normalized lerp (the angle is modest and this
-    // stays continuous), then re-orthonormalize the up against the blended forward.
-    let fwd = (ship_fwd.lerp(orbit_fwd, w)).normalize_or_zero();
+    // Crossfade ATMO → orbital via normalized lerp + Gram–Schmidt re-orthonormalization.
+    let fwd = ship_fwd.lerp(orbit_fwd, w).normalize_or_zero();
     let up_raw = ship_up.lerp(orbit_up, w);
-    // Gram–Schmidt: make up perpendicular to fwd.
     let up = (up_raw - fwd * up_raw.dot(fwd)).normalize_or_zero();
     let up = if up.length_squared() < 1e-6 { orbit_up } else { up };
     (fwd, up)
@@ -157,7 +161,23 @@ fn cam_forward_dir(phys: &Physics, look_yaw: f32, look_pitch: f32) -> Vec3 {
 }
 
 fn compute_view_proj(phys: &Physics, look_yaw: f32, look_pitch: f32, aspect: f32) -> [f32; 16] {
-    let cam_pos = chase_cam_pos(phys);
+    let ship_cam = chase_cam_pos(phys);
+    let alt = (phys.position.length() - crate::R_WORLD).max(0.0);
+    let w = orbit_frame_weight(alt);
+    let cam_pos = if w > 0.0 {
+        let radial = phys.position.normalize_or_zero();
+        let vel_tang = phys.velocity - radial * phys.velocity.dot(radial);
+        let backward = if vel_tang.length_squared() > 0.01 {
+            -vel_tang.normalize()
+        } else {
+            let sf = (phys.orientation * Vec3::NEG_Z).normalize_or_zero();
+            -(sf - radial * sf.dot(radial)).normalize_or_zero()
+        };
+        let orbit_cam = phys.position + radial * ORBIT_CAM_HEIGHT + backward * ORBIT_CAM_BACK;
+        ship_cam.lerp(orbit_cam, w)
+    } else {
+        ship_cam
+    };
     let (base_fwd, base_up) = cam_look_basis(phys);
     let right = base_fwd.cross(base_up).normalize_or_zero();
     // Freelook in the look basis. Negate look_yaw so positive d_yaw rotates the view RIGHT
