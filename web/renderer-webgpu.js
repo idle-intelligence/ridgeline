@@ -547,6 +547,50 @@ function buildOccluderSphere(stacks, slices) {
 }
 
 export class WebGPURenderer {
+  constructor(canvas) {
+    if (canvas) this.canvas = canvas;
+  }
+
+  // Standalone init for explore mode: no WASM engine. meta = parsed meta.json,
+  // hfArrayBuffer = raw ArrayBuffer of the int16 heightfield.bin, wasmMemory ignored.
+  async init(meta, hfArrayBuffer, _wasmMemory) {
+    if (!navigator.gpu) throw new Error('navigator.gpu unavailable');
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) throw new Error('no WebGPU adapter');
+    const hfBytes = meta.width * meta.height * 2;
+    const limMaxBinding = adapter.limits.maxStorageBufferBindingSize;
+    const limMaxBuffer = adapter.limits.maxBufferSize;
+    if (hfBytes > limMaxBinding || hfBytes > limMaxBuffer) {
+      throw new Error(`heightfield ${(hfBytes/1e6).toFixed(0)}MB exceeds adapter limits`);
+    }
+    const limMaxStorage = adapter.limits.maxStorageBuffersPerShaderStage;
+    if (limMaxStorage < 10) throw new Error(`maxStorageBuffersPerShaderStage ${limMaxStorage} < 10`);
+    const device = await adapter.requestDevice({
+      requiredLimits: {
+        maxStorageBufferBindingSize: limMaxBinding,
+        maxBufferSize: limMaxBuffer,
+        maxStorageBuffersPerShaderStage: limMaxStorage,
+      },
+    });
+    this.adapterLimits = { maxStorageBufferBindingSize: limMaxBinding, maxBufferSize: limMaxBuffer };
+
+    // Synthesise an eng-like object from meta + raw buffer so _init can proceed normally.
+    const VERT_SCALE = (6000.0 / 6371000.0) * 8.0;
+    const fakeEng = {
+      heightfield_i16_ptr: () => 0,
+      heightfield_i16_len: () => meta.width * meta.height,
+      grid_width: () => meta.width,
+      grid_height: () => meta.height,
+      elev_world_max: () => meta.elev_max * VERT_SCALE,
+      vert_scale: () => VERT_SCALE,
+    };
+    // We need a fake wasmMemory whose .buffer is the hfArrayBuffer but offset-zero.
+    // Trick: supply a wrapper — _init does new Uint8Array(wasmMemory.buffer, hfPtr, hfBytes).
+    // hfPtr = 0, so this just wraps the raw buffer directly.
+    const fakeWasmMemory = { buffer: hfArrayBuffer };
+    await this._init(this.canvas, device, fakeEng, fakeWasmMemory);
+  }
+
   static async create(canvas, eng, wasmMemory) {
     if (!navigator.gpu) throw new Error('navigator.gpu unavailable');
     const adapter = await navigator.gpu.requestAdapter();
@@ -981,8 +1025,9 @@ export class WebGPURenderer {
     rp.drawIndexedIndirect(this.indirectBuf, 0); // line args block
 
     // aircraft
-    if (this.acCount > 0) {
-      const model = eng.model_matrix();
+    const _acModel = eng.model_matrix ? eng.model_matrix() : null;
+    if (this.acCount > 0 && _acModel) {
+      const model = _acModel;
       const acMvp = mat4Mul(mvp, model);
       const acU = new Float32Array(20);
       acU.set(acMvp, 0); acU.set(PALETTE.aircraft, 16);
