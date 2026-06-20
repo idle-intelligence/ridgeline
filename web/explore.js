@@ -81,38 +81,38 @@ function veForAlt(alt) {
 }
 
 // ── Camera ────────────────────────────────────────────────────────────────────
-// Satellite camera: positioned at (lat, lon, altitude), looking tiltR radians
-// off nadir toward headR direction. As planetRot grows, terrain scrolls under.
-function computeCamera(latD, lonD, alt, tiltR, headR, aspect) {
-  const effectiveLon = lonD - planetRot;
-  const pos = spherePt(latD, effectiveLon, R_WORLD + alt);
+// Build view+proj from an arbitrary world-space position and tilt/heading.
+function _buildCamMvp(pos, tiltR, headR, aspect) {
   const radial = normalize(pos);
-
-  // Local tangent basis at satellite ground point
   const northRaw = [0, 1, 0];
   const northProj = sub(northRaw, scale(radial, dot(northRaw, radial)));
   const northLen = Math.hypot(...northProj);
   const northDir = northLen < 0.01 ? normalize(cross(radial, [1,0,0])) : normalize(northProj);
   const eastDir = normalize(cross(northDir, radial));
-
-  // Heading direction on tangent plane
   const headFwd = add(scale(northDir, Math.cos(headR)), scale(eastDir, Math.sin(headR)));
-
-  // Look direction: tilt off nadir toward heading direction
-  // Clamp tilt so cross-product for 'up' is always well-defined
   const safeTilt = Math.max(0.05, Math.min(Math.PI * 0.45, tiltR));
   const nadir = scale(radial, -1);
   const lookDir = normalize(add(scale(nadir, Math.cos(safeTilt)), scale(headFwd, Math.sin(safeTilt))));
-
-  // Screen up: radial projected onto the plane perpendicular to lookDir (space stays "up")
   const upRaw = sub(radial, scale(lookDir, dot(radial, lookDir)));
   const up = Math.hypot(...upRaw) < 0.001 ? scale(headFwd,-1) : normalize(upRaw);
-
   const view = mat4LookAt(pos, add(pos, scale(lookDir, 10000)), up);
   const proj = mat4Perspective(FOV_Y, aspect, Z_NEAR, Z_FAR);
-  const mvp = mat4Mul(proj, view);
+  return { lookDir, up, mvp: mat4Mul(proj, view) };
+}
 
-  return { pos, fwd: lookDir, up, mvp, ve: veForAlt(alt) };
+// Satellite camera: positioned at (lat, lon, altitude), looking tiltR radians
+// off nadir toward headR direction. As planetRot grows, terrain scrolls under.
+// starMvp uses the inertially-fixed position (no planetRot) so stars don't rotate.
+function computeCamera(latD, lonD, alt, tiltR, headR, aspect) {
+  const pos = spherePt(latD, lonD - planetRot, R_WORLD + alt); // planet rotates under camera
+  const { lookDir, up, mvp } = _buildCamMvp(pos, tiltR, headR, aspect);
+
+  // Star camera: same altitude/tilt/heading but at the inertially-fixed longitude
+  // so the starfield stays locked to world space as the planet rotates beneath us.
+  const fixedPos = spherePt(latD, lonD, R_WORLD + alt);
+  const { mvp: starMvp } = _buildCamMvp(fixedPos, tiltR, headR, aspect);
+
+  return { pos, fwd: lookDir, up, mvp, starMvp, ve: veForAlt(alt) };
 }
 
 function makeProxy(cam) {
@@ -122,6 +122,7 @@ function makeProxy(cam) {
     cam_forward:     () => new Float32Array(cam.fwd),
     current_ve:      () => cam.ve,
     model_matrix:    () => null,
+    star_view_proj:  () => cam.starMvp,  // inertially-fixed: stars don't rotate with planet
   };
 }
 

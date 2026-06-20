@@ -980,7 +980,10 @@ export class WebGPURenderer {
     });
 
     // starfield (drawn first, depth-write OFF; globe draws over it)
-    const invVP = mat4Invert(mvp);
+    // Use star_view_proj if provided (explore mode: inertially-fixed MVP so stars don't rotate
+    // with the planet); otherwise fall back to the main MVP.
+    const starMvp = eng.star_view_proj ? eng.star_view_proj() : mvp;
+    const invVP = mat4Invert(starMvp);
     if (invVP) {
       device.queue.writeBuffer(this.starU, 0, invVP);
       rp.setPipeline(this.starPipe);
