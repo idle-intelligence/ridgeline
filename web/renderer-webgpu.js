@@ -24,8 +24,9 @@
 //      channels match the WebGL2 renderer.
 
 import { PALETTE } from './renderer.js';
+import { WORLD_RADIUS } from './constants.js';
 
-const R_WORLD = 6000.0;
+const R_WORLD = WORLD_RADIUS;
 const VERT_EXAGGERATION = 8.0;
 
 // LOD/cull constants — MUST match core/src/geometry.rs.
@@ -71,8 +72,11 @@ function exploreStridesForAlt(alt) {
 // ring. ~24 MB pos + ~24 MB idx — negligible against the 151 MB heightfield.
 const MAX_VERTS = 2_000_000;
 const MAX_INDICES = 4_500_000;
-const MAX_FILL_VERTS = 1_200_000;
-const MAX_FILL_INDICES = 2_600_000;
+// Fill budget sized for explore-mode dense fills (fc=1): at low altitude the finest
+// stride × the widest visible band roughly doubles fill verts vs flight; undersizing
+// drops strips → holes you see the starfield through. Generous headroom (~36/52 MB).
+const MAX_FILL_VERTS = 3_000_000;
+const MAX_FILL_INDICES = 6_500_000;
 const MAX_RINGS = 24_000;   // line sub-ring descriptors per frame
 const MAX_FILL_ROWS = 8_000; // fill strip descriptors per frame
 
@@ -204,7 +208,10 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 
   let lon_span = cam.lon_max - cam.lon_min;
   let window_half = vh + cam.lon_pad;
-  let full = (window_half >= 180.0) || (lon_span < 360.0 - 1e-3);
+  // From far away (whole hemisphere visible) emit FULL rings — the longitude window's
+  // edge would otherwise clip terrain along a camera-following meridian. Cheap here: the
+  // stride is coarse at altitude.
+  let full = (window_half >= 180.0) || (lon_span < 360.0 - 1e-3) || (cam.horizon_dot < 0.45);
   let cam_lon = atan2(-cam.cam_pos.z, cam.cam_pos.x) * (180.0 / PI);
 
   var c0 : i32;
@@ -303,7 +310,10 @@ fn fillmain(@builtin(global_invocation_id) gid : vec3<u32>) {
 
   let lon_span = cam.lon_max - cam.lon_min;
   let window_half = vh + cam.lon_pad;
-  let full = (window_half >= 180.0) || (lon_span < 360.0 - 1e-3);
+  // From far away (whole hemisphere visible) emit FULL rings — the longitude window's
+  // edge would otherwise clip terrain along a camera-following meridian. Cheap here: the
+  // stride is coarse at altitude.
+  let full = (window_half >= 180.0) || (lon_span < 360.0 - 1e-3) || (cam.horizon_dot < 0.45);
   let cam_lon = atan2(-cam.cam_pos.z, cam.cam_pos.x) * (180.0 / PI);
 
   var c0 : i32;
