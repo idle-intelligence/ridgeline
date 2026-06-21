@@ -54,10 +54,13 @@ function lodBoostForAltitude(alt) {
 // Uniform stride for explore mode — one stride for all rings, chosen by altitude alone.
 // Bypasses distance-based LOD to eliminate visible density bands when viewing large areas.
 function exploreStridesForAlt(alt) {
-  if (alt < 100)  return [2, 4];
-  if (alt < 800)  return [4, 8];
-  if (alt < 3000) return [8, 16];
-  if (alt < 8000) return [16, 24];
+  if (alt < 100)   return [1, 2];
+  if (alt < 300)   return [2, 4];
+  if (alt < 700)   return [3, 6];
+  if (alt < 1500)  return [4, 8];
+  if (alt < 3000)  return [6, 12];
+  if (alt < 6000)  return [8, 16];
+  if (alt < 10000) return [12, 24];
   return [16, 16];
 }
 
@@ -896,8 +899,9 @@ export class WebGPURenderer {
         const lat = this.latMax - (frow / (H - 1)) * (this.latMax - this.latMin);
         const nearest = nearestOf(lat);
         const [rowStep, colStride] = exploreStrides || stridesForDistance(nearest);
-        const fillRowStep = Math.max(1, rowStep * boost * FILL_COARSEN);
-        const fillColStride = Math.max(1, colStride * boost * FILL_COARSEN);
+        const fc = exploreStrides ? 2 : FILL_COARSEN;
+        const fillRowStep = Math.max(1, rowStep * boost * fc);
+        const fillColStride = Math.max(1, colStride * boost * fc);
         if (prev) {
           const stride = Math.max(prev[2], fillColStride);
           if (fn < MAX_FILL_ROWS) {
