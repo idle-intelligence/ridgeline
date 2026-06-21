@@ -8,16 +8,20 @@ const M_PER_WU = 6371000 / 6000;
 const EARTH_ROT_DEG_PER_SEC = 360 / 86400;
 
 // ── Camera state ─────────────────────────────────────────────────────────────
-let lat = 20.0;           // degrees — satellite ground-track latitude
-let lon = 15.0;           // degrees — satellite ground-track longitude (pre-rotation)
+// Orbit position is stored as a planet-fixed UNIT VECTOR (the ground point under the
+// satellite), not lat/lon — vectors have no pole singularity, so dragging over the
+// poles is smooth. lat/lon are derived from gpos for display only.
+let gpos = spherePtUnit(20.0, 15.0);
 let altitude = 300.0;     // world units above sea level (~320 km)
 let tilt = Math.PI / 4;   // radians off nadir: 0=top-down, π/2=horizon, craft feel ≈ π/4
-let heading = Math.PI / 2; // radians: 0=north, π/2=east (terrain approaches from front as planet rotates)
-let planetRot = 0.0;      // degrees planet has rotated since start
+let heading = Math.PI / 2; // radians: 0=north, π/2=east (terrain approaches from front)
+let planetRot = 0.0;      // degrees the planet has rotated since start
 let timeSpeed = 1000;     // × real time — terrain visibly scrolls at 1000×
 
 // ── Input state ───────────────────────────────────────────────────────────────
-let dragActive = false, dragHitPt = null, dragLatLon = null;
+let dragActive = false, dragTurn = false;
+let dragHitPt = null;       // world-space sphere hit at drag start (unit)
+let dragStartWorld = null;  // world-space ground dir at drag start (unit)
 let prevX = 0, prevY = 0;
 let rightDragActive = false, rdStartX = 0, rdStartY = 0, rdStartTilt = 0, rdStartHeading = 0;
 let lastPinchDist = 0;
@@ -55,8 +59,15 @@ function spherePt(latDeg, lonDeg, r) {
   const phi = latDeg*Math.PI/180, lam = lonDeg*Math.PI/180;
   return [r*Math.cos(phi)*Math.cos(lam), r*Math.sin(phi), -r*Math.cos(phi)*Math.sin(lam)];
 }
+function spherePtUnit(latDeg, lonDeg) { return spherePt(latDeg, lonDeg, 1); }
 function vec3ToLatLon(v) {
   return [Math.asin(Math.max(-1,Math.min(1,v[1])))*180/Math.PI, Math.atan2(-v[2],v[0])*180/Math.PI];
+}
+// Rotate v about the +Y (polar) axis by deg degrees, matching the longitude convention
+// (spherePt(lat, lon+deg) === rotateY(spherePt(lat, lon), deg)).
+function rotateY(v, deg) {
+  const t = deg*Math.PI/180, c = Math.cos(t), s = Math.sin(t);
+  return [v[0]*c + v[2]*s, v[1], -v[0]*s + v[2]*c];
 }
 function rodrigues(v, axis, angle) {
   const c=Math.cos(angle), s=Math.sin(angle);
@@ -81,7 +92,7 @@ function veForAlt(alt) {
 }
 
 // ── Camera ────────────────────────────────────────────────────────────────────
-// Build view+proj from an arbitrary world-space position and tilt/heading.
+// Build view+proj from an arbitrary world-space camera position and tilt/heading.
 function _buildCamMvp(pos, tiltR, headR, aspect) {
   const radial = normalize(pos);
   const northRaw = [0, 1, 0];
@@ -95,24 +106,25 @@ function _buildCamMvp(pos, tiltR, headR, aspect) {
   const lookDir = normalize(add(scale(nadir, Math.cos(safeTilt)), scale(headFwd, Math.sin(safeTilt))));
   const upRaw = sub(radial, scale(lookDir, dot(radial, lookDir)));
   const up = Math.hypot(...upRaw) < 0.001 ? scale(headFwd,-1) : normalize(upRaw);
+  const right = normalize(cross(lookDir, up));
   const view = mat4LookAt(pos, add(pos, scale(lookDir, 10000)), up);
   const proj = mat4Perspective(FOV_Y, aspect, Z_NEAR, Z_FAR);
-  return { lookDir, up, mvp: mat4Mul(proj, view) };
+  return { lookDir, up, right, mvp: mat4Mul(proj, view) };
 }
 
-// Satellite camera: positioned at (lat, lon, altitude), looking tiltR radians
-// off nadir toward headR direction. As planetRot grows, terrain scrolls under.
-// starMvp uses the inertially-fixed position (no planetRot) so stars don't rotate.
-function computeCamera(latD, lonD, alt, tiltR, headR, aspect) {
-  const pos = spherePt(latD, lonD - planetRot, R_WORLD + alt); // planet rotates under camera
-  const { lookDir, up, mvp } = _buildCamMvp(pos, tiltR, headR, aspect);
+// Satellite camera over the planet-fixed ground point g (unit vector), at altitude.
+// As planetRot grows, the camera follows the geographic point (geostationary) while
+// the rest of the planet rotates under it. starMvp uses the inertially-fixed direction
+// (no planetRot) so the starfield stays locked to world space.
+function computeCamera(g, alt, tiltR, headR, aspect) {
+  const worldDir = rotateY(g, -planetRot);
+  const pos = scale(worldDir, R_WORLD + alt);
+  const { lookDir, up, right, mvp } = _buildCamMvp(pos, tiltR, headR, aspect);
 
-  // Star camera: same altitude/tilt/heading but at the inertially-fixed longitude
-  // so the starfield stays locked to world space as the planet rotates beneath us.
-  const fixedPos = spherePt(latD, lonD, R_WORLD + alt);
+  const fixedPos = scale(g, R_WORLD + alt);
   const { mvp: starMvp } = _buildCamMvp(fixedPos, tiltR, headR, aspect);
 
-  return { pos, fwd: lookDir, up, mvp, starMvp, ve: veForAlt(alt), altWu: alt };
+  return { pos, fwd: lookDir, up, right, mvp, starMvp, ve: veForAlt(alt), altWu: alt };
 }
 
 function makeProxy(cam) {
@@ -129,7 +141,8 @@ function makeProxy(cam) {
 
 // ── HUD ───────────────────────────────────────────────────────────────────────
 const COMPASS = ['N','NE','E','SE','S','SW','W','NW'];
-function hudText(alt, latD, lonD, tiltR, headR) {
+function hudText(alt, g, tiltR, headR) {
+  const [latD, lonD] = vec3ToLatLon(g);
   const altKm = Math.round(alt * M_PER_WU / 1000);
   const ns = latD >= 0 ? 'N' : 'S', ew = lonD >= 0 ? 'E' : 'W';
   const normLon = ((lonD%360)+360)%360;
@@ -198,12 +211,55 @@ async function main() {
   });
 
   const getAspect = () => canvas.width / canvas.height;
-  const getCam = () => computeCamera(lat, lon, altitude, tilt, heading, getAspect());
+  const getCam = () => computeCamera(gpos, altitude, tilt, heading, getAspect());
 
-  // ── Mouse controls ────────────────────────────────────────────────────────
-  // Left drag  = orbit (trackball lat/lon)
-  // Right drag = tilt (vertical) + heading (horizontal)
-  // Scroll     = altitude (up=zoom in, down=zoom out)
+  // ── Orbit drag (shared by mouse + touch) ─────────────────────────────────
+  // All math is on world-space unit vectors via Rodrigues rotation, so it is
+  // singularity-free even directly over the poles.
+  function beginDrag(x, y) {
+    const cam = getCam();
+    const ray = pixelRay(x, y, canvas.width, canvas.height, getAspect(), cam.fwd, cam.up);
+    const hit = raySphere(cam.pos, ray, R_WORLD);
+    dragActive = true;
+    dragTurn = !hit;                              // off-sphere → incremental turn
+    dragHitPt = hit ? normalize(hit) : null;
+    dragStartWorld = rotateY(gpos, -planetRot);   // world ground dir at drag start
+    prevX = x; prevY = y;
+  }
+
+  function moveDrag(x, y) {
+    if (!dragActive) return;
+    const cam = getCam();
+    if (!dragTurn) {
+      // Trackball: the grabbed surface point stays under the cursor.
+      const ray = pixelRay(x, y, canvas.width, canvas.height, getAspect(), cam.fwd, cam.up);
+      const hit = raySphere(cam.pos, ray, R_WORLD);
+      if (hit) {
+        const newDir = normalize(hit);
+        const cr = cross(newDir, dragHitPt);
+        const sinA = Math.min(1, Math.hypot(...cr));
+        const cosA = dot(newDir, dragHitPt);
+        if (sinA > 1e-4) {
+          const axis = normalize(cr);
+          const angle = Math.atan2(sinA, cosA);
+          const rotated = rodrigues(dragStartWorld, axis, angle);
+          gpos = rotateY(rotated, planetRot);
+        }
+        prevX = x; prevY = y;
+        return;
+      }
+      dragTurn = true; // cursor left the sphere → switch to turn for the rest of the drag
+    }
+    // Off-sphere: incremental rotation about the camera's own up/right axes (pole-safe).
+    const k = 0.004;
+    let w = rotateY(gpos, -planetRot);
+    w = rodrigues(w, cam.up, -(x - prevX) * k);
+    w = rodrigues(w, cam.right, (y - prevY) * k);
+    gpos = rotateY(w, planetRot);
+    prevX = x; prevY = y;
+  }
+
+  // ── Mouse: left-drag = orbit, right-drag = tilt/heading, wheel = altitude ──
   canvas.addEventListener('contextmenu', e => e.preventDefault());
 
   canvas.addEventListener('mousedown', e => {
@@ -213,44 +269,16 @@ async function main() {
       rdStartTilt = tilt; rdStartHeading = heading;
       return;
     }
-    const cam = getCam();
-    const ray = pixelRay(e.clientX, e.clientY, canvas.width, canvas.height, getAspect(), cam.fwd, cam.up);
-    const hit = raySphere(cam.pos, ray, R_WORLD);
-    dragActive = true;
-    dragHitPt = hit ? normalize(hit) : null;
-    dragLatLon = [lat, lon];
-    prevX = e.clientX; prevY = e.clientY;
+    beginDrag(e.clientX, e.clientY);
   });
 
   window.addEventListener('mousemove', e => {
     if (rightDragActive) {
-      tilt    = Math.max(0.02, Math.min(Math.PI*0.45, rdStartTilt    + (e.clientY-rdStartY)*0.005));
+      tilt    = Math.max(0.02, Math.min(Math.PI*0.45, rdStartTilt + (e.clientY-rdStartY)*0.005));
       heading = rdStartHeading + (e.clientX-rdStartX)*0.005;
       return;
     }
-    if (!dragActive) return;
-    const cam = getCam();
-    const cw = canvas.width, ch = canvas.height;
-    const ray = pixelRay(e.clientX, e.clientY, cw, ch, getAspect(), cam.fwd, cam.up);
-    const hit = raySphere(cam.pos, ray, R_WORLD);
-    if (hit && dragHitPt) {
-      const newDir = normalize(hit);
-      const sinA = Math.min(1, Math.hypot(...cross(newDir, dragHitPt)));
-      const cosA = dot(newDir, dragHitPt);
-      if (Math.abs(sinA) > 0.0001) {
-        const axis = normalize(cross(newDir, dragHitPt));
-        const angle = Math.atan2(sinA, cosA);
-        const startDir = normalize(spherePt(dragLatLon[0], dragLatLon[1]-planetRot, 1));
-        const rotated = rodrigues(startDir, axis, angle);
-        [lat, lon] = vec3ToLatLon(rotated);
-        lon += planetRot;
-      }
-    } else {
-      const sens = (FOV_Y*180/Math.PI) / canvas.height;
-      lat = Math.max(-85, Math.min(85, lat+(e.clientY-prevY)*sens));
-      lon -= (e.clientX-prevX)*sens / Math.max(0.05, Math.cos(lat*Math.PI/180));
-    }
-    prevX = e.clientX; prevY = e.clientY;
+    moveDrag(e.clientX, e.clientY);
   });
 
   window.addEventListener('mouseup', e => {
@@ -264,18 +292,11 @@ async function main() {
     altitude = Math.max(2, Math.min(100_000, altitude * Math.pow(0.85, -e.deltaY / 100)));
   }, { passive: false });
 
-  // ── Touch controls ────────────────────────────────────────────────────────
+  // ── Touch: 1 finger = orbit, 2-finger pinch = zoom ─────────────────────────
   canvas.addEventListener('touchstart', e => {
     e.preventDefault();
     if (e.touches.length === 1) {
-      const t = e.touches[0];
-      const cam = getCam();
-      const ray = pixelRay(t.clientX, t.clientY, canvas.width, canvas.height, getAspect(), cam.fwd, cam.up);
-      const hit = raySphere(cam.pos, ray, R_WORLD);
-      dragActive = true;
-      dragHitPt = hit ? normalize(hit) : null;
-      dragLatLon = [lat, lon];
-      prevX = t.clientX; prevY = t.clientY;
+      beginDrag(e.touches[0].clientX, e.touches[0].clientY);
     } else if (e.touches.length === 2) {
       dragActive = false;
       lastPinchDist = Math.hypot(
@@ -288,28 +309,7 @@ async function main() {
   canvas.addEventListener('touchmove', e => {
     e.preventDefault();
     if (e.touches.length === 1 && dragActive) {
-      const t = e.touches[0];
-      const cam = getCam();
-      const ray = pixelRay(t.clientX, t.clientY, canvas.width, canvas.height, getAspect(), cam.fwd, cam.up);
-      const hit = raySphere(cam.pos, ray, R_WORLD);
-      if (hit && dragHitPt) {
-        const newDir = normalize(hit);
-        const sinA = Math.min(1, Math.hypot(...cross(newDir, dragHitPt)));
-        const cosA = dot(newDir, dragHitPt);
-        if (Math.abs(sinA) > 0.0001) {
-          const axis = normalize(cross(newDir, dragHitPt));
-          const angle = Math.atan2(sinA, cosA);
-          const startDir = normalize(spherePt(dragLatLon[0], dragLatLon[1]-planetRot, 1));
-          const rotated = rodrigues(startDir, axis, angle);
-          [lat, lon] = vec3ToLatLon(rotated);
-          lon += planetRot;
-        }
-      } else {
-        const sens = (FOV_Y*180/Math.PI) / canvas.height;
-        lat = Math.max(-85, Math.min(85, lat+(t.clientY-prevY)*sens));
-        lon -= (t.clientX-prevX)*sens / Math.max(0.05, Math.cos(lat*Math.PI/180));
-      }
-      prevX = t.clientX; prevY = t.clientY;
+      moveDrag(e.touches[0].clientX, e.touches[0].clientY);
     } else if (e.touches.length === 2) {
       const newDist = Math.hypot(
         e.touches[0].clientX - e.touches[1].clientX,
@@ -334,9 +334,9 @@ async function main() {
     const dt = Math.min((now - prev) / 1000, 0.05);
     prev = now;
     planetRot = (planetRot + timeSpeed * dt * EARTH_ROT_DEG_PER_SEC) % 360;
-    const cam = computeCamera(lat, lon, altitude, tilt, heading, getAspect());
+    const cam = computeCamera(gpos, altitude, tilt, heading, getAspect());
     renderer.draw(makeProxy(cam), null);
-    document.getElementById('info').textContent = hudText(altitude, lat, lon, tilt, heading);
+    document.getElementById('info').textContent = hudText(altitude, gpos, tilt, heading);
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
