@@ -519,7 +519,6 @@ impl Physics {
         //     afterburner raises the top toward FTL_MAX. The idle floor + the ceiling both
         //     crossfade by orbit_w so the envelope shifts smoothly across the ATMO→ORBIT seam;
         //     finally v_target is clamped to eff_cap(r) (the smoothstep cap across all bands). ---
-        self.throttle = (self.throttle + thrust * THROTTLE_RATE * dt).clamp(0.0, 1.0);
         let idle = IDLE_SPEED + (ORBIT_IDLE - IDLE_SPEED) * orbit_w;
         let band_top = CRUISE_MAX + (ORBIT_CAP - CRUISE_MAX) * orbit_w;
         let top = if ftl { FTL_MAX.max(band_top) } else { band_top };
