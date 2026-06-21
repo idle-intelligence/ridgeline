@@ -651,25 +651,9 @@ export class WebGPURenderer {
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
     });
 
-    // ── Heightfield storage buffer (RAW int16, uploaded ONCE) ──
-    const hfPtr = eng.heightfield_i16_ptr();
-    const hfLen = eng.heightfield_i16_len(); // i16 element count
-    const hfBytes = hfLen * 2;
-    // i32-word count (round up so an odd hfLen still fits its trailing i16).
-    const wordCount = Math.ceil(hfLen / 2);
-    this.hfBuf = device.createBuffer({
-      size: wordCount * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    // Copy directly from WASM memory as bytes (avoids a 151 MB JS round-trip cast).
-    const hfBytesView = new Uint8Array(wasmMemory.buffer, hfPtr, hfBytes);
-    device.queue.writeBuffer(this.hfBuf, 0, hfBytesView);
-    this.gridW = eng.grid_width();
-    this.gridH = eng.grid_height();
-    this.latMin = -90; this.latMax = 90; this.lonMin = -180; this.lonMax = 180;
-    this.elevMax = eng.elev_world_max();
-    this.vertScale = eng.vert_scale();
-    console.log(`[webgpu] heightfield uploaded: ${(hfBytes/1e6).toFixed(0)}MB int16 ` +
-      `(maxStorageBufferBindingSize ${(this.adapterLimits.maxStorageBufferBindingSize/1e6).toFixed(0)}MB)`);
+    // Heightfield upload + per-body compute bind group are built below via _makeBody
+    // (after the shared output buffers + compute layout exist), so additional bodies
+    // (e.g. the Moon in explore mode) can be registered and swapped at runtime.
 
     // ── GPU geometry buffers (LINE + FILL channels) ──
     this.posBuf = device.createBuffer({ size: MAX_VERTS * 3 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX });
@@ -705,22 +689,11 @@ export class WebGPURenderer {
     this.computePipe = device.createComputePipeline({ layout: computeLayout, compute: { module: computeMod, entryPoint: 'main' } });
     this.fillComputePipe = device.createComputePipeline({ layout: computeLayout, compute: { module: computeMod, entryPoint: 'fillmain' } });
     this.finalizePipe = device.createComputePipeline({ layout: computeLayout, compute: { module: computeMod, entryPoint: 'finalize' } });
-    this.computeBind = device.createBindGroup({
-      layout: computeBGL,
-      entries: [
-        { binding: 0, resource: { buffer: this.camBuf } },
-        { binding: 1, resource: { buffer: this.hfBuf } },
-        { binding: 2, resource: { buffer: this.ringBuf } },
-        { binding: 3, resource: { buffer: this.posBuf } },
-        { binding: 4, resource: { buffer: this.attrBuf } },
-        { binding: 5, resource: { buffer: this.idxBuf } },
-        { binding: 6, resource: { buffer: this.counterBuf } },
-        { binding: 7, resource: { buffer: this.indirectBuf } },
-        { binding: 8, resource: { buffer: this.fillRowBuf } },
-        { binding: 9, resource: { buffer: this.fillPosBuf } },
-        { binding: 10, resource: { buffer: this.fillIdxBuf } },
-      ],
-    });
+
+    // Build the initial body (heightfield buffer + compute bind group) and make it active.
+    this._computeBGL = computeBGL;
+    this.activeBody = this._makeBody(eng, wasmMemory);
+    this.useBody(this.activeBody);
 
     // ── LINE render pipeline ──
     const renderMod = device.createShaderModule({ code: RENDER_WGSL });
@@ -846,7 +819,11 @@ export class WebGPURenderer {
     const subringCap = (exploreStrides || alt >= 1500.0) ? 1 : Infinity;
     const horizonDot = Math.max(-1, Math.min(1, R_WORLD / camLen));
     const discHalfAngle = Math.asin(Math.max(0, Math.min(1, horizonDot)));
-    const emitFills = discHalfAngle >= OCCLUDER_FOV_GATE; // near/mid regime — matches geometry.rs
+    // Explore mode keeps the clean occluder dome down to a closer altitude (higher gate),
+    // so coarse mid-distance fill strips — which gap/flicker on the Moon — only appear once
+    // the camera is close enough that fills tessellate densely.
+    const fillGate = exploreStrides ? 0.80 : OCCLUDER_FOV_GATE;
+    const emitFills = discHalfAngle >= fillGate; // near/mid regime — matches geometry.rs
     const H = this.gridH;
     const rowLatFrac = (r0, frac) => {
       const t = (r0 + frac) / (H - 1);
@@ -900,7 +877,7 @@ export class WebGPURenderer {
         const lat = this.latMax - (frow / (H - 1)) * (this.latMax - this.latMin);
         const nearest = nearestOf(lat);
         const [rowStep, colStride] = exploreStrides || stridesForDistance(nearest);
-        const fc = exploreStrides ? 2 : FILL_COARSEN;
+        const fc = exploreStrides ? 1 : FILL_COARSEN; // dense fills seal cleanly (no gaps/flicker)
         const fillRowStep = Math.max(1, rowStep * boost * fc);
         const fillColStride = Math.max(1, colStride * boost * fc);
         if (prev) {
@@ -923,6 +900,55 @@ export class WebGPURenderer {
     this._lastRingCount = n;
     this._lastFillCount = fn;
     return { ringCount: n, fillCount: fn, discHalfAngle, emitFills };
+  }
+
+  // Build a renderable BODY (planet/moon): upload its int16 heightfield to a GPU storage
+  // buffer and create the compute bind group referencing it. Shared output/geometry buffers
+  // are reused across bodies; only the heightfield + dims differ. Returns a body handle.
+  _makeBody(eng, wasmMemory) {
+    const device = this.device;
+    const hfPtr = eng.heightfield_i16_ptr();
+    const hfLen = eng.heightfield_i16_len();
+    const hfBytes = hfLen * 2;
+    const wordCount = Math.ceil(hfLen / 2); // round up so an odd hfLen keeps its trailing i16
+    const hfBuf = device.createBuffer({ size: wordCount * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(hfBuf, 0, new Uint8Array(wasmMemory.buffer, hfPtr, hfBytes));
+    const computeBind = device.createBindGroup({
+      layout: this._computeBGL,
+      entries: [
+        { binding: 0, resource: { buffer: this.camBuf } },
+        { binding: 1, resource: { buffer: hfBuf } },
+        { binding: 2, resource: { buffer: this.ringBuf } },
+        { binding: 3, resource: { buffer: this.posBuf } },
+        { binding: 4, resource: { buffer: this.attrBuf } },
+        { binding: 5, resource: { buffer: this.idxBuf } },
+        { binding: 6, resource: { buffer: this.counterBuf } },
+        { binding: 7, resource: { buffer: this.indirectBuf } },
+        { binding: 8, resource: { buffer: this.fillRowBuf } },
+        { binding: 9, resource: { buffer: this.fillPosBuf } },
+        { binding: 10, resource: { buffer: this.fillIdxBuf } },
+      ],
+    });
+    console.log(`[webgpu] body uploaded: ${(hfBytes/1e6).toFixed(0)}MB int16 (${eng.grid_width()}x${eng.grid_height()})`);
+    return {
+      hfBuf, computeBind,
+      gridW: eng.grid_width(), gridH: eng.grid_height(),
+      elevMax: eng.elev_world_max(), vertScale: eng.vert_scale(),
+      latMin: -90, latMax: 90, lonMin: -180, lonMax: 180,
+    };
+  }
+
+  // Register an additional body (e.g. the Moon) for later swapping. Returns its handle.
+  addBody(eng, wasmMemory) { return this._makeBody(eng, wasmMemory); }
+
+  // Make a previously-built body handle the active one for subsequent draws.
+  useBody(b) {
+    this.activeBody = b;
+    this.computeBind = b.computeBind;
+    this.gridW = b.gridW; this.gridH = b.gridH;
+    this.elevMax = b.elevMax; this.vertScale = b.vertScale;
+    this.latMin = b.latMin; this.latMax = b.latMax;
+    this.lonMin = b.lonMin; this.lonMax = b.lonMax;
   }
 
   _writeCamera(camPos, ve, ringCount, fillCount) {

@@ -1,0 +1,18 @@
+{
+  "bbox": {
+    "lat_min": -90,
+    "lat_max": 90,
+    "lon_min": -180,
+    "lon_max": 180
+  },
+  "width": 8192,
+  "height": 4096,
+  "elev_min": -7490,
+  "elev_max": 10755,
+  "dtype": "int16",
+  "byte_order": "little",
+  "row_order": "north_to_south",
+  "col_order": "west_to_east",
+  "reference_radius_m": 1737400,
+  "source": "NASA LRO LOLA LDEM 64 ppd (PDS Geosciences Node)"
+}
