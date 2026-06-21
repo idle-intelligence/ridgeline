@@ -97,6 +97,7 @@ struct Camera {
   ring_count  : u32,
   fill_count  : u32,
   vert_scale  : f32,        // world units per meter (int16 -> wu)
+  lon_pad     : f32,        // degrees of longitude-window padding beyond the geometric horizon
 };
 
 // LINE ring descriptor: fractional data-row r0+frac, latitude, column stride.
@@ -202,7 +203,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   if (vh < 0.0) { return; }
 
   let lon_span = cam.lon_max - cam.lon_min;
-  let window_half = vh + 70.0;
+  let window_half = vh + cam.lon_pad;
   let full = (window_half >= 180.0) || (lon_span < 360.0 - 1e-3);
   let cam_lon = atan2(-cam.cam_pos.z, cam.cam_pos.x) * (180.0 / PI);
 
@@ -301,7 +302,7 @@ fn fillmain(@builtin(global_invocation_id) gid : vec3<u32>) {
   if (hb > vh) { vh = hb; }
 
   let lon_span = cam.lon_max - cam.lon_min;
-  let window_half = vh + 70.0;
+  let window_half = vh + cam.lon_pad;
   let full = (window_half >= 180.0) || (lon_span < 360.0 - 1e-3);
   let cam_lon = atan2(-cam.cam_pos.z, cam.cam_pos.x) * (180.0 / PI);
 
@@ -942,12 +943,16 @@ export class WebGPURenderer {
     dv.setUint32(64, this.gridW, true); dv.setUint32(68, this.gridH, true);
     dv.setFloat32(72, this.elevMax, true); dv.setUint32(76, ringCount, true);
     dv.setUint32(80, fillCount, true); dv.setFloat32(84, this.vertScale, true);
+    dv.setFloat32(88, this._lonPad ?? 70.0, true);
   }
 
   draw(eng, wasmMemory) {
     const device = this.device;
     // Explore mode: uniform LOD override — bypass distance-based stride tables.
     this._exploreLodAlt = eng.explore_alt ? eng.explore_alt() : null;
+    // Explore uses a tight longitude pad (camera doesn't move fast, so the geometric
+    // window is accurate); flight keeps the wide pad for high-speed camera lag.
+    this._lonPad = this._exploreLodAlt !== null ? 14.0 : 70.0;
     const mvp = eng.view_proj();
     const camPosArr = eng.camera_position();
     const camPos = [camPosArr[0], camPosArr[1], camPosArr[2]];
