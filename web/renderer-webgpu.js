@@ -51,6 +51,15 @@ function subringFactorForDistance(d) {
 function lodBoostForAltitude(alt) {
   return alt < 12000.0 ? 1 : 2;
 }
+// Uniform stride for explore mode — one stride for all rings, chosen by altitude alone.
+// Bypasses distance-based LOD to eliminate visible density bands when viewing large areas.
+function exploreStridesForAlt(alt) {
+  if (alt < 100)  return [2, 4];
+  if (alt < 800)  return [4, 8];
+  if (alt < 3000) return [8, 16];
+  if (alt < 8000) return [16, 24];
+  return [16, 16];
+}
 
 // Max GPU buffers. Each ring RESERVES an upper-bound (col_budget) vertex/index block up front
 // (so concurrent rings never interleave their strips), which over-reserves vs the verts actually
@@ -827,8 +836,10 @@ export class WebGPURenderer {
     const camLen = Math.max(Math.hypot(camPos[0], camPos[1], camPos[2]), R_WORLD + 1.0);
     const camLon = Math.atan2(-camPos[2], camPos[0]) * 180 / Math.PI;
     const alt = Math.max(camLen - R_WORLD, 0);
-    const boost = lodBoostForAltitude(alt);
-    const subringCap = alt < 1500.0 ? Infinity : 1;
+    // In explore mode use a uniform stride for all rings (no distance-based variation, no boost).
+    const exploreStrides = this._exploreLodAlt !== null ? exploreStridesForAlt(this._exploreLodAlt) : null;
+    const boost = exploreStrides ? 1 : lodBoostForAltitude(alt);
+    const subringCap = (exploreStrides || alt >= 1500.0) ? 1 : Infinity;
     const horizonDot = Math.max(-1, Math.min(1, R_WORLD / camLen));
     const discHalfAngle = Math.asin(Math.max(0, Math.min(1, horizonDot)));
     const emitFills = discHalfAngle >= OCCLUDER_FOV_GATE; // near/mid regime — matches geometry.rs
@@ -852,9 +863,9 @@ export class WebGPURenderer {
     while (row < H) {
       const lat = rowLatFrac(row, 0);
       const nearest = nearestOf(lat);
-      const [rowStep, colStride] = stridesForDistance(nearest);
+      const [rowStep, colStride] = exploreStrides || stridesForDistance(nearest);
       const rs = rowStep * boost, cs = colStride * boost;
-      let factor = subringFactorForDistance(nearest);
+      let factor = exploreStrides ? 1 : subringFactorForDistance(nearest);
       factor = Math.max(1, Math.min(factor, subringCap === Infinity ? factor : Math.max(1, subringCap)));
       const subCount = Math.max(factor, 1);
       for (let sub = 0; sub < subCount; sub++) {
@@ -884,7 +895,7 @@ export class WebGPURenderer {
       while (frow < H) {
         const lat = this.latMax - (frow / (H - 1)) * (this.latMax - this.latMin);
         const nearest = nearestOf(lat);
-        const [rowStep, colStride] = stridesForDistance(nearest);
+        const [rowStep, colStride] = exploreStrides || stridesForDistance(nearest);
         const fillRowStep = Math.max(1, rowStep * boost * FILL_COARSEN);
         const fillColStride = Math.max(1, colStride * boost * FILL_COARSEN);
         if (prev) {
@@ -931,6 +942,8 @@ export class WebGPURenderer {
 
   draw(eng, wasmMemory) {
     const device = this.device;
+    // Explore mode: uniform LOD override — bypass distance-based stride tables.
+    this._exploreLodAlt = eng.explore_alt ? eng.explore_alt() : null;
     const mvp = eng.view_proj();
     const camPosArr = eng.camera_position();
     const camPos = [camPosArr[0], camPosArr[1], camPosArr[2]];

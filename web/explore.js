@@ -112,7 +112,7 @@ function computeCamera(latD, lonD, alt, tiltR, headR, aspect) {
   const fixedPos = spherePt(latD, lonD, R_WORLD + alt);
   const { mvp: starMvp } = _buildCamMvp(fixedPos, tiltR, headR, aspect);
 
-  return { pos, fwd: lookDir, up, mvp, starMvp, ve: veForAlt(alt) };
+  return { pos, fwd: lookDir, up, mvp, starMvp, ve: veForAlt(alt), altWu: alt };
 }
 
 function makeProxy(cam) {
@@ -123,6 +123,7 @@ function makeProxy(cam) {
     current_ve:      () => cam.ve,
     model_matrix:    () => null,
     star_view_proj:  () => cam.starMvp,  // inertially-fixed: stars don't rotate with planet
+    explore_alt:     () => cam.altWu,    // triggers uniform LOD in renderer
   };
 }
 
