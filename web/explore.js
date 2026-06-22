@@ -85,6 +85,17 @@ function rodrigues(v, axis, angle) {
   const c=Math.cos(angle), s=Math.sin(angle);
   return add(add(scale(v,c), scale(cross(axis,v),s)), scale(axis, dot(axis,v)*(1-c)));
 }
+// Clamp an orbit-position unit vector to |lat| ≤ POLE_LIMIT. The camera's heading basis is
+// geographic-north-relative, which is singular at the poles — crossing exactly over a pole
+// flips the view (and the lon readout by 180°). Clamping just shy keeps motion continuous;
+// the pole is still visible from altitude. (gpos.y = sin(lat).)
+const POLE_LIMIT_Y = Math.sin(88 * Math.PI / 180);
+function clampPolar(g) {
+  if (Math.abs(g[1]) <= POLE_LIMIT_Y) return g;
+  const horiz = Math.hypot(g[0], g[2]) || 1e-6;
+  const s = Math.sqrt(1 - POLE_LIMIT_Y * POLE_LIMIT_Y) / horiz;
+  return [g[0] * s, Math.sign(g[1]) * POLE_LIMIT_Y, g[2] * s];
+}
 function raySphere(origin, dir, radius) {
   const b = 2*dot(origin,dir), c = dot(origin,origin)-radius*radius;
   const disc = b*b-4*c;
@@ -305,7 +316,7 @@ async function main() {
         const cosA = dot(newDir, dragHitPt);
         if (sinA > 1e-4) {
           const axis = normalize(cr);
-          v.gpos = rotateY(rodrigues(dragStartWorld, axis, Math.atan2(sinA, cosA)), v.planetRot);
+          v.gpos = clampPolar(rotateY(rodrigues(dragStartWorld, axis, Math.atan2(sinA, cosA)), v.planetRot));
         }
         prevX = x; prevY = y;
         return;
@@ -316,7 +327,7 @@ async function main() {
     let w = rotateY(v.gpos, -v.planetRot);
     w = rodrigues(w, cam.up, -(x - prevX) * k);
     w = rodrigues(w, cam.right, (y - prevY) * k);
-    v.gpos = rotateY(w, v.planetRot);
+    v.gpos = clampPolar(rotateY(w, v.planetRot));
     prevX = x; prevY = y;
   }
 
@@ -390,15 +401,22 @@ async function main() {
     requestAnimationFrame(frame);
   }
 
-  // On-screen → dot marker (hidden when the body occludes it); off-screen → edge arrow.
+  // Three cases: behind the current body → hide entirely; on-screen & unblocked → dot;
+  // in front but outside the view → edge arrow. The occlusion sphere is slightly larger
+  // than R_WORLD so a grazing-the-limb line of sight counts as blocked (the marker hides
+  // just before it would visually touch the disc).
   function updateBodyMarker(cam) {
     const ob = otherBody();
     const cw = canvas.width, ch = canvas.height;
     const owp = otherBodyWorldPos();
     const d = sub(owp, cam.pos);
     const sf = dot(d, cam.fwd), sx = dot(d, cam.right), sy = dot(d, cam.up);
-    const occluded = !!raySphere(cam.pos, normalize(d), R_WORLD);
-    const sp = (sf > 0 && !occluded) ? projectToScreen(owp, cam.mvp, cw, ch) : null;
+    if (raySphere(cam.pos, normalize(d), R_WORLD * 1.05)) { // behind the current body
+      marker.style.display = 'none';
+      arrow.style.display = 'none';
+      return;
+    }
+    const sp = (sf > 0) ? projectToScreen(owp, cam.mvp, cw, ch) : null;
     const onScreen = sp && sp[0] >= 0 && sp[0] <= cw && sp[1] >= 0 && sp[1] <= ch;
     if (onScreen) {
       marker.style.display = 'block';
