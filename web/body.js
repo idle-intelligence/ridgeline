@@ -1,5 +1,12 @@
 import { WORLD_RADIUS } from './constants.js';
 
+// Unit vector on the sphere for a lat/lon (matches the renderer's sphere mapping:
+// +Y = north pole, col 0 = west). Used to seed the pole-safe gpos orbit state.
+function unitFromLatLon(latDeg, lonDeg) {
+  const phi = latDeg * Math.PI / 180, lam = lonDeg * Math.PI / 180;
+  return [Math.cos(phi) * Math.cos(lam), Math.sin(phi), -Math.cos(phi) * Math.sin(lam)];
+}
+
 // A celestial body the explorer can visit: where its elevation data lives, its physical
 // scale and rotation, how it's styled, and its HUD altitude bands. One Body owns
 // everything body-specific so adding a planet is "write one descriptor + bake one
@@ -30,10 +37,12 @@ export class Body {
     this.modes = spec.modes;
 
     // Live camera state for this body (preserved while you're visiting another).
+    // gpos is the orbit position as a planet-fixed unit vector (pole-singularity-free);
+    // it's seeded from the human-readable lat/lon in the spec.
     const v = spec.view;
     this.view = {
-      lat: v.lat, lon: v.lon, altitude: v.altitude,
-      tilt: v.tilt, heading: v.heading, planetRot: 0,
+      gpos: unitFromLatLon(v.lat, v.lon),
+      altitude: v.altitude, tilt: v.tilt, heading: v.heading, planetRot: 0,
     };
 
     // Runtime, filled in during load/registration:
