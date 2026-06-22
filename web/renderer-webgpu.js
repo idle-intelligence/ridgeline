@@ -214,30 +214,26 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   let full = (window_half >= 180.0) || (lon_span < 360.0 - 1e-3) || (cam.horizon_dot < 0.45);
   let cam_lon = atan2(-cam.cam_pos.z, cam.cam_pos.x) * (180.0 / PI);
 
-  var c0 : i32;
-  var c1 : i32;
+  // Always sweep a window CENTERED on the sub-camera column and wrap with modulo, so the
+  // visible arc never straddles the ±180° data seam (which would split the strip into two
+  // fragmented runs — the deep-space "meridian" artifact). full just widens the window
+  // to the whole ring.
   let stepi : i32 = i32(stride);
+  let to_col_center = ((cam_lon - cam.lon_min) / lon_span) * f32(cam.width - 1u);
+  let c_center = i32(round(to_col_center));
+  var half_cols : i32;
   if (full) {
-    c0 = 0;
-    c1 = i32(last_col);
+    half_cols = i32(cam.width / 2u) + stepi;
   } else {
-    let to_col_center = ((cam_lon - cam.lon_min) / lon_span) * f32(cam.width - 1u);
-    let c_center = i32(round(to_col_center));
-    var half_cols = i32(ceil((window_half / lon_span) * f32(cam.width - 1u)));
+    half_cols = i32(ceil((window_half / lon_span) * f32(cam.width - 1u)));
     if (half_cols < 1) { half_cols = 1; }
-    let raw_lo = c_center - half_cols;
-    c0 = (raw_lo / stepi) * stepi;
-    if (raw_lo < 0 && (raw_lo % stepi) != 0) { c0 = c0 - stepi; }
-    c1 = c_center + half_cols;
   }
+  let raw_lo = c_center - half_cols;
+  var c0 = (raw_lo / stepi) * stepi;
+  if (raw_lo < 0 && (raw_lo % stepi) != 0) { c0 = c0 - stepi; }
+  let c1 = c_center + half_cols;
 
-  var col_budget : u32;
-  if (full) {
-    col_budget = (last_col / stride) + 2u;
-  } else {
-    col_budget = u32((c1 - c0) / stepi) + 2u;
-  }
-
+  let col_budget : u32 = u32((c1 - c0) / stepi) + 2u;
   let idx_budget : u32 = col_budget * 2u + 1u;
   let vbase = atomicAdd(&counters[0], col_budget);
   let ibase = atomicAdd(&counters[1], idx_budget);
@@ -250,15 +246,10 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 
   var k : i32 = c0;
   loop {
-    if (full) { if (k > i32(last_col)) { break; } }
-    else { if (k > c1) { break; } }
-    var c : u32;
-    if (full) { c = u32(min(k, i32(last_col))); }
-    else {
-      var m = k % i32(cam.width);
-      if (m < 0) { m = m + i32(cam.width); }
-      c = u32(m);
-    }
+    if (k > c1) { break; }
+    var m = k % i32(cam.width);
+    if (m < 0) { m = m + i32(cam.width); }
+    let c : u32 = u32(m);
 
     let lon = col_lon(c);
     let h = sample_row_frac(ring.r0, ring.frac, c);
@@ -279,8 +270,6 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     } else {
       prev_vis = false;
     }
-
-    if (full && c == last_col) { break; }
     k = k + stepi;
   }
 
@@ -316,26 +305,23 @@ fn fillmain(@builtin(global_invocation_id) gid : vec3<u32>) {
   let full = (window_half >= 180.0) || (lon_span < 360.0 - 1e-3) || (cam.horizon_dot < 0.45);
   let cam_lon = atan2(-cam.cam_pos.z, cam.cam_pos.x) * (180.0 / PI);
 
-  var c0 : i32;
-  var c1 : i32;
+  // Centered + wrapped window (see emit_ring): never split the arc at the ±180° seam.
+  let to_col_center = ((cam_lon - cam.lon_min) / lon_span) * f32(cam.width - 1u);
+  let c_center = i32(round(to_col_center));
+  var half_cols : i32;
   if (full) {
-    c0 = 0;
-    c1 = i32(last_col);
+    half_cols = i32(cam.width / 2u) + stepi;
   } else {
-    let to_col_center = ((cam_lon - cam.lon_min) / lon_span) * f32(cam.width - 1u);
-    let c_center = i32(round(to_col_center));
-    var half_cols = i32(ceil((window_half / lon_span) * f32(cam.width - 1u)));
+    half_cols = i32(ceil((window_half / lon_span) * f32(cam.width - 1u)));
     if (half_cols < 1) { half_cols = 1; }
-    let raw_lo = c_center - half_cols;
-    c0 = (raw_lo / stepi) * stepi;
-    if (raw_lo < 0 && (raw_lo % stepi) != 0) { c0 = c0 - stepi; }
-    c1 = c_center + half_cols;
   }
+  let raw_lo = c_center - half_cols;
+  var c0 = (raw_lo / stepi) * stepi;
+  if (raw_lo < 0 && (raw_lo % stepi) != 0) { c0 = c0 - stepi; }
+  let c1 = c_center + half_cols;
 
   // Each visited column emits 2 verts (a,b) + up to 2 indices, plus restarts.
-  var col_budget : u32;
-  if (full) { col_budget = (last_col / stride) + 2u; }
-  else { col_budget = u32((c1 - c0) / stepi) + 2u; }
+  let col_budget : u32 = u32((c1 - c0) / stepi) + 2u;
   let vert_budget : u32 = col_budget * 2u;
   let idx_budget : u32 = col_budget * 2u + 2u;
 
@@ -350,15 +336,10 @@ fn fillmain(@builtin(global_invocation_id) gid : vec3<u32>) {
 
   var k : i32 = c0;
   loop {
-    if (full) { if (k > i32(last_col)) { break; } }
-    else { if (k > c1) { break; } }
-    var c : u32;
-    if (full) { c = u32(min(k, i32(last_col))); }
-    else {
-      var m = k % i32(cam.width);
-      if (m < 0) { m = m + i32(cam.width); }
-      c = u32(m);
-    }
+    if (k > c1) { break; }
+    var m = k % i32(cam.width);
+    if (m < 0) { m = m + i32(cam.width); }
+    let c : u32 = u32(m);
 
     let lon = col_lon(c);
     let ha_wu = sample_row_frac(fr.ra, 0.0, c);
@@ -385,7 +366,6 @@ fn fillmain(@builtin(global_invocation_id) gid : vec3<u32>) {
       prev_vis = false;
     }
 
-    if (full && c == last_col) { break; }
     k = k + stepi;
   }
 
