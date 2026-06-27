@@ -86,14 +86,15 @@ def load_elev():
 def resample(elev, w, h):
     if (w, h) == (SRC_W, SRC_H):
         return elev
-    # Downsample by area-mean (block reduce) when shrinking by an integer-ish factor —
-    # cleaner than nearest for big reductions; fall back to nearest otherwise.
-    if w <= SRC_W and h <= SRC_H:
+    # Area-mean (block reduce) only when the source divides EXACTLY by the target —
+    # otherwise `elev[:h*fy, :w*fx]` would crop (drop) the remainder of the globe.
+    # For non-exact ratios, nearest-sample across the FULL range (no crop).
+    if w <= SRC_W and h <= SRC_H and SRC_W % w == 0 and SRC_H % h == 0:
         fy, fx = SRC_H // h, SRC_W // w
-        if fy >= 1 and fx >= 1:
-            ch, cw = h * fy, w * fx
-            block = elev[:ch, :cw].reshape(h, fy, w, fx).mean(axis=(1, 3))
-            return block.astype(np.float32)
+        return elev.reshape(h, fy, w, fx).mean(axis=(1, 3)).astype(np.float32)
+    print(f"  WARNING: {SRC_W}x{SRC_H} not an integer multiple of {w}x{h}; "
+          f"using nearest-sample (consider a divisor target like "
+          f"{SRC_W//3}x{SRC_H//3}).")
     rows = np.round(np.linspace(0, SRC_H - 1, h)).astype(int)
     cols = np.round(np.linspace(0, SRC_W - 1, w)).astype(int)
     return np.asarray(elev[np.ix_(rows, cols)])
@@ -109,9 +110,10 @@ def main():
     args = ap.parse_args()
     PPD = args.ppd
     SRC_W, SRC_H = LDEM_DIMS[PPD]
-    # Default output: native for 4/16, downsample 64 -> 8192x4096.
-    WIDTH = args.width if args.width else (8192 if PPD == 64 else SRC_W)
-    HEIGHT = args.height if args.height else (4096 if PPD == 64 else SRC_H)
+    # Default output: native for 4/16; downsample 64 -> 7680x3840 (an EXACT 1/3 of the
+    # 23040x11520 source, so the area-mean reduce covers the whole globe with no crop).
+    WIDTH = args.width if args.width else (7680 if PPD == 64 else SRC_W)
+    HEIGHT = args.height if args.height else (3840 if PPD == 64 else SRC_H)
     source = f"NASA LRO LOLA LDEM {PPD} ppd (PDS Geosciences Node)"
 
     download()
