@@ -1857,4 +1857,45 @@ mod scenarios {
         }
         println!("[dtcap] alt={:.0} speed={:.0}", alt(&p), p.speed);
     }
+
+    // (i) Throttle ramp RATE: full thrust (+1) held from 0 must raise throttle at EXACTLY
+    // THROTTLE_RATE per second — not 2× (a real bug shipped where the ramp was applied twice
+    // per step, doubling the rate). Pick a duration short enough that it hasn't saturated at 1.
+    #[test]
+    fn i_throttle_ramp_rate() {
+        let mut p = level_craft(400.0, 400.0, 0.0);
+        let secs = 2.0_f32; // 2 s * 0.3 = 0.6, well below saturation
+        run(&mut p, secs, 1.0, 0.0, false);
+        let expected = (THROTTLE_RATE * secs).min(1.0);
+        println!("[throttle-rate] after {secs}s thrust=+1: throttle={:.4} expected≈{:.4}", p.throttle, expected);
+        assert!(p.throttle < 1.0, "saturated — pick a shorter duration");
+        assert!(
+            (p.throttle - expected).abs() < 0.02,
+            "throttle ramp rate off: {} (expected ≈{}, ~2× would be ≈{})",
+            p.throttle, expected, (2.0 * THROTTLE_RATE * secs).min(1.0)
+        );
+    }
+
+    // (j) Throttle HOLDS with no thrust input over many steps (hands-off cruise).
+    #[test]
+    fn j_throttle_holds_with_no_input() {
+        let mut p = level_craft(400.0, 400.0, 0.5);
+        let t0 = p.throttle;
+        run(&mut p, 10.0, 0.0, 0.0, false);
+        println!("[throttle-hold] start={:.4} after 10s thrust=0: {:.4}", t0, p.throttle);
+        assert!((p.throttle - t0).abs() < 1e-4, "throttle drifted with no input: {} -> {}", t0, p.throttle);
+    }
+
+    // (k) Throttle CLAMPED to [0,1]: full thrust long can't exceed 1; negative thrust long can't
+    // go below 0.
+    #[test]
+    fn k_throttle_clamped() {
+        let mut up = level_craft(400.0, 400.0, 0.5);
+        run(&mut up, 30.0, 1.0, 0.0, false);
+        assert!(up.throttle <= 1.0 && up.throttle >= 0.99, "throttle didn't saturate to 1: {}", up.throttle);
+
+        let mut down = level_craft(400.0, 400.0, 0.5);
+        run(&mut down, 30.0, -1.0, 0.0, false);
+        assert!(down.throttle >= 0.0 && down.throttle <= 0.01, "throttle didn't floor to 0: {}", down.throttle);
+    }
 }
