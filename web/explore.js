@@ -23,7 +23,7 @@ const MOON = new Body({
   id: 'moon', name: 'MOON',
   metaUrl: '../data/moon_meta.json', dataUrl: '../data/moon_heightfield.bin',
   radiusM: 1737400, rotationPeriodSec: 27.32 * DAY_SEC,
-  veFactor: 1.0, color: '#cfd2d8',
+  veFactor: 1.0, color: '#cfd2d8', hasOcean: false,
   modes: [[50, 'SURFACE'], [1500, 'LOW'], [12000, 'ORBIT'], [Infinity, 'DEEP SPACE']],
   view: { lat: 0, lon: 0, altitude: 500, tilt: Math.PI / 4, heading: Math.PI / 2 },
   orbit: { aroundId: 'earth', periodSec: 27.32 * DAY_SEC, inclinationDeg: 18 },
@@ -39,6 +39,7 @@ const otherBody = () => REGISTRY.find(b => b !== active);
 // ── Input state ───────────────────────────────────────────────────────────────
 let dragActive = false, dragTurn = false;
 let dragHitPt = null, dragStartWorld = null;
+let dragCam = null, dragPlanetRot = 0; // camera FROZEN at mousedown — see beginDrag
 let prevX = 0, prevY = 0;
 let rightDragActive = false, rdStartX = 0, rdStartY = 0, rdStartTilt = 0, rdStartHeading = 0;
 let lastPinchDist = 0;
@@ -234,10 +235,12 @@ async function main() {
     renderer = await WebGPURenderer.create(canvas, EARTH.engine, mem);
     EARTH.handle = renderer.activeBody;
     for (const b of REGISTRY) {
-      if (b === EARTH) continue;
-      b.engine = mkEngine(b);
-      b.handle = renderer.addBody(b.engine, mem);
+      if (b !== EARTH) { b.engine = mkEngine(b); b.handle = renderer.addBody(b.engine, mem); }
+      // Deepest terrain in world units (negative for basin worlds) → lowers the occluder dome.
+      b.handle.elevMinWu = b.meta.elev_min * b.handle.vertScale;
+      b.handle.hasOcean = b.hasOcean;
     }
+    renderer.useBody(EARTH.handle); // re-apply now that elevMinWu is set
     for (const b of REGISTRY) b._hf = null; // let the raw buffers GC; WASM keeps its copies
   } catch (e) { console.error('[explore] init:', e); showErr(); return; }
 
@@ -293,18 +296,24 @@ async function main() {
 
   // ── Orbit drag (shared by mouse + touch), singularity-free vector math ──────
   function beginDrag(x, y) {
+    // Freeze the camera + planet-rotation for the whole drag. The trackball maps the grabbed
+    // surface point to the cursor; re-deriving the camera from the live (just-updated) gpos
+    // each move creates a feedback loop that diverges near the poles. Referencing the frozen
+    // mousedown state keeps it stable everywhere.
     const cam = getCam();
+    dragCam = cam;
+    dragPlanetRot = active.view.planetRot;
     const ray = pixelRay(x, y, canvas.width, canvas.height, getAspect(), cam.fwd, cam.up);
     const hit = raySphere(cam.pos, ray, R_WORLD);
     dragActive = true;
     dragTurn = !hit;
     dragHitPt = hit ? normalize(hit) : null;
-    dragStartWorld = rotateY(active.view.gpos, -active.view.planetRot);
+    dragStartWorld = rotateY(active.view.gpos, -dragPlanetRot);
     prevX = x; prevY = y;
   }
   function moveDrag(x, y) {
     if (!dragActive) return;
-    const cam = getCam();
+    const cam = dragCam; // frozen at mousedown (no live-gpos feedback)
     const v = active.view;
     if (!dragTurn) {
       const ray = pixelRay(x, y, canvas.width, canvas.height, getAspect(), cam.fwd, cam.up);
@@ -316,7 +325,7 @@ async function main() {
         const cosA = dot(newDir, dragHitPt);
         if (sinA > 1e-4) {
           const axis = normalize(cr);
-          v.gpos = clampPolar(rotateY(rodrigues(dragStartWorld, axis, Math.atan2(sinA, cosA)), v.planetRot));
+          v.gpos = clampPolar(rotateY(rodrigues(dragStartWorld, axis, Math.atan2(sinA, cosA)), dragPlanetRot));
         }
         prevX = x; prevY = y;
         return;

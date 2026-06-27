@@ -387,7 +387,7 @@ fn finalize() {
 
 // ── WGSL: LINE render (ports LINE_FRAG_SRC exactly) ──────────────────────────
 const RENDER_WGSL = /* wgsl */`
-struct VP { mvp : mat4x4<f32>, line_color : vec4<f32> };
+struct VP { mvp : mat4x4<f32>, line_color : vec4<f32>, flags : vec4<f32> };
 @group(0) @binding(0) var<uniform> u : VP;
 struct VSOut { @builtin(position) pos : vec4<f32>, @location(0) strength : f32, @location(1) elev : f32 };
 @vertex
@@ -401,7 +401,8 @@ fn vs(@location(0) a_pos: vec3<f32>, @location(1) a_attr: vec2<f32>) -> VSOut {
 @fragment
 fn fs(i: VSOut) -> @location(0) vec4<f32> {
   let ev = clamp(i.elev, 0.0, 1.0);
-  let isLand = step(0.0008, ev);
+  // flags.x = ocean shading (1 = Earth: dim low elevations as ocean; 0 = airless body: all land).
+  let isLand = max(step(0.0008, ev), 1.0 - u.flags.x);
   let e = pow(ev, 0.35);
   let landBright = mix(0.85, 1.45, e);
   let oceanBright = 0.12;
@@ -687,7 +688,7 @@ export class WebGPURenderer {
 
     // ── LINE render pipeline ──
     const renderMod = device.createShaderModule({ code: RENDER_WGSL });
-    this.lineVP = device.createBuffer({ size: 16 * 4 + 4 * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.lineVP = device.createBuffer({ size: 16 * 4 + 4 * 4 + 4 * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.linePipe = device.createRenderPipeline({
       layout: 'auto',
       vertex: {
@@ -937,6 +938,8 @@ export class WebGPURenderer {
     this.computeBind = b.computeBind;
     this.gridW = b.gridW; this.gridH = b.gridH;
     this.elevMax = b.elevMax; this.vertScale = b.vertScale;
+    this.elevMinWu = b.elevMinWu || 0; // ≤ 0; lowers the occluder dome for basin worlds
+    this.hasOcean = b.hasOcean !== false; // airless bodies (Moon) render all terrain as land
     this.latMin = b.latMin; this.latMax = b.latMax;
     this.lonMin = b.lonMin; this.lonMax = b.lonMax;
   }
@@ -1055,8 +1058,9 @@ export class WebGPURenderer {
     }
 
     // lines (drawIndexedIndirect from compute output)
-    const lineU = new Float32Array(20);
+    const lineU = new Float32Array(24);
     lineU.set(mvp, 0); lineU.set(PALETTE.line, 16);
+    lineU[20] = this.hasOcean === false ? 0 : 1; // ocean shading on unless the body opts out
     device.queue.writeBuffer(this.lineVP, 0, lineU);
     rp.setPipeline(this.linePipe);
     rp.setBindGroup(0, this.lineBind);

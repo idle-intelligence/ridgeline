@@ -32,6 +32,7 @@ export class Body {
     // Visual
     this.veFactor = spec.veFactor ?? 1.0; // multiplies vertical exaggeration
     this.color = spec.color;              // accent colour (sky marker / arrow)
+    this.hasOcean = spec.hasOcean ?? true; // false → render all terrain as land (airless body)
 
     // HUD altitude bands: ascending [[ceilWu, label], …]; last is the catch-all.
     this.modes = spec.modes;
