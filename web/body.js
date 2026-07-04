@@ -40,16 +40,27 @@ export class Body {
     // Live camera state for this body (preserved while you're visiting another).
     // gpos is the orbit position as a planet-fixed unit vector (pole-singularity-free);
     // it's seeded from the human-readable lat/lon in the spec.
-    const v = spec.view;
-    this.view = {
-      gpos: unitFromLatLon(v.lat, v.lon),
-      altitude: v.altitude, tilt: v.tilt, heading: v.heading, planetRot: 0,
-    };
+    this._spawn = spec.view; // { lat, lon, altitude, tilt, heading } — canonical entry framing
+    this.view = {};
+    this.resetView();
 
     // Runtime, filled in during load/registration:
     this.meta = null;     // parsed <body>_meta.json
     this.engine = null;   // WASM Engine holding this body's heightfield
     this.handle = null;   // renderer body handle (GPU buffer + bind group + dims)
+  }
+
+  // Restore the canonical entry framing (called on spawn and every time you jump here — we
+  // deliberately DON'T remember where you left off, so each visit starts the same way).
+  resetView() {
+    const v = this._spawn;
+    this.view.gpos = unitFromLatLon(v.lat, v.lon);
+    this.view.altitude = v.altitude;
+    this.view.tilt = v.tilt;
+    this.view.heading = v.heading;
+    this.view.planetRot = 0;
+    this._morphTilt = false;
+    this._prevMode = undefined;
   }
 
   // Real metres per world unit — drives the HUD km readout for this body.

@@ -8,20 +8,40 @@ import {
 } from './mathutil.js';
 
 const R_WORLD = WORLD_RADIUS;
+const VERT_EXAGGERATION = 8.0; // matches the renderer's ve_ratio = ve / VERT_EXAGGERATION
 const FOV_Y = Math.PI / 4;    // 45° — matches core
+// Camera pitch off nadir: TILT_MIN (~3°) = straight down at the planet, π/2 = horizon, higher =
+// looking up into the sky. How far above the horizon you may crane is capped PER altitude mode:
+// on the SURFACE you can look up to space; in ATMO you stop at the horizon; ORBIT a bit past it.
+// The floor is TILT_MIN in every mode (always free to look straight down).
+const TILT_MIN = 0.05;
+const DEG = Math.PI / 180;
+const SURFACE_TILT = 80 * DEG;             // resting pitch on arriving at the surface (ground + sky)
+const TILT_MAX_BY_MODE = { SURFACE: 110 * DEG, ATMO: Math.PI / 2, LOW: Math.PI / 2, ORBIT: 1.75 };
+const TILT_MAX = TILT_MAX_BY_MODE.SURFACE; // absolute ceiling — up-vector safety clamp in _buildCamMvp
+const tiltMaxFor = m => TILT_MAX_BY_MODE[m] ?? 1.75; // DEEP SPACE etc. → ~100°
+const clampTilt = (t, m) => Math.max(TILT_MIN, Math.min(tiltMaxFor(m), t));
+// Resting pitch each mode eases toward as you cross into it — flattening on the way up so the
+// framing tips from ground-and-sky near the surface to a top-down globe way out.
+const TILT_DEFAULT_BY_MODE = { SURFACE: SURFACE_TILT, ATMO: 60 * DEG, LOW: 60 * DEG, ORBIT: 30 * DEG };
+const tiltDefaultFor = m => TILT_DEFAULT_BY_MODE[m] ?? TILT_MIN; // DEEP SPACE → minimum (top-down)
+const ALT_START = 12010;   // world units — lowest DEEP SPACE (just past the 12000 orbit ceiling); largest framed globe
+const TILT_START = TILT_MIN; // deep-space resting pitch — top-down, globe centered
 const Z_NEAR = 1.0;
 const Z_FAR = 200_000.0;
 const DAY_SEC = 86400;
-const SYS_DEG_PER_SEC = 360 / (27.32 * DAY_SEC); // orbital angle driving the sky marker
+
+let wasmMem = null; // set in main(); backs the per-body heightfield sampling below
+let groundElevM = 0; // terrain elevation (m) under the camera this frame — for the HUD GND readout
 
 // ── Bodies ───────────────────────────────────────────────────────────────────
 const EARTH = new Body({
   id: 'earth', name: 'EARTH',
   metaUrl: '../data/meta.json', dataUrl: '../data/heightfield.bin',
-  radiusM: 6371000, rotationPeriodSec: DAY_SEC,
+  radiusM: 6371000, rotationPeriodSec: 86164, // sidereal day (star-relative spin), not the 86400 solar day
   veFactor: 1.0, color: '#6aa3ff',
   modes: [[50, 'SURFACE'], [1500, 'ATMO'], [12000, 'ORBIT'], [Infinity, 'DEEP SPACE']],
-  view: { lat: 20, lon: 15, altitude: 600, tilt: Math.PI / 4, heading: Math.PI / 2 },
+  view: { lat: 20, lon: 15, altitude: ALT_START, tilt: TILT_START, heading: 0 },
   orbit: null,
 });
 const MOON = new Body({
@@ -30,16 +50,25 @@ const MOON = new Body({
   radiusM: 1737400, rotationPeriodSec: 27.32 * DAY_SEC,
   veFactor: 1.0, color: '#cfd2d8', hasOcean: false,
   modes: [[50, 'SURFACE'], [1500, 'LOW'], [12000, 'ORBIT'], [Infinity, 'DEEP SPACE']],
-  view: { lat: 0, lon: 0, altitude: 500, tilt: Math.PI / 4, heading: Math.PI / 2 },
+  view: { lat: 0, lon: 0, altitude: ALT_START, tilt: TILT_START, heading: 0 },
   orbit: { aroundId: 'earth', periodSec: 27.32 * DAY_SEC, inclinationDeg: 18 },
 });
-const REGISTRY = [EARTH, MOON];
+const MARS = new Body({
+  id: 'mars', name: 'MARS',
+  metaUrl: '../data/mars_meta.json', dataUrl: '../data/mars_heightfield.bin',
+  radiusM: 3389500, rotationPeriodSec: 88642, // Mars sidereal day ≈ 24h 37m
+  // Mars has the tallest relief in the system (Olympus Mons +21 km); a lower veFactor
+  // keeps its rendered bulge (~2% of the globe) in line with Earth/Moon instead of ~4.6%.
+  veFactor: 0.45, color: '#e07a4f', hasOcean: false,
+  modes: [[50, 'SURFACE'], [1500, 'ATMO'], [12000, 'ORBIT'], [Infinity, 'DEEP SPACE']],
+  view: { lat: -6, lon: -75, altitude: ALT_START, tilt: TILT_START, heading: 0 }, // Valles Marineris / Tharsis
+  orbit: { aroundId: 'sun', periodSec: 687 * DAY_SEC, inclinationDeg: 25 },
+});
+const REGISTRY = [EARTH, MOON, MARS];
 
 let active = EARTH;
 let timeSpeed = 1000;        // × real time
-let systemClock = 0.0;      // orbital angle (deg) for the sky marker
-
-const otherBody = () => REGISTRY.find(b => b !== active);
+let simTimeSec = 0.0;       // accumulated simulated seconds — drives each body's marker by its own period
 
 // ── Input state ───────────────────────────────────────────────────────────────
 let dragActive = false, dragTurn = false;
@@ -48,6 +77,7 @@ let dragCam = null, dragPlanetRot = 0; // camera FROZEN at mousedown — see beg
 let prevX = 0, prevY = 0;
 let rightDragActive = false, rdStartX = 0, rdStartY = 0, rdStartTilt = 0, rdStartHeading = 0;
 let lastPinchDist = 0;
+let twoCX = 0, twoCY = 0; // last two-finger centroid — pan → tilt/heading (like right-drag)
 
 // ── Camera-specific helpers (use the camera constants above) ──────────────────
 function pixelRay(px, py, cw, ch, aspect, camFwd, camUp) {
@@ -72,6 +102,19 @@ function veForAlt(alt) {
   return 2.75 + (14.0-2.75)*t*t*(3-2*t);
 }
 
+// Terrain elevation (meters) directly under a lat/lon, read from the body's int16
+// heightfield in WASM memory (nearest sample). row 0 = +90 N, col 0 = -180 W.
+function sampleElevM(b, latDeg, lonDeg) {
+  if (!b.hfPtr || !wasmMem) return 0;
+  const w = b.meta.width, h = b.meta.height;
+  let r = Math.round((90 - latDeg) / 180 * (h - 1));
+  let c = Math.round(((((lonDeg + 180) % 360) + 360) % 360) / 360 * (w - 1));
+  r = r < 0 ? 0 : r >= h ? h - 1 : r;
+  c = c < 0 ? 0 : c >= w ? w - 1 : c;
+  // Fresh view each call (cheap, O(1)) so a WASM-memory grow can't leave a stale buffer.
+  return new Int16Array(wasmMem.buffer, b.hfPtr, w * h)[r * w + c];
+}
+
 // ── Camera ────────────────────────────────────────────────────────────────────
 function _buildCamMvp(pos, tiltR, headR, aspect) {
   const radial = normalize(pos);
@@ -81,7 +124,7 @@ function _buildCamMvp(pos, tiltR, headR, aspect) {
   const northDir = northLen < 0.01 ? normalize(cross(radial, [1,0,0])) : normalize(northProj);
   const eastDir = normalize(cross(northDir, radial));
   const headFwd = add(scale(northDir, Math.cos(headR)), scale(eastDir, Math.sin(headR)));
-  const safeTilt = Math.max(0.05, Math.min(Math.PI * 0.45, tiltR));
+  const safeTilt = Math.max(TILT_MIN, Math.min(TILT_MAX, tiltR));
   const nadir = scale(radial, -1);
   const lookDir = normalize(add(scale(nadir, Math.cos(safeTilt)), scale(headFwd, Math.sin(safeTilt))));
   const upRaw = sub(radial, scale(lookDir, dot(radial, lookDir)));
@@ -97,15 +140,31 @@ function _buildCamMvp(pos, tiltR, headR, aspect) {
 // it; starMvp uses the inertially-fixed direction so the starfield stays world-locked.
 function computeCamera(aspect) {
   const { gpos, altitude, tilt, heading, planetRot } = active.view;
+  const ve = veForAlt(altitude) * active.veFactor;
+  // Terrain-follow: at low altitude `altitude` is clearance ABOVE the local ground (AGL),
+  // so the camera rides over the rendered relief and never sinks into a peak (e.g. Olympus
+  // Mons). The contribution fades out by ~ATMO altitude so orbit/deep-space stay
+  // reference-sphere-relative (no globe "breathing"). terrainWu matches the shader's
+  // sphere_point_scaled bulge: elev_m · vertScale · (ve / VERT_EXAGGERATION).
+  // Sample at the camera's WORLD direction (gpos rotated by -planetRot) — the terrain is
+  // painted at fixed world longitudes, so as the body rotates the sub-point is lon-planetRot.
   const worldDir = rotateY(gpos, -planetRot);
-  const pos = scale(worldDir, R_WORLD + altitude);
+  const [latD, lonD] = vec3ToLatLon(worldDir);
+  groundElevM = sampleElevM(active, latD, lonD); // real terrain elevation (m) under the camera
+  const terrainWu = groundElevM * (active.handle?.vertScale ?? 0) * (ve / VERT_EXAGGERATION);
+  // Terrain-follow is a SURFACE-mode-only convenience (keep the camera above peaks when skimming).
+  // Fade it out by the surface→atmo boundary so ATMO/ORBIT stay purely reference-sphere-relative.
+  const surfCeil = active.modes[0][0];
+  const follow = Math.max(0, Math.min(1, (surfCeil - altitude) / (surfCeil * 0.6))); // 1 at ≤40% ceil → 0 at ceil
+  // Only ride UP over peaks (max with 0); over basins stay reference-relative so the camera
+  // never drops below the reference sphere (which would break the trackball ray-cast).
+  const camR = R_WORLD + Math.max(0, terrainWu) * follow + altitude;
+
+  const pos = scale(worldDir, camR);
   const { lookDir, up, right, mvp } = _buildCamMvp(pos, tilt, heading, aspect);
-  const fixedPos = scale(gpos, R_WORLD + altitude);
+  const fixedPos = scale(gpos, camR);
   const { mvp: starMvp } = _buildCamMvp(fixedPos, tilt, heading, aspect);
-  return {
-    pos, fwd: lookDir, up, right, mvp, starMvp,
-    ve: veForAlt(altitude) * active.veFactor, altWu: altitude,
-  };
+  return { pos, fwd: lookDir, up, right, mvp, starMvp, ve, altWu: altitude };
 }
 
 function makeProxy(cam) {
@@ -132,39 +191,76 @@ function hudText() {
   const spd = timeSpeed === 0 ? '⏸' : timeSpeed < 1 ? timeSpeed+'×' : timeSpeed >= 1000 ? (timeSpeed/1000).toFixed(0)+'k×' : timeSpeed+'×';
   const headDeg = ((heading*180/Math.PI)%360+360)%360;
   const compassIdx = Math.round(headDeg/45) % 8;
+  // Ground elevation under the camera (real metres): +21 km at Olympus Mons, −5 km in a basin.
+  const gndKm = groundElevM / 1000;
+  const gnd = `${gndKm >= 0 ? '+' : '−'}${Math.abs(gndKm).toFixed(1)} km`;
   return `${active.name}  ${Math.abs(latD).toFixed(2)}°${ns}  ${Math.abs(dispLon).toFixed(2)}°${ew}`
-    + `\nALT ${altKm.toLocaleString()} km  ${active.modeFor(altitude)}`
+    + `\nALT ${altKm.toLocaleString()} km · GND ${gnd}  ${active.modeFor(altitude)}`
     + `\nTILT ${Math.round(tilt*180/Math.PI)}°  HDG ${COMPASS[compassIdx]}`
     + `\nTIME ${spd}`;
 }
 
-// World position of the other body — a far point along the orbital direction (drives the marker).
-function otherBodyWorldPos() {
-  const a = systemClock * Math.PI / 180;
-  const incl = (otherBody().orbit?.inclinationDeg ?? active.orbit?.inclinationDeg ?? 18) * Math.PI / 180;
+// Far sky position of a body, for its marker. Each body advances at its OWN orbital rate
+// (angle = simTime / period), so the Moon (~27 d) sweeps far faster than Mars (~687 d).
+// A golden-angle index offset + per-body inclination keep multiple markers from overlapping.
+function bodySkyPos(b) {
+  const i = REGISTRY.indexOf(b);
+  const periodSec = b.orbit?.periodSec ?? 365.25 * DAY_SEC; // Earth (no orbit) → 1 year
+  const a = (simTimeSec / periodSec * 360 + i * 137.5) * Math.PI / 180;
+  const incl = ((b.orbit?.inclinationDeg ?? 15) + i * 9) * Math.PI / 180;
   const dir = normalize([Math.cos(a), Math.sin(incl), -Math.sin(a)]);
-  const D = 90000; // far but within Z_FAR
-  return active.id === 'earth' ? scale(dir, D) : scale(dir, -D);
+  return scale(dir, 90000); // far but within Z_FAR
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 async function main() {
   const canvas = document.getElementById('c');
-  const showErr = () => { document.getElementById('nowgpu').style.display='block'; };
+  const showErr = (detail) => {
+    document.getElementById('loading').style.display = 'none';
+    const el = document.getElementById('nowgpu');
+    if (detail) {
+      el.innerHTML = 'Explore mode couldn\'t start on this device.<br>'
+        + `<span style="opacity:0.6; font-size:12px">${String(detail)}</span>`;
+    }
+    el.style.display = 'block';
+  };
 
-  if (!navigator.gpu) { showErr(); return; }
+  if (!navigator.gpu) { showErr('This browser exposes no WebGPU (navigator.gpu is undefined).'); return; }
 
-  // Load every body's meta + heightfield in parallel.
+  // Load every body's meta + heightfield in parallel, streaming so we can show a progress
+  // bar (the heightfields are large — hundreds of MB total).
+  const loadfill = document.getElementById('loadfill');
+  const loadpct = document.getElementById('loadpct');
+  const got = {}, tot = {};
+  const updateProgress = () => {
+    const r = Object.values(got).reduce((a, b) => a + b, 0);
+    const t = Object.values(tot).reduce((a, b) => a + b, 0);
+    if (loadfill) loadfill.style.width = (t > 0 ? Math.min(100, r / t * 100) : 0) + '%';
+    if (loadpct) loadpct.textContent = `loading terrain… ${(r/1e6).toFixed(0)} / ${(t/1e6).toFixed(0)} MB`;
+  };
+  const fetchHf = async (b) => {
+    const resp = await fetch(b.dataUrl);
+    tot[b.id] = +resp.headers.get('content-length') || 0;
+    got[b.id] = 0;
+    const reader = resp.body.getReader();
+    const chunks = [];
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value); got[b.id] += value.length; updateProgress();
+    }
+    const buf = new Uint8Array(got[b.id]); let pos = 0;
+    for (const c of chunks) { buf.set(c, pos); pos += c.length; }
+    return buf.buffer;
+  };
   try {
     await Promise.all(REGISTRY.map(async (b) => {
-      const [meta, hf] = await Promise.all([
-        fetch(b.metaUrl).then(r => r.json()),
-        fetch(b.dataUrl).then(r => r.arrayBuffer()),
-      ]);
+      const [meta, hf] = await Promise.all([fetch(b.metaUrl).then(r => r.json()), fetchHf(b)]);
       b.meta = meta;
       b._hf = hf; // transient; dropped after the Engine copies it into WASM memory
     }));
-  } catch (e) { console.error('[explore] data load:', e); showErr(); return; }
+    if (loadpct) loadpct.textContent = 'initializing renderer…';
+  } catch (e) { console.error('[explore] data load:', e); showErr('Failed to load terrain data: ' + e.message); return; }
 
   // Build a WASM Engine per body (shared WASM memory) and register each with the renderer.
   let renderer;
@@ -172,6 +268,7 @@ async function main() {
     const { default: initWasm, Engine } = await import('./pkg/ridgeline_core.js');
     const wasm = await initWasm();
     const mem = wasm.memory;
+    wasmMem = mem; // for heightfield sampling (terrain-follow)
     const mkEngine = (b) => {
       const { bbox } = b.meta;
       return new Engine(b.meta.width, b.meta.height, new Uint8Array(b._hf),
@@ -185,10 +282,11 @@ async function main() {
       // Deepest terrain in world units (negative for basin worlds) → lowers the occluder dome.
       b.handle.elevMinWu = b.meta.elev_min * b.handle.vertScale;
       b.handle.hasOcean = b.hasOcean;
+      b.hfPtr = b.engine.heightfield_i16_ptr(); // int16 heightfield offset in WASM memory (for sampleElevM)
     }
     renderer.useBody(EARTH.handle); // re-apply now that elevMinWu is set
     for (const b of REGISTRY) b._hf = null; // let the raw buffers GC; WASM keeps its copies
-  } catch (e) { console.error('[explore] init:', e); showErr(); return; }
+  } catch (e) { console.error('[explore] init:', e); showErr(e.message); return; }
 
   function resize() {
     canvas.width = window.innerWidth;
@@ -206,34 +304,40 @@ async function main() {
     });
   });
 
-  // ── Sky marker (on-screen) + edge arrow (off-screen) for the other body ────
-  const marker = document.createElement('div');
-  marker.id = 'bodymarker';
-  marker.style.cssText = 'position:fixed; display:none; transform:translate(-50%,-50%); cursor:pointer;'
-    + ' font:11px monospace; color:#ccc; text-align:center; pointer-events:auto; z-index:5;';
-  marker.innerHTML = '<div class="dot"></div><div class="lbl"></div>';
-  document.body.appendChild(marker);
-  const markerDot = marker.querySelector('.dot');
-  const markerLbl = marker.querySelector('.lbl');
-  markerDot.style.cssText = 'width:14px; height:14px; border-radius:50%; margin:0 auto 3px;'
-    + ' border:1px solid #fff; box-shadow:0 0 8px rgba(255,255,255,0.4);';
-  marker.addEventListener('click', jumpToOther);
+  // ── Per-body sky markers: on-screen dot (click to jump) or off-screen edge arrow ──
+  const widgets = new Map();
+  for (const b of REGISTRY) {
+    const marker = document.createElement('div');
+    marker.style.cssText = 'position:fixed; display:none; transform:translate(-50%,-50%); cursor:pointer;'
+      + ' font:11px monospace; text-align:center; pointer-events:auto; z-index:5;';
+    marker.innerHTML = '<div class="dot"></div><div class="lbl"></div>';
+    document.body.appendChild(marker);
+    const dot = marker.querySelector('.dot');
+    const lbl = marker.querySelector('.lbl');
+    dot.style.cssText = 'width:14px; height:14px; border-radius:50%; margin:0 auto 3px;'
+      + ` border:1px solid #fff; box-shadow:0 0 8px rgba(255,255,255,0.4); background:${b.color};`;
+    lbl.style.color = b.color;
+    lbl.textContent = '▸ ' + b.name;
+    marker.addEventListener('click', () => jumpTo(b));
 
-  const arrow = document.createElement('div');
-  arrow.id = 'bodyarrow';
-  arrow.style.cssText = 'position:fixed; display:none; transform:translate(-50%,-50%);'
-    + ' cursor:pointer; text-align:center; z-index:5; pointer-events:auto; text-shadow:0 0 6px rgba(0,0,0,0.9);';
-  arrow.innerHTML = '<span class="chev">➤</span><span class="albl"></span>';
-  document.body.appendChild(arrow);
-  const chev = arrow.querySelector('.chev');
-  const albl = arrow.querySelector('.albl');
-  chev.style.cssText = 'display:inline-block; font-size:20px; line-height:1;';
-  albl.style.cssText = 'display:block; font:10px monospace; margin-top:2px;';
-  arrow.addEventListener('click', jumpToOther);
+    const arrow = document.createElement('div');
+    arrow.style.cssText = 'position:fixed; display:none; transform:translate(-50%,-50%);'
+      + ' cursor:pointer; text-align:center; z-index:5; pointer-events:auto; text-shadow:0 0 6px rgba(0,0,0,0.9);';
+    arrow.innerHTML = '<span class="chev">➤</span><span class="albl"></span>';
+    document.body.appendChild(arrow);
+    const chev = arrow.querySelector('.chev');
+    const albl = arrow.querySelector('.albl');
+    chev.style.cssText = `display:inline-block; font-size:20px; line-height:1; color:${b.color};`;
+    albl.style.cssText = `display:block; font:10px monospace; margin-top:2px; color:${b.color};`;
+    arrow.addEventListener('click', () => jumpTo(b));
 
-  function jumpToOther() {
-    active = otherBody();
-    renderer.useBody(active.handle);
+    widgets.set(b.id, { marker, arrow, chev, lbl, albl });
+  }
+
+  function jumpTo(b) {
+    b.resetView(); // always enter at the canonical deep-space framing — don't restore prior position
+    active = b;
+    renderer.useBody(b.handle);
     dragActive = false; rightDragActive = false;
   }
 
@@ -293,13 +397,14 @@ async function main() {
       rightDragActive = true;
       rdStartX = e.clientX; rdStartY = e.clientY;
       rdStartTilt = active.view.tilt; rdStartHeading = active.view.heading;
+      active._morphTilt = false; // user takes over pitch → stop the surface auto-morph
       return;
     }
     beginDrag(e.clientX, e.clientY);
   });
   window.addEventListener('mousemove', e => {
     if (rightDragActive) {
-      active.view.tilt    = Math.max(0.02, Math.min(Math.PI*0.45, rdStartTilt + (e.clientY-rdStartY)*0.005));
+      active.view.tilt    = clampTilt(rdStartTilt - (e.clientY-rdStartY)*0.005, active.modeFor(active.view.altitude));
       active.view.heading = rdStartHeading + (e.clientX-rdStartX)*0.005;
       return;
     }
@@ -320,19 +425,28 @@ async function main() {
     if (e.touches.length === 1) beginDrag(e.touches[0].clientX, e.touches[0].clientY);
     else if (e.touches.length === 2) {
       dragActive = false;
-      lastPinchDist = Math.hypot(e.touches[0].clientX-e.touches[1].clientX, e.touches[0].clientY-e.touches[1].clientY);
+      const t0 = e.touches[0], t1 = e.touches[1];
+      lastPinchDist = Math.hypot(t0.clientX-t1.clientX, t0.clientY-t1.clientY);
+      twoCX = (t0.clientX + t1.clientX) / 2;
+      twoCY = (t0.clientY + t1.clientY) / 2;
+      active._morphTilt = false; // user takes over pitch → stop the surface auto-morph
     }
   }, { passive: false });
   canvas.addEventListener('touchmove', e => {
     e.preventDefault();
     if (e.touches.length === 1 && dragActive) moveDrag(e.touches[0].clientX, e.touches[0].clientY);
     else if (e.touches.length === 2) {
-      const nd = Math.hypot(e.touches[0].clientX-e.touches[1].clientX, e.touches[0].clientY-e.touches[1].clientY);
-      if (lastPinchDist > 0) {
-        const v = active.view;
-        v.altitude = Math.max(2, Math.min(100_000, v.altitude * nd / lastPinchDist));
-      }
-      lastPinchDist = nd;
+      // Two fingers do BOTH: pinch (distance) → zoom; pan (centroid move) → tilt + heading,
+      // exactly like the desktop right-drag.
+      const t0 = e.touches[0], t1 = e.touches[1];
+      const nd = Math.hypot(t0.clientX-t1.clientX, t0.clientY-t1.clientY);
+      const cx = (t0.clientX + t1.clientX) / 2, cy = (t0.clientY + t1.clientY) / 2;
+      const v = active.view;
+      // Maps convention: fingers apart (nd > last) → zoom IN = lower altitude.
+      if (lastPinchDist > 0) v.altitude = Math.max(2, Math.min(100_000, v.altitude * lastPinchDist / nd));
+      v.tilt    = clampTilt(v.tilt - (cy - twoCY) * 0.005, active.modeFor(v.altitude));
+      v.heading = v.heading + (cx - twoCX) * 0.005;
+      lastPinchDist = nd; twoCX = cx; twoCY = cy;
     }
   }, { passive: false });
   canvas.addEventListener('touchend', e => {
@@ -342,28 +456,45 @@ async function main() {
 
   // ── Render loop ───────────────────────────────────────────────────────────
   let prev = performance.now();
+  let loadingDone = false; // hide the loading overlay once the first frame has drawn
   function frame(now) {
     const dt = Math.min((now - prev) / 1000, 0.05);
     prev = now;
     active.view.planetRot = (active.view.planetRot + timeSpeed * dt * active.rotDegPerSec) % 360;
-    systemClock = (systemClock + timeSpeed * dt * SYS_DEG_PER_SEC) % 360;
+    simTimeSec += timeSpeed * dt; // advance the shared simulated clock (each marker uses its own period)
+
+    // Crossing an altitude-mode boundary eases the resting pitch toward that mode's default
+    // (surface 80° → atmo 40° → orbit 20° → deep-space top-down). The morph cancels the moment
+    // the user drags pitch. First frame (prevMode undefined) is skipped so the start framing holds.
+    const mode = active.modeFor(active.view.altitude);
+    if (active._prevMode !== undefined && mode !== active._prevMode) active._morphTilt = true;
+    if (active._morphTilt) {
+      const target = tiltDefaultFor(mode);
+      active.view.tilt += (target - active.view.tilt) * Math.min(1, dt * 1.4);
+      if (Math.abs(active.view.tilt - target) < 0.005) active._morphTilt = false;
+    }
+    active._prevMode = mode;
+    active.view.tilt = clampTilt(active.view.tilt, mode);
 
     const cam = computeCamera(getAspect());
     renderer.draw(makeProxy(cam), null);
+    if (!loadingDone) { document.getElementById('loading').style.display = 'none'; loadingDone = true; }
     document.getElementById('info').textContent = hudText();
-    updateBodyMarker(cam);
+    // Process EVERY body each frame — including the active one, which must be HIDDEN
+    // (skipping it would leave its marker frozen on screen with a stale label).
+    for (const b of REGISTRY) updateBodyMarker(cam, b);
 
     requestAnimationFrame(frame);
   }
 
-  // Three cases: behind the current body → hide entirely; on-screen & unblocked → dot;
-  // in front but outside the view → edge arrow. The occlusion sphere is slightly larger
-  // than R_WORLD so a grazing-the-limb line of sight counts as blocked (the marker hides
-  // just before it would visually touch the disc).
-  function updateBodyMarker(cam) {
-    const ob = otherBody();
+  // Per-body marker. The active body is always hidden. For others: behind the current
+  // body → hide; on-screen & unblocked → dot; in front but off-view → edge arrow. The
+  // label is read straight from b.name at render time (can't desync from the body).
+  function updateBodyMarker(cam, b) {
+    const { marker, arrow, chev, lbl, albl } = widgets.get(b.id);
+    if (b === active) { marker.style.display = 'none'; arrow.style.display = 'none'; return; }
     const cw = canvas.width, ch = canvas.height;
-    const owp = otherBodyWorldPos();
+    const owp = bodySkyPos(b);
     const d = sub(owp, cam.pos);
     const sf = dot(d, cam.fwd), sx = dot(d, cam.right), sy = dot(d, cam.up);
     if (raySphere(cam.pos, normalize(d), R_WORLD * 1.05)) { // behind the current body
@@ -374,15 +505,14 @@ async function main() {
     const sp = (sf > 0) ? projectToScreen(owp, cam.mvp, cw, ch) : null;
     const onScreen = sp && sp[0] >= 0 && sp[0] <= cw && sp[1] >= 0 && sp[1] <= ch;
     if (onScreen) {
+      lbl.textContent = '▸ ' + b.name;
       marker.style.display = 'block';
       marker.style.left = sp[0] + 'px';
       marker.style.top = sp[1] + 'px';
-      markerDot.style.background = ob.color;
-      markerLbl.textContent = '▸ ' + ob.name;
-      markerLbl.style.color = ob.color;
       arrow.style.display = 'none';
       return;
     }
+    albl.textContent = b.name;
     marker.style.display = 'none';
     let ax = sx, ay = sy;
     if (sf <= 0) { ax = -ax; ay = -ay; } // mirror when behind the camera
@@ -396,12 +526,15 @@ async function main() {
     arrow.style.left = (cw/2 + dx*t) + 'px';
     arrow.style.top = (ch/2 + dy*t) + 'px';
     chev.style.transform = `rotate(${ang*180/Math.PI}deg)`;
-    chev.style.color = ob.color;
-    albl.textContent = ob.name;
-    albl.style.color = ob.color;
   }
 
   requestAnimationFrame(frame);
 }
 
-main().catch(e => { console.error('[explore]', e); document.getElementById('nowgpu').style.display='block'; });
+main().catch(e => {
+  console.error('[explore]', e);
+  const el = document.getElementById('nowgpu');
+  el.innerHTML = 'Explore mode couldn\'t start on this device.<br>'
+    + `<span style="opacity:0.6; font-size:12px">${e && e.message ? e.message : e}</span>`;
+  el.style.display = 'block';
+});
