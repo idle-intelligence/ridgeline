@@ -23,6 +23,16 @@ redistributes derived (resampled, reformatted) versions of them.
 - **Processing:** elevation taken relative to the 1737.4 km reference sphere,
   longitude re-centered to −180..180, resampled by `bake/bake_moon.py`.
 
+## Mars — `mars_heightfield.bin`
+
+- **Source:** MOLA MEGDR global topography (megt), 32 pixels/degree.
+- **Mission:** NASA Mars Global Surveyor (MGS), Mars Orbiter Laser Altimeter.
+- **Provider:** NASA PDS Geosciences Node (Washington University in St. Louis).
+- **URL:** https://pds-geosciences.wustl.edu/mgs/mgs-m-mola-5-megdr-l3-v1/
+- **License:** Public domain (NASA / U.S. Government work).
+- **Processing:** big-endian int16 metres above the areoid (no ocean clamp),
+  longitude re-centered to −180..180, resampled by `bake/bake_mars.py`.
+
 To re-bake from the original sources, see `bake/README` notes in the bake
 scripts (they download the upstream files into `bake/cache/`, which is
 gitignored).
