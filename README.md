@@ -1,48 +1,68 @@
 # ridgeline
 
-Fly over the whole Earth, rendered as a globe of stacked Joy Division "Unknown Pleasures"
-ridgelines. A `game + dataviz` experiment. Started from the RidgeShirts elevation work.
+A 3D flight/explore toy over the **whole Earth** — and the **Moon** and **Mars** — each rendered
+as a globe of stacked Joy Division "Unknown Pleasures" latitude rings. Real global elevation data;
+spawn out in deep space, recognise the continents (or Olympus Mons, or Mare Imbrium) on the
+glowing globe, then orbit, dive, and skim the surface.
 
-## Concept
-- A 3D flight game over the **entire planet**, not a flat slice.
-- The Earth is drawn as a globe of stacked constant-latitude rings — each ring is an
-  elevation profile sweeping longitude, so continents bulge out as bright glowing landmasses
-  and oceans sit as a faint smooth sphere. That stacked-ridge layering IS the Joy Division look,
-  wrapped around a planet.
-- A dark occluder sphere hides the far hemisphere (depth test), the visible-hemisphere limb
-  fades out, and altitude-based LOD keeps the whole globe cheap from orbit yet detailed up close.
-- Real **global ETOPO elevation** (8192×4096). Recognizable continents: Africa, Europe, the
-  Mediterranean, the Americas, the Himalaya, etc. Ocean is clamped to sea level.
-- Spawn is out in space over Africa/Europe with a faint starfield behind the planet.
-- Fly, orbit, and dive toward the surface. Exploration only — no weapons.
+A `game + dataviz` experiment — a thing I built, not a polished product. Static site: no bundler,
+no server, all relative paths.
 
-## Stack
-- **Rust → WASM** core (`core/`): spherical world mapping, flight physics, per-frame
-  cull/LOD + ridgeline geometry generation. `wasm-pack build --target web`.
-- **Vanilla JS + WebGL2** shell (`web/`): canvas, game loop, input, renderer (occluder sphere,
-  bright latitude rings, starfield, chase craft). No bundlers, static assets only.
-- **Python** offline data bake (`data/bake/`): ETOPO 2022 → compact binary heightfield + meta.
+## Two modes
+- **`web/explore.html`** — orbit-camera explorer: drift around a body, jump between Earth / Moon /
+  Mars via the sky markers, morph from a top-down deep-space view down to skimming the surface.
+- **`web/index.html`** — free-flight chase-camera game over the globe, with a sense of speed.
 
-Designed to drop into trucs.ai as a static demo page (à la swarm/hive).
-
-## Controls
-ZS = pitch · QD = roll · AE = yaw · Shift = throttle up · Ctrl = throttle down ·
-Space-hold = afterburner · mouse = freelook.
-
-## Layout
-```
-data/        Global ETOPO bake → heightfield.bin + water_mask.bin + meta.json (Git LFS)
-data/bake/   Python pipeline (bake_earth.py): ETOPO 2022 → downsampled global heightfield
-core/        Rust/WASM crate
-web/         JS + WebGL2 shell, index.html, static assets
-```
+## Requirements
+Both modes use a **WebGPU** compute renderer by default. Explore mode **requires** WebGPU
+(Chrome/Edge 113+, Safari 18+; Firefox Android has no WebGPU yet). The flight game falls back to
+WebGL2 automatically where WebGPU is unavailable (`?webgpu=0` forces WebGL2).
 
 ## Run locally
-Serve from the REPO ROOT (not `web/`) so the app's `../data/*` fetches resolve:
+Serve from the **repo root** (not `web/`) so the app's `../data/*` fetches resolve:
 ```
 python3 -m http.server 8080
 ```
-then open `http://localhost:8080/web/`.
+- Explore: http://localhost:8080/web/explore.html
+- Flight:  http://localhost:8080/web/
 
-The big elevation binaries (`data/*.bin`) are stored via **Git LFS** — make sure LFS is
-installed and the files are pulled before serving.
+## Controls
+**Explore** — drag to orbit · right-drag / two-finger to pitch + turn · wheel / pinch to change
+altitude · click a sky marker (MOON / MARS) to jump there · time buttons speed up rotation.
+
+**Flight** — ZS pitch · QD roll · AE yaw · Shift throttle up · Ctrl throttle down ·
+Space-hold afterburner · mouse freelook.
+
+## How it works
+- Each body is a globe of stacked constant-latitude rings — every ring is an elevation profile
+  sweeping longitude, so land bulges out as bright glowing ridges and ocean sits as a faint
+  smooth sphere. That stacked-ridge layering is the Joy Division look, wrapped around a planet.
+- A dark occluder sphere hides the far hemisphere via the depth test; the visible limb fades out;
+  altitude-based LOD keeps the whole globe cheap from orbit yet detailed up close.
+- Vertical relief is exaggerated (tuned per body) so mountains read on a globe.
+
+## Heads up
+Sky markers and the bodies' motion are **illustrative** — they show that other worlds exist and
+roughly how fast each one spins/orbits, but they are **not a real ephemeris**: the planets are not
+in their true positions relative to each other.
+
+## Stack
+- **Rust → WASM** core (`core/`): spherical world mapping, flight physics, per-frame cull/LOD +
+  ridgeline geometry generation. `wasm-pack build --target web`.
+- **Vanilla JS** shell (`web/`): WebGPU compute renderer + WebGL2 fallback, game loop, input.
+  No bundler, static assets only.
+- **Python** offline bakes (`data/bake/`): public-domain government DEMs → compact binary
+  heightfields + meta.
+
+## Layout
+```
+data/        Baked heightfields (*.bin) + meta.json per body — Earth, Moon, Mars (Git LFS)
+data/bake/   Python pipelines: bake_earth.py / bake_moon.py / bake_mars.py
+core/        Rust/WASM crate
+web/         JS shell — explore.html, index.html, renderers, static assets
+```
+
+## Data & license
+Elevation data is public-domain government work (NASA / USGS / NOAA) — see
+[`data/ATTRIBUTION.md`](data/ATTRIBUTION.md). Code is MIT — see [`LICENSE`](LICENSE).
+The large `data/*.bin` blobs are stored via **Git LFS**; install LFS and pull before serving.

@@ -48,4 +48,3 @@ Serve from the REPO ROOT (not `web/`) so the app's `../data/*` fetches resolve:
 
 ## Conventions
 - Commit early and often: small, atomic, one logical change each.
-- Do NOT touch `/Users/tc/Code/RidgeShirts` (read-only reference).
