@@ -19,6 +19,15 @@ Both modes use a **WebGPU** compute renderer by default. Explore mode **requires
 WebGL2 automatically where WebGPU is unavailable (`?webgpu=0` forces WebGL2).
 
 ## Run locally
+Prerequisites:
+```
+# 1. Pull the ~400 MB binary heightfields (stored in Git LFS)
+git lfs install && git lfs pull
+
+# 2. Build the WASM core (outputs to web/pkg/)
+wasm-pack build core --target web --out-dir ../web/pkg
+```
+
 Serve from the **repo root** (not `web/`) so the app's `../data/*` fetches resolve:
 ```
 python3 -m http.server 8080

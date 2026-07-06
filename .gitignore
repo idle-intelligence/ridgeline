@@ -30,3 +30,7 @@ venv/
 
 # OS
 .DS_Store
+
+# Internal working notes (AI session handoffs, plans) — not part of the public repo
+/docs/HANDOFF.md
+/docs/overnight-plan.md
