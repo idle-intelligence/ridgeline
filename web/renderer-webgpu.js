@@ -978,10 +978,24 @@ export class WebGPURenderer {
     this._exploreLodAlt = eng.explore_alt ? eng.explore_alt() : null;
     // Explore uses a tight longitude pad (camera doesn't move fast, so the geometric
     // window is accurate); flight keeps the wide pad for high-speed camera lag.
+    // Near the poles longitude lines converge: a fixed-degree window centered on the
+    // sub-camera longitude misses terrain on the poleward side when |lat| > ~80°
+    // (e.g. from 86°N looking north, the far terrain sits at the antipodal longitude
+    // ≈ cam_lon+180°). Ramp lon_pad → 180° above |lat| 70–85° so the WGSL `full`
+    // gate triggers (window_half ≥ 180). Polar rings are few so the perf cost is nil.
     this._lonPad = this._exploreLodAlt !== null ? 14.0 : 70.0;
     const mvp = eng.view_proj();
     const camPosArr = eng.camera_position();
     const camPos = [camPosArr[0], camPosArr[1], camPosArr[2]];
+    {
+      const camLen = Math.hypot(camPos[0], camPos[1], camPos[2]);
+      const absLat = Math.abs(Math.asin(Math.max(-1, Math.min(1, camPos[1] / camLen)))) * 180 / Math.PI;
+      if (absLat > 70) {
+        const basePad = this._lonPad;
+        const t = Math.min(1, (absLat - 70) / 15); // 0 at 70°, 1 at 85°
+        this._lonPad = basePad + t * (180 - basePad);
+      }
+    }
     const fwdArr = eng.cam_forward();
     this._camFwd = [fwdArr[0], fwdArr[1], fwdArr[2]];
     const ve = eng.current_ve();
