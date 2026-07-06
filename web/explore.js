@@ -1,6 +1,7 @@
 import { WebGPURenderer } from './renderer-webgpu.js';
 import { WORLD_RADIUS } from './constants.js';
 import { Body } from './body.js';
+import { dataUrl, cachedFetch } from './terrain-cache.js';
 import {
   normalize, cross, dot, sub, add, scale,
   mat4LookAt, mat4Perspective, mat4Mul,
@@ -37,7 +38,7 @@ let groundElevM = 0; // terrain elevation (m) under the camera this frame — fo
 // ── Bodies ───────────────────────────────────────────────────────────────────
 const EARTH = new Body({
   id: 'earth', name: 'EARTH',
-  metaUrl: '../data/meta.json', dataUrl: '../data/heightfield.bin',
+  metaUrl: dataUrl('meta.json'), dataUrl: dataUrl('heightfield.bin'),
   radiusM: 6371000, rotationPeriodSec: 86164, // sidereal day (star-relative spin), not the 86400 solar day
   veFactor: 1.0, color: '#6aa3ff',
   modes: [[50, 'SURFACE'], [1500, 'ATMO'], [12000, 'ORBIT'], [Infinity, 'DEEP SPACE']],
@@ -46,7 +47,7 @@ const EARTH = new Body({
 });
 const MOON = new Body({
   id: 'moon', name: 'MOON',
-  metaUrl: '../data/moon_meta.json', dataUrl: '../data/moon_heightfield.bin',
+  metaUrl: dataUrl('moon_meta.json'), dataUrl: dataUrl('moon_heightfield.bin'),
   radiusM: 1737400, rotationPeriodSec: 27.32 * DAY_SEC,
   veFactor: 1.0, color: '#cfd2d8', hasOcean: false,
   modes: [[50, 'SURFACE'], [1500, 'LOW'], [12000, 'ORBIT'], [Infinity, 'DEEP SPACE']],
@@ -55,7 +56,7 @@ const MOON = new Body({
 });
 const MARS = new Body({
   id: 'mars', name: 'MARS',
-  metaUrl: '../data/mars_meta.json', dataUrl: '../data/mars_heightfield.bin',
+  metaUrl: dataUrl('mars_meta.json'), dataUrl: dataUrl('mars_heightfield.bin'),
   radiusM: 3389500, rotationPeriodSec: 88642, // Mars sidereal day ≈ 24h 37m
   // Mars has the tallest relief in the system (Olympus Mons +21 km); a lower veFactor
   // keeps its rendered bulge (~2% of the globe) in line with Earth/Moon instead of ~4.6%.
@@ -239,23 +240,15 @@ async function main() {
     if (loadpct) loadpct.textContent = `loading terrain… ${(r/1e6).toFixed(0)} / ${(t/1e6).toFixed(0)} MB`;
   };
   const fetchHf = async (b) => {
-    const resp = await fetch(b.dataUrl);
-    tot[b.id] = +resp.headers.get('content-length') || 0;
-    got[b.id] = 0;
-    const reader = resp.body.getReader();
-    const chunks = [];
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value); got[b.id] += value.length; updateProgress();
-    }
-    const buf = new Uint8Array(got[b.id]); let pos = 0;
-    for (const c of chunks) { buf.set(c, pos); pos += c.length; }
-    return buf.buffer;
+    got[b.id] = 0; tot[b.id] = 0;
+    const resp = await cachedFetch(b.dataUrl, (loaded, total) => {
+      got[b.id] = loaded; tot[b.id] = total; updateProgress();
+    });
+    return resp.arrayBuffer();
   };
   try {
     await Promise.all(REGISTRY.map(async (b) => {
-      const [meta, hf] = await Promise.all([fetch(b.metaUrl).then(r => r.json()), fetchHf(b)]);
+      const [meta, hf] = await Promise.all([fetch(b.metaUrl).then(r => r.json()), fetchHf(b)]);  // meta: plain fetch (small JSON, not cached)
       b.meta = meta;
       b._hf = hf; // transient; dropped after the Engine copies it into WASM memory
     }));

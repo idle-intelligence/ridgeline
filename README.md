@@ -21,12 +21,15 @@ WebGL2 automatically where WebGPU is unavailable (`?webgpu=0` forces WebGL2).
 ## Run locally
 Prerequisites:
 ```
-# 1. Pull the ~400 MB binary heightfields (stored in Git LFS)
-git lfs install && git lfs pull
+# 1. Fetch the ~400 MB binary heightfields (hosted as a Hugging Face dataset)
+hf download idle-intelligence/ridgeline-terrain --repo-type dataset --include "*.bin" --local-dir data
 
 # 2. Build the WASM core (outputs to web/pkg/)
 wasm-pack build core --target web --out-dir ../web/pkg
 ```
+(No `hf` CLI? Grab the files by URL from
+https://huggingface.co/datasets/idle-intelligence/ridgeline-terrain into `data/` —
+or re-bake them yourself with the scripts in `data/bake/`.)
 
 Serve from the **repo root** (not `web/`) so the app's `../data/*` fetches resolve:
 ```
@@ -65,7 +68,7 @@ in their true positions relative to each other.
 
 ## Layout
 ```
-data/        Baked heightfields (*.bin) + meta.json per body — Earth, Moon, Mars (Git LFS)
+data/        meta.json per body + bake pipelines; *.bin heightfields fetched from HF (gitignored)
 data/bake/   Python pipelines: bake_earth.py / bake_moon.py / bake_mars.py
 core/        Rust/WASM crate
 web/         JS shell — explore.html, index.html, renderers, static assets
@@ -74,4 +77,6 @@ web/         JS shell — explore.html, index.html, renderers, static assets
 ## Data & license
 Elevation data is public-domain government work (NASA / USGS / NOAA) — see
 [`data/ATTRIBUTION.md`](data/ATTRIBUTION.md). Code is MIT — see [`LICENSE`](LICENSE).
-The large `data/*.bin` blobs are stored via **Git LFS**; install LFS and pull before serving.
+The large `data/*.bin` blobs live in a
+[Hugging Face dataset](https://huggingface.co/datasets/idle-intelligence/ridgeline-terrain)
+(not in this repo); the app caches them in-browser via the Cache API after first download.

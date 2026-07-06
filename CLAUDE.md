@@ -6,8 +6,9 @@ recognizable continents. Exploration only (no weapons). Drops into trucs.ai as a
 Cloudflare Pages demo — **no bundlers, all relative paths, no server assumptions.**
 
 ## Layout
-- `data/` — DONE, committed. Global ETOPO bake (`data/bake/bake_earth.py`) → binary
-  heightfield + meta. The `data/*.bin` blobs are stored via **Git LFS**.
+- `data/` — DONE. Global ETOPO bake (`data/bake/bake_earth.py`) → binary heightfield + meta.
+  The `data/*.bin` blobs are NOT in git — they live in the HF dataset
+  `idle-intelligence/ridgeline-terrain` (fetch with `hf download`, or re-bake).
 - `core/` — Rust → WASM crate. `wasm-pack build --target web`. Spherical world mapping,
   flight physics, per-frame cull/LOD + ridgeline geometry generation. Heavy math here; JS thin.
 - `web/` — vanilla JS + WebGL2 shell. `index.html`, game loop, input, renderer.

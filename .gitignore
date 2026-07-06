@@ -34,3 +34,6 @@ venv/
 # Internal working notes (AI session handoffs, plans) — not part of the public repo
 /docs/HANDOFF.md
 /docs/overnight-plan.md
+
+# Terrain blobs — hosted on the HF dataset idle-intelligence/ridgeline-terrain, not in git
+/data/*.bin

@@ -4,6 +4,7 @@ const USE_MOCK = false;
 
 import { Renderer } from './renderer.js';
 import { InputHandler } from './input.js';
+import { dataUrl, cachedFetch } from './terrain-cache.js';
 
 const canvas  = document.getElementById('c');
 const overlay = document.getElementById('overlay');
@@ -16,12 +17,6 @@ function fatal(msg, hint = '') {
 }
 
 // --- asset loading ---
-
-async function fetchBinary(url) {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`Failed to fetch ${url}: ${r.status}`);
-  return new Uint8Array(await r.arrayBuffer());
-}
 
 async function fetchJson(url) {
   const r = await fetch(url);
@@ -186,9 +181,10 @@ async function main() {
   let meta, hfBytes, aircraftJson;
   try {
     [meta, hfBytes, aircraftJson] = await Promise.all([
-      fetchJson('../data/meta.json'),
-      fetchBinary('../data/heightfield.bin'),
-      fetchJson('../data/aircraft.json'),
+      fetchJson(dataUrl('meta.json')),
+      // heightfield.bin is large — cache in the browser so subsequent loads skip the download.
+      cachedFetch(dataUrl('heightfield.bin')).then(r => r.arrayBuffer()).then(b => new Uint8Array(b)),
+      fetchJson('../data/aircraft.json'), // app data, ships with the page — not terrain-cached
     ]);
   } catch (e) {
     fatal('Failed to load terrain data.', e.message);
