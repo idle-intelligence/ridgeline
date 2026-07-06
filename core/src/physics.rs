@@ -264,7 +264,7 @@ const APPROACH_SPEED: f32 = 2000.0;
 ///
 /// At the atmosphere boundary assist == 1, matching the atmospheric regime, so the handoff to
 /// the density-blended fly-by-nose cruise is seamless (no discontinuity).
-pub fn assist(r: f32) -> f32 {
+pub(crate) fn assist(r: f32) -> f32 {
     let alt = r - R_WORLD;
     if alt <= ATMOSPHERE_TOP {
         return 1.0;
@@ -280,7 +280,7 @@ pub fn assist(r: f32) -> f32 {
 /// Air density 1.0 at sea level → 0.0 at ATMOSPHERE_TOP (smoothstep on altitude), 0 in
 /// space. `r` is distance from planet center in wu. This is the blend weight between the
 /// fly-by-nose (atmosphere) and Newtonian (space) regimes.
-pub fn air_density(r: f32) -> f32 {
+pub(crate) fn air_density(r: f32) -> f32 {
     let alt = r - R_WORLD;
     if alt <= 0.0 {
         return 1.0;
@@ -298,7 +298,7 @@ pub fn air_density(r: f32) -> f32 {
 /// Drives the radial-spring strength (active in ORBIT, faded out at both ends so ATMO and
 /// INTERPLANETARY are unaffected and escape is free). Uses two smoothsteps that overlap to a
 /// continuous hump.
-pub fn orbit_blend(r: f32) -> f32 {
+pub(crate) fn orbit_blend(r: f32) -> f32 {
     let alt = r - R_WORLD;
     // Ramp in over the lower quarter of the band, ramp out over the upper quarter.
     let lo = ATMOSPHERE_TOP;
@@ -313,7 +313,7 @@ pub fn orbit_blend(r: f32) -> f32 {
 /// boundaries: ATMO (CRUISE_MAX) → ORBIT (ORBIT_CAP) → INTERPLANETARY (V_CAP). Smoothstep blends
 /// so there is no discontinuity. The afterburner (`ftl`) raises the ATMO/ORBIT floor toward the
 /// INTERPLANETARY tier so pushing out is always possible.
-pub fn eff_cap(r: f32) -> f32 {
+pub(crate) fn eff_cap(r: f32) -> f32 {
     let alt = r - R_WORLD;
     // ATMO → ORBIT across the ATMOSPHERE_TOP boundary.
     let to_orbit = smoothstep(ATMOSPHERE_TOP * 0.5, ATMOSPHERE_TOP, alt);

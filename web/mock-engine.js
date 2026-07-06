@@ -1,8 +1,8 @@
-// DEV MOCK — delete or toggle USE_MOCK=false in main.js when real wasm is built.
+// Pure-JS mock of the WASM Engine — used when USE_MOCK=true in main.js (renderer work without building core).
 // Matches Engine API exactly per core/API.md so the WebGL2 pipeline can be
 // verified visually in headless Chromium without the real wasm present.
 
-export function makeMockEngine(width, height, _hf, _elevMin, _elevMax, latMin, latMax, lonMin, lonMax) {
+export function makeMockEngine(width, height, _hf, _elevMax, latMin, latMax, lonMin, lonMax) {
   const worldW = 10.0;
   const worldD = 10.0;
 
@@ -13,7 +13,7 @@ export function makeMockEngine(width, height, _hf, _elevMin, _elevMax, latMin, l
   let velX = 0, velY = 0, velZ = 0;
   let yawAngle = 0, pitchAngle = -0.3; // looking toward -z, pitched down into terrain
 
-  let _thrust = 0, _strafe = 0, _lift = 0;
+  let _thrust = 0;
   let _pitchRate = 0, _yawRate = 0;
   let _boost = 0, _ftl = false;
 
@@ -140,8 +140,8 @@ export function makeMockEngine(width, height, _hf, _elevMin, _elevMax, latMin, l
       return mat4Mul(proj, view);
     },
 
-    set_input(thrust, strafe, lift, pitch, yaw, _roll, boost, ftl) {
-      _thrust = thrust; _strafe = strafe; _lift = lift;
+    set_input(thrust, pitch, yaw, _roll, boost, ftl) {
+      _thrust = thrust;
       _pitchRate = pitch; _yawRate = yaw;
       _boost = boost; _ftl = ftl;
     },
@@ -156,12 +156,10 @@ export function makeMockEngine(width, height, _hf, _elevMin, _elevMax, latMin, l
       const sP = Math.sin(pitchAngle), cP = Math.cos(pitchAngle);
       // camera forward = negated row2 of R = (-sY, sP*cY, -cP*cY)
       const fwdX = -sY, fwdY = sP * cY, fwdZ = -cP * cY;
-      // right = row0 of R = (cY, sP*sY, -cP*sY)
-      const rightX = cY, rightY = sP * sY, rightZ = -cP * sY;
 
-      velX = (_thrust * fwdX + _strafe * rightX) * spd;
-      velY = (_thrust * fwdY + _lift) * spd;
-      velZ = (_thrust * fwdZ + _strafe * rightZ) * spd;
+      velX = _thrust * fwdX * spd;
+      velY = _thrust * fwdY * spd;
+      velZ = _thrust * fwdZ * spd;
 
       camX += velX * dt;
       camY += velY * dt;

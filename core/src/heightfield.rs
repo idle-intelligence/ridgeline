@@ -93,13 +93,12 @@ pub struct Heightfield {
 
 impl Heightfield {
     /// Parse raw int16 LE heightfield (raw meters, kept as i16).
-    /// elev_min/max in meters; lat/lon in degrees.
+    /// elev_max in meters; lat/lon in degrees.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         width: u32,
         height: u32,
         hf_bytes: &[u8],
-        elev_min: f32,
         elev_max: f32,
         lat_min: f32,
         lat_max: f32,
@@ -108,7 +107,6 @@ impl Heightfield {
     ) -> Self {
         let n = (width * height) as usize;
 
-        let _ = elev_min;
         let elev_world_max = elev_max * VERT_SCALE;
 
         let mut elev = Vec::with_capacity(n);
@@ -179,16 +177,6 @@ impl Heightfield {
     pub fn row_lat_frac(&self, r0: u32, frac: f32) -> f32 {
         let t = (r0 as f32 + frac) / (self.height - 1) as f32;
         self.lat_max - t * (self.lat_max - self.lat_min)
-    }
-
-    /// Normalized elevation in [0,1] for (row, col), clamped. 0 = sea, 1 = highest.
-    #[allow(dead_code)]
-    #[inline]
-    pub fn elev_norm(&self, row: u32, col: u32) -> f32 {
-        if self.elev_world_max <= 0.0 {
-            return 0.0;
-        }
-        (self.sample(row, col) / self.elev_world_max).clamp(0.0, 1.0)
     }
 
     /// Map (lat°, lon°, elev_wu) → 3D world point on the sphere.

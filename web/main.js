@@ -1,5 +1,5 @@
 // ridgeline — main bootstrap.
-// Toggle USE_MOCK to false once web/pkg/ is built by the core agent.
+// USE_MOCK swaps in mock-engine.js (pure-JS stub) for renderer work without the WASM build.
 const USE_MOCK = false;
 
 import { Renderer } from './renderer.js';
@@ -39,7 +39,7 @@ async function buildEngine(meta, hfBytes) {
       eng: makeMockEngine(
         meta.width, meta.height,
         hfBytes,
-        meta.elev_min, meta.elev_max,
+        meta.elev_max,
         bbox.lat_min, bbox.lat_max, bbox.lon_min, bbox.lon_max,
       ),
       wasmMemory: null,
@@ -63,7 +63,7 @@ async function buildEngine(meta, hfBytes) {
   const eng = new Engine(
     meta.width, meta.height,
     hfBytes,
-    meta.elev_min, meta.elev_max,
+    meta.elev_max,
     bbox.lat_min, bbox.lat_max, bbox.lon_min, bbox.lon_max,
   );
   // wasm.memory backs the zero-copy geometry views used by the renderer.
@@ -247,7 +247,7 @@ async function main() {
 
   overlay.style.display = 'none';
 
-  // Expose engine + renderer for headless testing (no-op in production)
+  // exposed for the headless test harness (web/test-headless.mjs)
   window._eng = eng;
   window._renderer = renderer;
   window._wasmMemory = wasmMemory;
@@ -262,14 +262,14 @@ async function main() {
     prev = now;
 
     const { input, lookDX, lookDY } = input_state.sample();
-    const [thrust, strafe, lift, pitch, yaw, roll, boost, ftl] = input;
+    const [thrust, , , pitch, yaw, roll, boost, ftl] = input;
     eng.set_look(lookDX, lookDY);
     const modeIdx = eng.flight_mode();
     if (modeIdx === 0 && Math.abs(pitch) > 0.01) {
       atmoTargetAgl = Math.max(AGL_M_MIN, Math.min(AGL_M_MAX, atmoTargetAgl - pitch * 5000.0 * dt));
       eng.set_target_agl(atmoTargetAgl);
     }
-    eng.set_input(thrust, strafe, lift, modeIdx === 0 ? 0.0 : pitch, yaw, roll, boost, ftl);
+    eng.set_input(thrust, modeIdx === 0 ? 0.0 : pitch, yaw, roll, boost, ftl);
     // WebGPU generates geometry on the GPU, so skip the expensive CPU vertex emission
     // (generate_into): physics + camera only. WebGL2 still needs the CPU geometry.
     if (useWebGPU) eng.step_physics_only(dt);

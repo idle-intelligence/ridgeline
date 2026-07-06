@@ -220,7 +220,6 @@ impl Engine {
         width: u32,
         height: u32,
         hf_bytes: &[u8],
-        elev_min: f32,
         elev_max: f32,
         lat_min: f32,
         lat_max: f32,
@@ -231,7 +230,7 @@ impl Engine {
         console_error_panic_hook::set_once();
 
         let hf = Heightfield::new(
-            width, height, hf_bytes, elev_min, elev_max, lat_min, lat_max,
+            width, height, hf_bytes, elev_max, lat_min, lat_max,
             lon_min, lon_max,
         );
 
@@ -315,8 +314,6 @@ impl Engine {
     pub fn set_input(
         &mut self,
         thrust: f32,
-        _strafe: f32,
-        _lift: f32,
         pitch: f32,
         yaw: f32,
         roll: f32,

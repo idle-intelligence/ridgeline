@@ -272,7 +272,7 @@ async function main() {
     const mkEngine = (b) => {
       const { bbox } = b.meta;
       return new Engine(b.meta.width, b.meta.height, new Uint8Array(b._hf),
-        b.meta.elev_min, b.meta.elev_max, bbox.lat_min, bbox.lat_max, bbox.lon_min, bbox.lon_max);
+        b.meta.elev_max, bbox.lat_min, bbox.lat_max, bbox.lon_min, bbox.lon_max);
     };
     EARTH.engine = mkEngine(EARTH);
     renderer = await WebGPURenderer.create(canvas, EARTH.engine, mem);
