@@ -932,6 +932,13 @@ export class WebGPURenderer {
   // Register an additional body (e.g. the Moon) for later swapping. Returns its handle.
   addBody(eng, wasmMemory) { return this._makeBody(eng, wasmMemory); }
 
+  // Destroy a body handle, freeing its GPU heightfield buffer. Do NOT call on the currently
+  // active body (switch to another first). Safe to call on any non-active handle.
+  destroyBody(b) {
+    if (!b) return;
+    try { b.hfBuf.destroy(); } catch (_) {}
+  }
+
   // Make a previously-built body handle the active one for subsequent draws.
   useBody(b) {
     this.activeBody = b;

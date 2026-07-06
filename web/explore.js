@@ -35,10 +35,73 @@ const DAY_SEC = 86400;
 let wasmMem = null; // set in main(); backs the per-body heightfield sampling below
 let groundElevM = 0; // terrain elevation (m) under the camera this frame — for the HUD GND readout
 
+// Per-body refinement indicator: label shown in HUD while finer tier is downloading.
+// e.g. { earth: 'd4', moon: null }
+const lodLabel = {};
+
+// ── Tiered heightfield loading ────────────────────────────────────────────────
+// Tier factors: 16 = coarse (d16), 4 = medium (d4), 1 = full resolution.
+// Tier dims: meta.width/factor × meta.height/factor (integer division, exact by bake design).
+// URL for a tier: stem + (f===1 ? '.bin' : `_d${f}.bin`)
+function tierUrl(b, f) {
+  return dataUrl(f === 1 ? `${b.hfStem}.bin` : `${b.hfStem}_d${f}.bin`);
+}
+function tierDims(meta, f) {
+  return { w: Math.floor(meta.width / f), h: Math.floor(meta.height / f) };
+}
+
+// Build a WASM Engine + renderer handle for a given buffer + dims, then atomically
+// upgrade the body's tier state. Destroys the previous engine/handle (GPU mem + WASM).
+// Only upgrades if `f` is finer than the body's current tier. If `isActive` is true,
+// also calls renderer.useBody so rendering switches to the new tier.
+// This function is synchronous after the await (all GPU writes are synchronous).
+function _applyTier(b, f, buf, meta, Engine, renderer, isActive) {
+  if (f >= b.tier && b.tier !== 0) return; // already at this tier or finer — skip
+  const { w, h } = tierDims(meta, f);
+  const { bbox } = meta;
+  const newEngine = new Engine(w, h, new Uint8Array(buf),
+    meta.elev_max, bbox.lat_min, bbox.lat_max, bbox.lon_min, bbox.lon_max);
+  const newHandle = renderer.addBody(newEngine, wasmMem);
+  newHandle.elevMinWu = meta.elev_min * newHandle.vertScale;
+  newHandle.hasOcean = b.hasOcean;
+
+  // Destroy previous resources before overwriting.
+  const oldHandle = b.handle;
+  const oldEngine = b.engine;
+
+  b.engine = newEngine;
+  b.handle = newHandle;
+  b.tier = f;
+  b.gridW = w;
+  b.gridH = h;
+  b.hfPtr = newEngine.heightfield_i16_ptr();
+
+  if (isActive) renderer.useBody(newHandle);
+
+  // Clean up previous tier: GPU buffer + WASM memory.
+  if (oldHandle) renderer.destroyBody(oldHandle);
+  if (oldEngine) try { oldEngine.free(); } catch (_) {}
+}
+
+// Build the loading bar progress tracker. Returns an updateProgress() function
+// that tracks bytes across multiple concurrent downloads.
+function _makeProgress(loadfill, loadpct) {
+  const got = {}, tot = {};
+  const update = () => {
+    const r = Object.values(got).reduce((a, v) => a + v, 0);
+    const t = Object.values(tot).reduce((a, v) => a + v, 0);
+    if (loadfill) loadfill.style.width = (t > 0 ? Math.min(100, r / t * 100) : 0) + '%';
+    if (loadpct) loadpct.textContent = `loading terrain… ${(r/1e6).toFixed(0)} / ${(t/1e6).toFixed(0)} MB`;
+  };
+  const track = (key, loaded, total) => { got[key] = loaded; tot[key] = total; update(); };
+  return track;
+}
+
 // ── Bodies ───────────────────────────────────────────────────────────────────
 const EARTH = new Body({
   id: 'earth', name: 'EARTH',
   metaUrl: dataUrl('meta.json'), dataUrl: dataUrl('heightfield.bin'),
+  hfStem: 'heightfield',
   radiusM: 6371000, rotationPeriodSec: 86164, // sidereal day (star-relative spin), not the 86400 solar day
   veFactor: 1.0, color: '#6aa3ff',
   modes: [[50, 'SURFACE'], [1500, 'ATMO'], [12000, 'ORBIT'], [Infinity, 'DEEP SPACE']],
@@ -48,6 +111,7 @@ const EARTH = new Body({
 const MOON = new Body({
   id: 'moon', name: 'MOON',
   metaUrl: dataUrl('moon_meta.json'), dataUrl: dataUrl('moon_heightfield.bin'),
+  hfStem: 'moon_heightfield',
   radiusM: 1737400, rotationPeriodSec: 27.32 * DAY_SEC,
   veFactor: 1.0, color: '#cfd2d8', hasOcean: false,
   modes: [[50, 'SURFACE'], [1500, 'LOW'], [12000, 'ORBIT'], [Infinity, 'DEEP SPACE']],
@@ -57,6 +121,7 @@ const MOON = new Body({
 const MARS = new Body({
   id: 'mars', name: 'MARS',
   metaUrl: dataUrl('mars_meta.json'), dataUrl: dataUrl('mars_heightfield.bin'),
+  hfStem: 'mars_heightfield',
   radiusM: 3389500, rotationPeriodSec: 88642, // Mars sidereal day ≈ 24h 37m
   // Mars has the tallest relief in the system (Olympus Mons +21 km); a lower veFactor
   // keeps its rendered bulge (~2% of the globe) in line with Earth/Moon instead of ~4.6%.
@@ -105,9 +170,10 @@ function veForAlt(alt) {
 
 // Terrain elevation (meters) directly under a lat/lon, read from the body's int16
 // heightfield in WASM memory (nearest sample). row 0 = +90 N, col 0 = -180 W.
+// Uses b.gridW/b.gridH — the CURRENT tier's dims — not the full meta dims.
 function sampleElevM(b, latDeg, lonDeg) {
-  if (!b.hfPtr || !wasmMem) return 0;
-  const w = b.meta.width, h = b.meta.height;
+  if (!b.hfPtr || !wasmMem || !b.gridW || !b.gridH) return 0;
+  const w = b.gridW, h = b.gridH;
   let r = Math.round((90 - latDeg) / 180 * (h - 1));
   let c = Math.round(((((lonDeg + 180) % 360) + 360) % 360) / 360 * (w - 1));
   r = r < 0 ? 0 : r >= h ? h - 1 : r;
@@ -195,8 +261,9 @@ function hudText() {
   // Ground elevation under the camera (real metres): +21 km at Olympus Mons, −5 km in a basin.
   const gndKm = groundElevM / 1000;
   const gnd = `${gndKm >= 0 ? '+' : '−'}${Math.abs(gndKm).toFixed(1)} km`;
+  const refine = lodLabel[active.id] ? ` · LOD ${lodLabel[active.id]}↻` : '';
   return `${active.name}  ${Math.abs(latD).toFixed(2)}°${ns}  ${Math.abs(dispLon).toFixed(2)}°${ew}`
-    + `\nALT ${altKm.toLocaleString()} km · GND ${gnd}  ${active.modeFor(altitude)}`
+    + `\nALT ${altKm.toLocaleString()} km · GND ${gnd}  ${active.modeFor(altitude)}${refine}`
     + `\nTILT ${Math.round(tilt*180/Math.PI)}°  HDG ${COMPASS[compassIdx]}`
     + `\nTIME ${spd}`;
 }
@@ -228,58 +295,121 @@ async function main() {
 
   if (!navigator.gpu) { showErr('This browser exposes no WebGPU (navigator.gpu is undefined).'); return; }
 
-  // Load every body's meta + heightfield in parallel, streaming so we can show a progress
-  // bar (the heightfields are large — hundreds of MB total).
+  // Tiered loading: fetch d16 for EARTH only, build engine+renderer, show first frame,
+  // then refine d4 → full in background. Other bodies load on demand (jumpTo).
   const loadfill = document.getElementById('loadfill');
   const loadpct = document.getElementById('loadpct');
-  const got = {}, tot = {};
-  const updateProgress = () => {
-    const r = Object.values(got).reduce((a, b) => a + b, 0);
-    const t = Object.values(tot).reduce((a, b) => a + b, 0);
-    if (loadfill) loadfill.style.width = (t > 0 ? Math.min(100, r / t * 100) : 0) + '%';
-    if (loadpct) loadpct.textContent = `loading terrain… ${(r/1e6).toFixed(0)} / ${(t/1e6).toFixed(0)} MB`;
-  };
-  const fetchHf = async (b) => {
-    got[b.id] = 0; tot[b.id] = 0;
-    const resp = await cachedFetch(b.dataUrl, (loaded, total) => {
-      got[b.id] = loaded; tot[b.id] = total; updateProgress();
-    });
-    return resp.arrayBuffer();
-  };
-  try {
-    await Promise.all(REGISTRY.map(async (b) => {
-      const [meta, hf] = await Promise.all([fetch(b.metaUrl).then(r => r.json()), fetchHf(b)]);  // meta: plain fetch (small JSON, not cached)
-      b.meta = meta;
-      b._hf = hf; // transient; dropped after the Engine copies it into WASM memory
-    }));
-    if (loadpct) loadpct.textContent = 'initializing renderer…';
-  } catch (e) { console.error('[explore] data load:', e); showErr('Failed to load terrain data: ' + e.message); return; }
+  const trackProgress = _makeProgress(loadfill, loadpct);
 
-  // Build a WASM Engine per body (shared WASM memory) and register each with the renderer.
   let renderer;
+  let Engine;
   try {
-    const { default: initWasm, Engine } = await import('./pkg/ridgeline_core.js');
+    // Fetch Earth meta (small JSON) + d16 heightfield in parallel.
+    const [earthMeta, d16Resp] = await Promise.all([
+      fetch(EARTH.metaUrl).then(r => r.json()),
+      cachedFetch(tierUrl(EARTH, 16), (loaded, total) => trackProgress('earth_d16', loaded, total)),
+    ]);
+    EARTH.meta = earthMeta;
+    const d16Buf = await d16Resp.arrayBuffer();
+
+    if (loadpct) loadpct.textContent = 'initializing renderer…';
+
+    // Init WASM + renderer with Earth d16 so we can show something immediately.
+    const { default: initWasm, Engine: EngineClass } = await import('./pkg/ridgeline_core.js');
     const wasm = await initWasm();
-    const mem = wasm.memory;
-    wasmMem = mem; // for heightfield sampling (terrain-follow)
-    const mkEngine = (b) => {
-      const { bbox } = b.meta;
-      return new Engine(b.meta.width, b.meta.height, new Uint8Array(b._hf),
-        b.meta.elev_max, bbox.lat_min, bbox.lat_max, bbox.lon_min, bbox.lon_max);
-    };
-    EARTH.engine = mkEngine(EARTH);
-    renderer = await WebGPURenderer.create(canvas, EARTH.engine, mem);
-    EARTH.handle = renderer.activeBody;
-    for (const b of REGISTRY) {
-      if (b !== EARTH) { b.engine = mkEngine(b); b.handle = renderer.addBody(b.engine, mem); }
-      // Deepest terrain in world units (negative for basin worlds) → lowers the occluder dome.
-      b.handle.elevMinWu = b.meta.elev_min * b.handle.vertScale;
-      b.handle.hasOcean = b.hasOcean;
-      b.hfPtr = b.engine.heightfield_i16_ptr(); // int16 heightfield offset in WASM memory (for sampleElevM)
-    }
-    renderer.useBody(EARTH.handle); // re-apply now that elevMinWu is set
-    for (const b of REGISTRY) b._hf = null; // let the raw buffers GC; WASM keeps its copies
+    wasmMem = wasm.memory;
+    Engine = EngineClass;
+
+    const { w: d16W, h: d16H } = tierDims(earthMeta, 16);
+    const { bbox } = earthMeta;
+    const earthD16Engine = new Engine(d16W, d16H, new Uint8Array(d16Buf),
+      earthMeta.elev_max, bbox.lat_min, bbox.lat_max, bbox.lon_min, bbox.lon_max);
+
+    renderer = await WebGPURenderer.create(canvas, earthD16Engine, wasmMem);
+    const earthD16Handle = renderer.activeBody;
+    earthD16Handle.elevMinWu = earthMeta.elev_min * earthD16Handle.vertScale;
+    earthD16Handle.hasOcean = EARTH.hasOcean;
+
+    EARTH.engine = earthD16Engine;
+    EARTH.handle = earthD16Handle;
+    EARTH.tier = 16;
+    EARTH.gridW = d16W;
+    EARTH.gridH = d16H;
+    EARTH.hfPtr = earthD16Engine.heightfield_i16_ptr();
+    renderer.useBody(EARTH.handle);
+
   } catch (e) { console.error('[explore] init:', e); showErr(e.message); return; }
+
+  // ── Background refinement machinery ──────────────────────────────────────────
+  // refineBody: fetch d4 then full for a body, upgrading the tier atomically each time.
+  // If the body is not active when a tier arrives, we still upgrade its stored state
+  // (so it's ready for future jumpTo), but skip renderer.useBody. Non-active bodies
+  // are CANCELLED at demotion time (see demoteBody) — we use an abort token per body.
+  // Choice: cancel refinement for NON-ACTIVE bodies when jumping away — simpler than
+  // finishing a download only to demote it immediately after.
+  const refineTokens = new Map(); // b.id → { cancelled: bool }
+
+  async function refineBody(b) {
+    // Issue (or re-issue) a refinement chain for b starting at d4, then full.
+    // Cancels any previous in-flight chain for this body.
+    const token = { cancelled: false };
+    refineTokens.set(b.id, token);
+
+    for (const f of [4, 1]) {
+      if (token.cancelled) break;
+      if (b.tier !== 0 && f >= b.tier) continue; // already at this resolution or finer
+
+      const label = f === 1 ? 'full' : `d${f}`;
+      const isActive = () => active === b;
+
+      // Show refinement indicator in HUD only while this body is active.
+      if (isActive()) lodLabel[b.id] = label;
+
+      try {
+        const resp = await cachedFetch(tierUrl(b, f),
+          isActive()
+            ? (loaded, total) => trackProgress(`${b.id}_${label}`, loaded, total)
+            : null);
+        if (token.cancelled) break;
+
+        const buf = await resp.arrayBuffer();
+        if (token.cancelled) break;
+
+        _applyTier(b, f, buf, b.meta, Engine, renderer, isActive());
+        if (isActive()) {
+          // Clear the HUD indicator for this tier now that it's applied.
+          if (f === 1) lodLabel[b.id] = null;
+          else lodLabel[b.id] = f === 4 ? 'full' : null; // next tier to come
+        }
+        console.log(`[explore] ${b.name} upgraded to tier ${f === 1 ? 'full' : `d${f}`} (${b.gridW}×${b.gridH})`);
+      } catch (e) {
+        if (!token.cancelled) console.warn(`[explore] tier ${f} failed for ${b.name}:`, e);
+        break;
+      }
+    }
+
+    if (active === b) lodLabel[b.id] = null;
+  }
+
+  // Demote a body from tier 4/1 back to tier 16 to reclaim GPU/WASM memory.
+  // The d16 data is always in the Cache API after startup, so this is near-instant.
+  async function demoteBody(b) {
+    if (b.tier <= 16) return; // already coarse or unloaded
+    const token = { cancelled: false };
+    refineTokens.set(b.id, token); // cancels any in-flight refinement for this body
+    try {
+      const resp = await cachedFetch(tierUrl(b, 16), null);
+      if (token.cancelled) return; // jumped back while demoting — let new chain handle it
+      const buf = await resp.arrayBuffer();
+      if (token.cancelled) return;
+      _applyTier(b, 16, buf, b.meta, Engine, renderer, false); // never active (we just left it)
+      console.log(`[explore] ${b.name} demoted to d16`);
+    } catch (e) { console.warn(`[explore] demote failed for ${b.name}:`, e); }
+  }
+
+  // Kick off background refinement for active body (Earth) now that d16 is showing.
+  // Metas for Moon/Mars are fetched lazily on first jumpTo.
+  refineBody(EARTH).catch(e => console.warn('[explore] EARTH refine:', e));
 
   function resize() {
     canvas.width = window.innerWidth;
@@ -327,11 +457,50 @@ async function main() {
     widgets.set(b.id, { marker, arrow, chev, lbl, albl });
   }
 
-  function jumpTo(b) {
-    b.resetView(); // always enter at the canonical deep-space framing — don't restore prior position
+  async function jumpTo(b) {
+    if (b === active) return;
+    const prev = active;
+
+    // Demote the body we're leaving if it holds a fine tier (async, in background).
+    if (prev.tier === 4 || prev.tier === 1) {
+      demoteBody(prev).catch(e => console.warn('[explore] demote:', e));
+    }
+
+    b.resetView(); // always enter at the canonical deep-space framing
+
+    if (b.tier === 0) {
+      // Body has nothing loaded yet — show loading splash and fetch d16.
+      if (!b.meta) {
+        try {
+          b.meta = await fetch(b.metaUrl).then(r => r.json());
+        } catch (e) { console.error('[explore] meta fetch:', e); return; }
+      }
+      const trackD16 = _makeProgress(loadfill, loadpct);
+      if (loadpct) {
+        document.getElementById('loading').style.display = '';
+        loadpct.textContent = `loading ${b.name}…`;
+      }
+      try {
+        const resp = await cachedFetch(tierUrl(b, 16),
+          (loaded, total) => trackD16(`${b.id}_d16`, loaded, total));
+        const buf = await resp.arrayBuffer();
+        _applyTier(b, 16, buf, b.meta, Engine, renderer, false);
+      } catch (e) {
+        console.error('[explore] jumpTo d16:', e);
+        document.getElementById('loading').style.display = 'none';
+        return;
+      }
+      document.getElementById('loading').style.display = 'none';
+    }
+
     active = b;
     renderer.useBody(b.handle);
     dragActive = false; rightDragActive = false;
+
+    // Refine in background from whatever tier b currently holds.
+    if (b.tier > 1) {
+      refineBody(b).catch(e => console.warn(`[explore] refine ${b.name}:`, e));
+    }
   }
 
   const getAspect = () => canvas.width / canvas.height;

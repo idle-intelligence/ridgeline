@@ -22,7 +22,8 @@ export class Body {
     this.id = spec.id;                 // 'earth' | 'moon' | …
     this.name = spec.name;             // HUD label, e.g. 'EARTH'
     this.metaUrl = spec.metaUrl;       // ../data/<body>_meta.json
-    this.dataUrl = spec.dataUrl;       // ../data/<body>_heightfield.bin
+    this.dataUrl = spec.dataUrl;       // ../data/<body>_heightfield.bin (full-res)
+    this.hfStem = spec.hfStem;         // bare file name stem, e.g. 'heightfield', 'moon_heightfield'
 
     // Physical
     this.radiusM = spec.radiusM;                 // true mean radius (for km scale)
@@ -46,8 +47,16 @@ export class Body {
 
     // Runtime, filled in during load/registration:
     this.meta = null;     // parsed <body>_meta.json
-    this.engine = null;   // WASM Engine holding this body's heightfield
-    this.handle = null;   // renderer body handle (GPU buffer + bind group + dims)
+    this.engine = null;   // WASM Engine holding this body's heightfield (current tier)
+    this.handle = null;   // renderer body handle (GPU buffer + bind group + dims, current tier)
+
+    // Tier state: 0 = nothing loaded, 16 = d16 loaded, 4 = d4 loaded, 1 = full loaded.
+    this.tier = 0;
+    // Current grid dims (change with each tier upgrade; meta.width/height always = full dims).
+    this.gridW = 0;
+    this.gridH = 0;
+    // WASM memory offset for sampleElevM (current tier's int16 data).
+    this.hfPtr = null;
   }
 
   // Restore the canonical entry framing (called on spawn and every time you jump here — we
