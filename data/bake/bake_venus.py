@@ -95,22 +95,101 @@ def load_elev():
     # Convert to float32 metres
     elev = data.astype(np.float32)
 
-    # Handle nodata: replace with 0 (Venus has no oceans; nodata are gap-fills).
+    # Handle nodata.
     nodata_count = 0
     if nodata_val is not None:
-        # Use a tolerance for float nodata
         if np.issubdtype(data.dtype, np.integer):
-            mask = data == int(nodata_val)
+            mask = (data == int(nodata_val))
         else:
             mask = np.abs(elev - nodata_val) < 1.0
         nodata_count = int(mask.sum())
-        if nodata_count > 0:
-            # Fill with neighbourhood mean (simple: use global mean of valid)
-            valid_mean = float(elev[~mask].mean())
-            elev[mask] = valid_mean
-            print(f"  nodata pixels replaced with valid mean ({valid_mean:.0f} m): {nodata_count:,}")
+        print(f"  nodata pixels (before edge marking): {nodata_count:,}")
 
-    print(f"  elev range after nodata fill: {elev.min():.0f} .. {elev.max():.0f} m")
+    # --- Artifact fix: source edge columns ---
+    # The Magellan dataset (0..360E convention) has a radar-acquisition seam at
+    # lon 0/360E (source cols 0 and W-1).  These edge columns carry anomalously
+    # high nodata fractions (col 0: ~49%, col W-1: ~30%) that, if filled with
+    # the global mean, produce a sharp plateau crease after the longitude roll.
+    # We mark all edge columns whose nodata fraction exceeds the dataset's global
+    # rate by a large margin (threshold: 3× global rate or 15%, whichever is
+    # larger) as nodata so the row-interpolation fill below smooths across them.
+    global_nd_frac = nodata_count / float(H * W) if nodata_count else 0.0
+    edge_nd_thresh = max(global_nd_frac * 3.0, 0.15)
+    edge_nodata_cols = set()
+    for c in list(range(min(20, W))) + list(range(max(0, W - 20), W)):
+        if nodata_val is not None:
+            col_mask = mask[:, c]
+        else:
+            col_mask = np.zeros(H, dtype=bool)
+        col_nd_frac = col_mask.mean()
+        if col_nd_frac > edge_nd_thresh:
+            mask[:, c] = True
+            edge_nodata_cols.add(c)
+    if edge_nodata_cols:
+        marked = sorted(edge_nodata_cols)
+        print(f"  edge artifact cols marked as nodata (threshold {edge_nd_thresh:.2f}): "
+              f"{marked[0]}..{marked[-1]}  ({len(edge_nodata_cols)} cols)")
+
+    # --- Nodata fill: per-row wrapped linear interpolation ---
+    # For each row, linearly interpolate across every nodata gap between the
+    # nearest valid left/right neighbours.  The row is treated as periodic
+    # (wraps at lon ±180) so gaps touching either edge are handled cleanly
+    # without dateline steps.  Fully-empty rows (polar caps) are copied from
+    # the nearest valid row.
+    if nodata_count > 0 or edge_nodata_cols:
+        elev[mask] = np.nan
+        filled_rows = 0
+        for r in range(H):
+            row = elev[r]
+            if not np.any(np.isnan(row)):
+                continue
+            filled_rows += 1
+            valid_idx = np.where(~np.isnan(row))[0]
+            if len(valid_idx) == 0:
+                # Fully empty – defer to nearest-row copy below
+                continue
+            # Build the extended row (length 3*W) by tiling so wrap is natural
+            row3 = np.concatenate([row, row, row])
+            valid3 = np.concatenate([valid_idx, valid_idx + W, valid_idx + W * 2])
+            vals3 = np.concatenate([row[valid_idx], row[valid_idx], row[valid_idx]])
+            # For each nan position in the centre tile, interpolate
+            nan_cols = np.where(np.isnan(row))[0]
+            for c in nan_cols:
+                c3 = c + W  # position in centre tile
+                left_mask = valid3 < c3
+                right_mask = valid3 > c3
+                if not left_mask.any() or not right_mask.any():
+                    # Single-side: extend edge value
+                    if left_mask.any():
+                        row[c] = vals3[left_mask][-1]
+                    elif right_mask.any():
+                        row[c] = vals3[right_mask][0]
+                    continue
+                li = np.where(left_mask)[0][-1]
+                ri = np.where(right_mask)[0][0]
+                lc, lv = valid3[li], vals3[li]
+                rc, rv = valid3[ri], vals3[ri]
+                t = (c3 - lc) / (rc - lc)
+                row[c] = lv + t * (rv - lv)
+            elev[r] = row
+
+        print(f"  per-row wrapped interpolation: {filled_rows} rows had nodata")
+
+        # Fully-empty rows: copy nearest valid row
+        empty_rows = [r for r in range(H) if np.any(np.isnan(elev[r]))]
+        if empty_rows:
+            for r in empty_rows:
+                for delta in range(1, H):
+                    for rr in [r - delta, r + delta]:
+                        if 0 <= rr < H and not np.any(np.isnan(elev[rr])):
+                            elev[r] = elev[rr]
+                            break
+                    else:
+                        continue
+                    break
+            print(f"  fully-empty rows filled from nearest valid row: {len(empty_rows)}")
+
+    print(f"  elev range after nodata fill: {np.nanmin(elev):.0f} .. {np.nanmax(elev):.0f} m")
 
     # Lon convention: if dataset runs 0..360E, roll by half-width.
     # We detect this by checking the ModelTiepointTag x origin; fall back to
