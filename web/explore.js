@@ -22,12 +22,46 @@ const TILT_MAX_BY_MODE = { SURFACE: 110 * DEG, ATMO: Math.PI / 2, LOW: Math.PI /
 const TILT_MAX = TILT_MAX_BY_MODE.SURFACE; // absolute ceiling — up-vector safety clamp in _buildCamMvp
 const tiltMaxFor = m => TILT_MAX_BY_MODE[m] ?? 1.75; // DEEP SPACE etc. → ~100°
 const clampTilt = (t, m) => Math.max(TILT_MIN, Math.min(tiltMaxFor(m), t));
-// Resting pitch each mode eases toward as you cross into it — flattening on the way up so the
-// framing tips from ground-and-sky near the surface to a top-down globe way out.
-const TILT_DEFAULT_BY_MODE = { SURFACE: SURFACE_TILT, ATMO: 60 * DEG, LOW: 60 * DEG, ORBIT: 30 * DEG };
-const tiltDefaultFor = m => TILT_DEFAULT_BY_MODE[m] ?? TILT_MIN; // DEEP SPACE → minimum (top-down)
 const ALT_START = 12010;   // world units — lowest DEEP SPACE (just past the 12000 orbit ceiling); largest framed globe
 const TILT_START = TILT_MIN; // deep-space resting pitch — top-down, globe centered
+
+// Continuous resting pitch as a function of altitude, derived from the active body's mode
+// ceilings. Interpolation happens in log-altitude space with per-segment smoothstep so the
+// derivative is 0 at each anchor (no kinks). Anchors:
+//   alt ≤ surfCeil          → SURFACE_TILT (80°)
+//   alt = atmoCeil (1500)   → 60°
+//   alt = orbitCeil (12000) → 30°
+//   alt ≥ 2×orbitCeil       → TILT_MIN (top-down)
+// Below first anchor → clamped to SURFACE_TILT; above last → clamped to TILT_MIN.
+function tiltRestForAlt(altWu, body) {
+  const modes = body.modes;
+  const surfCeil   = modes[0][0];
+  const atmoCeil   = modes[1][0];
+  const orbitCeil  = modes[2][0];
+  const deepCeil   = orbitCeil * 2;
+
+  const anchors = [
+    [surfCeil,  SURFACE_TILT],
+    [atmoCeil,  60 * DEG],
+    [orbitCeil, 30 * DEG],
+    [deepCeil,  TILT_MIN],
+  ];
+
+  if (altWu <= anchors[0][0]) return anchors[0][1];
+  if (altWu >= anchors[anchors.length - 1][0]) return TILT_MIN;
+
+  for (let i = 0; i < anchors.length - 1; i++) {
+    const [a0, t0] = anchors[i];
+    const [a1, t1] = anchors[i + 1];
+    if (altWu <= a1) {
+      // Smoothstep in log-altitude space: derivative → 0 at each anchor.
+      const u = (Math.log(altWu) - Math.log(a0)) / (Math.log(a1) - Math.log(a0));
+      const s = u * u * (3 - 2 * u); // smoothstep
+      return t0 + s * (t1 - t0);
+    }
+  }
+  return TILT_MIN;
+}
 const Z_NEAR = 1.0;
 const Z_FAR = 200_000.0;
 const DAY_SEC = 86400;
@@ -130,7 +164,29 @@ const MARS = new Body({
   view: { lat: -6, lon: -75, altitude: ALT_START, tilt: TILT_START, heading: 0 }, // Valles Marineris / Tharsis
   orbit: { aroundId: 'sun', periodSec: 687 * DAY_SEC, inclinationDeg: 25 },
 });
-const REGISTRY = [EARTH, MOON, MARS];
+const VENUS = new Body({
+  id: 'venus', name: 'VENUS',
+  metaUrl: dataUrl('venus_meta.json'), dataUrl: dataUrl('venus_heightfield.bin'),
+  hfStem: 'venus_heightfield',
+  // Venus spins RETROGRADE with a 243-day sidereal period — the negative period
+  // flips rotDegPerSec's sign, which is exactly the backwards spin.
+  radiusM: 6051000, rotationPeriodSec: -243.02 * DAY_SEC,
+  veFactor: 1.0, color: '#e6c98a', hasOcean: false,
+  modes: [[50, 'SURFACE'], [1500, 'ATMO'], [12000, 'ORBIT'], [Infinity, 'DEEP SPACE']],
+  view: { lat: 40, lon: 15, altitude: ALT_START, tilt: TILT_START, heading: 0 }, // Ishtar Terra / Maxwell Montes
+  orbit: { aroundId: 'sun', periodSec: 224.7 * DAY_SEC, inclinationDeg: 3.4 },
+});
+const MERCURY = new Body({
+  id: 'mercury', name: 'MERCURY',
+  metaUrl: dataUrl('mercury_meta.json'), dataUrl: dataUrl('mercury_heightfield.bin'),
+  hfStem: 'mercury_heightfield',
+  radiusM: 2439400, rotationPeriodSec: 58.646 * DAY_SEC, // 3:2 spin-orbit resonance
+  veFactor: 0.9, color: '#b8a898', hasOcean: false,
+  modes: [[50, 'SURFACE'], [1500, 'LOW'], [12000, 'ORBIT'], [Infinity, 'DEEP SPACE']],
+  view: { lat: 30, lon: -170, altitude: ALT_START, tilt: TILT_START, heading: 0 }, // Caloris basin
+  orbit: { aroundId: 'sun', periodSec: 88 * DAY_SEC, inclinationDeg: 7 },
+});
+const REGISTRY = [EARTH, MOON, MARS, VENUS, MERCURY];
 
 let active = EARTH;
 let timeSpeed = 1000;        // × real time
@@ -262,10 +318,10 @@ function hudText() {
   const gndKm = groundElevM / 1000;
   const gnd = `${gndKm >= 0 ? '+' : '−'}${Math.abs(gndKm).toFixed(1)} km`;
   const refine = lodLabel[active.id] ? ` · LOD ${lodLabel[active.id]}↻` : '';
-  return `${active.name}  ${Math.abs(latD).toFixed(2)}°${ns}  ${Math.abs(dispLon).toFixed(2)}°${ew}`
-    + `\nALT ${altKm.toLocaleString()} km · GND ${gnd}  ${active.modeFor(altitude)}${refine}`
-    + `\nTILT ${Math.round(tilt*180/Math.PI)}°  HDG ${COMPASS[compassIdx]}`
-    + `\nTIME ${spd}`;
+  return `${active.name} · ${active.modeFor(altitude)}`
+    + `\n${Math.abs(latD).toFixed(2)}°${ns} ${Math.abs(dispLon).toFixed(2)}°${ew} · GND ${gnd}`
+    + `\nALT ${altKm.toLocaleString()} km · TILT ${Math.round(tilt*180/Math.PI)}° · HDG ${COMPASS[compassIdx]}`
+    + `\nTIME ${spd}${refine}`;
 }
 
 // Far sky position of a body, for its marker. Each body advances at its OWN orbital rate
@@ -559,7 +615,7 @@ async function main() {
       rightDragActive = true;
       rdStartX = e.clientX; rdStartY = e.clientY;
       rdStartTilt = active.view.tilt; rdStartHeading = active.view.heading;
-      active._morphTilt = false; // user takes over pitch → stop the surface auto-morph
+      active._autoTilt = false; // user takes over pitch → stop the surface auto-morph
       return;
     }
     beginDrag(e.clientX, e.clientY);
@@ -591,7 +647,7 @@ async function main() {
       lastPinchDist = Math.hypot(t0.clientX-t1.clientX, t0.clientY-t1.clientY);
       twoCX = (t0.clientX + t1.clientX) / 2;
       twoCY = (t0.clientY + t1.clientY) / 2;
-      active._morphTilt = false; // user takes over pitch → stop the surface auto-morph
+      active._autoTilt = false; // user takes over pitch → stop the surface auto-morph
     }
   }, { passive: false });
   canvas.addEventListener('touchmove', e => {
@@ -625,15 +681,15 @@ async function main() {
     active.view.planetRot = (active.view.planetRot + timeSpeed * dt * active.rotDegPerSec) % 360;
     simTimeSec += timeSpeed * dt; // advance the shared simulated clock (each marker uses its own period)
 
-    // Crossing an altitude-mode boundary eases the resting pitch toward that mode's default
-    // (surface 80° → atmo 40° → orbit 20° → deep-space top-down). The morph cancels the moment
-    // the user drags pitch. First frame (prevMode undefined) is skipped so the start framing holds.
+    // Continuous auto-tilt: resting pitch is a smooth function of altitude (tiltRestForAlt),
+    // so slow zooming produces slow tilt drift — no sudden lurch at mode boundaries.
+    // Auto-tilt re-arms on the first mode change after spawn/jumpTo (so spawn framing holds).
+    // It is disabled by user pitch drag (right-drag / two-finger) and re-armed on jumpTo.
     const mode = active.modeFor(active.view.altitude);
-    if (active._prevMode !== undefined && mode !== active._prevMode) active._morphTilt = true;
-    if (active._morphTilt) {
-      const target = tiltDefaultFor(mode);
+    if (active._prevMode !== undefined && mode !== active._prevMode) active._autoTilt = true;
+    if (active._autoTilt) {
+      const target = tiltRestForAlt(active.view.altitude, active);
       active.view.tilt += (target - active.view.tilt) * Math.min(1, dt * 1.4);
-      if (Math.abs(active.view.tilt - target) < 0.005) active._morphTilt = false;
     }
     active._prevMode = mode;
     active.view.tilt = clampTilt(active.view.tilt, mode);

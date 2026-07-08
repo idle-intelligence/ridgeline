@@ -68,7 +68,7 @@ export class Body {
     this.view.tilt = v.tilt;
     this.view.heading = v.heading;
     this.view.planetRot = 0;
-    this._morphTilt = false;
+    this._autoTilt = false; // re-armed on mode change; disabled by user pitch drag
     this._prevMode = undefined;
   }
 
