@@ -864,12 +864,21 @@ export class WebGPURenderer {
       const fdv = new DataView(this._fillRowScratch);
       let frow = 0;
       let prev = null; // [row, lat, colStride]
+      // Each fill strip claims a worst-case GPU block of ~gridW*2 verts in the WGSL
+      // atomicAdd guard. At full resolution + low altitude the naive step-1 schedule
+      // claims gridH * gridW * 2 verts (e.g. Earth full: 33.6 M) >> MAX_FILL_VERTS (3 M),
+      // so the guard silently DROPS ~91% of strips → the planet body goes transparent
+      // and the starfield bleeds through. Pre-clamp the row step so the total worst-case
+      // stays inside the budget; at coarse tiers this computes 1 (no change).
+      const wcVertPerStrip = (this.gridW + 4) * 2;
+      const maxStrips = Math.max(1, Math.floor(MAX_FILL_VERTS / wcVertPerStrip));
+      const minFillRowStep = Math.ceil(H / maxStrips);
       while (frow < H) {
         const lat = this.latMax - (frow / (H - 1)) * (this.latMax - this.latMin);
         const nearest = nearestOf(lat);
         const [rowStep, colStride] = exploreStrides || stridesForDistance(nearest);
         const fc = exploreStrides ? 1 : FILL_COARSEN; // dense fills seal cleanly (no gaps/flicker)
-        const fillRowStep = Math.max(1, rowStep * boost * fc);
+        const fillRowStep = Math.max(minFillRowStep, Math.max(1, rowStep * boost * fc));
         const fillColStride = Math.max(1, colStride * boost * fc);
         if (prev) {
           const stride = Math.max(prev[2], fillColStride);
