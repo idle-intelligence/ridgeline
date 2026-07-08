@@ -1,0 +1,18 @@
+{
+  "bbox": {
+    "lat_min": -90,
+    "lat_max": 90,
+    "lon_min": -180,
+    "lon_max": 180
+  },
+  "width": 11520,
+  "height": 5760,
+  "elev_min": -5380,
+  "elev_max": 4490,
+  "dtype": "int16",
+  "byte_order": "little",
+  "row_order": "north_to_south",
+  "col_order": "west_to_east",
+  "reference_radius_m": 2439400,
+  "source": "USGS Astrogeology Science Center / NASA MESSENGER, Mercury MESSENGER USGS DEM Global 665m v2, public domain"
+}

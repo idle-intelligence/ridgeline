@@ -1,0 +1,18 @@
+{
+  "bbox": {
+    "lat_min": -90,
+    "lat_max": 90,
+    "lon_min": -180,
+    "lon_max": 180
+  },
+  "width": 8192,
+  "height": 4096,
+  "elev_min": -2951,
+  "elev_max": 11687,
+  "dtype": "int16",
+  "byte_order": "little",
+  "row_order": "north_to_south",
+  "col_order": "west_to_east",
+  "reference_radius_m": 6051000,
+  "source": "USGS Astrogeology Science Center / NASA Magellan, Venus Magellan Topography Global 4641m v02, public domain"
+}

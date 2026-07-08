@@ -33,6 +33,30 @@ redistributes derived (resampled, reformatted) versions of them.
 - **Processing:** big-endian int16 metres above the areoid (no ocean clamp),
   longitude re-centered to −180..180, resampled by `bake/bake_mars.py`.
 
+## Venus — `venus_heightfield.bin`
+
+- **Source:** Magellan Venus Topography Global 4641m v02.
+- **Mission:** NASA/JPL Magellan.
+- **Provider:** USGS Astrogeology Science Center.
+- **URL:** https://planetarymaps.usgs.gov/mosaic/Venus_Magellan_Topography_Global_4641m_v02.tif
+- **License:** Public domain (NASA / U.S. Government work).
+- **Processing:** int16 metres above the 6051000 m reference sphere; nodata pixels
+  (polar coverage gaps, ~8% of cells) filled with valid-pixel mean; longitude
+  convention was already −180..180 (no roll needed); resampled/formatted by
+  `bake/bake_venus.py`.
+
+## Mercury — `mercury_heightfield.bin`
+
+- **Source:** Mercury MESSENGER USGS DEM Global 665m v2.
+- **Mission:** NASA MESSENGER.
+- **Provider:** USGS Astrogeology Science Center.
+- **URL:** https://planetarymaps.usgs.gov/mosaic/Mercury_Messenger_USGS_DEM_Global_665m_v2.tif
+- **License:** Public domain (NASA / U.S. Government work).
+- **Processing:** values decoded to metres above the 2439400 m reference sphere
+  (see script for encoding details); longitude re-centered to −180..180 (roll by
+  half-width from 0..360E source); downsampled ÷2 by exact block mean from native
+  23040×11520 to 11520×5760; formatted by `bake/bake_mercury.py`.
+
 To re-bake from the original sources, see `bake/README` notes in the bake
 scripts (they download the upstream files into `bake/cache/`, which is
 gitignored).

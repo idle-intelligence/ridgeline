@@ -24,9 +24,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.normpath(os.path.join(HERE, ".."))  # ridgeline/data/
 
 BODIES = [
-    ("meta.json",      "heightfield.bin",      "heightfield"),
-    ("moon_meta.json", "moon_heightfield.bin",  "moon_heightfield"),
-    ("mars_meta.json", "mars_heightfield.bin",  "mars_heightfield"),
+    ("meta.json",         "heightfield.bin",         "heightfield"),
+    ("moon_meta.json",    "moon_heightfield.bin",    "moon_heightfield"),
+    ("mars_meta.json",    "mars_heightfield.bin",    "mars_heightfield"),
+    ("venus_meta.json",   "venus_heightfield.bin",   "venus_heightfield"),
+    ("mercury_meta.json", "mercury_heightfield.bin", "mercury_heightfield"),
 ]
 
 FACTORS = [4, 16]
