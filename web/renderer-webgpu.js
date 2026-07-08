@@ -829,6 +829,29 @@ export class WebGPURenderer {
     };
 
     // LINE rings (with sub-ring interpolation).
+    // Pre-clamp row step so total worst-case vertex/index reservations stay inside the GPU
+    // buffer budgets. Near the poles lon_pad→180° forces every ring to sweep the full 360°
+    // (half_cols = gridW/2 + colStride), so each ring reserves ~gridW/colStride+4 verts and
+    // 2× that many indices. Without this clamp the GPU atomic counter overflows and a random
+    // ~1/16 of rings survives → chaotic criss-cross at low polar altitude. Mirrors the
+    // identical fill-strip pre-clamp below (same pattern, same rationale).
+    // Use this._lonPad (already set for this frame) to size the per-ring budget accurately:
+    // if lon_pad < 180 the rings don't go full-width, so the budget is smaller and the clamp
+    // is proportionally looser (no-op below ~|lat| 70°). Near-camera rings have vh ≈ 90°,
+    // so window_half ≈ lon_pad + 90° — used as the budget estimate half-window.
+    const minColStride = exploreStrides ? exploreStrides[1] : 1; // worst-case colStride in flight mode
+    const lonPadNow = this._lonPad ?? 70.0;
+    const windowHalfBudget = Math.min(180.0, lonPadNow + 90.0); // conservative estimate
+    const wcHalfCols = Math.ceil((windowHalfBudget / 360.0) * this.gridW) + minColStride;
+    const wcVertsPerRing = Math.floor(wcHalfCols * 2 / minColStride) + 4;
+    const wcIdxPerRing = wcVertsPerRing * 2 + 1;
+    const maxRingsByVerts = Math.max(1, Math.floor(MAX_VERTS / wcVertsPerRing));
+    const maxRingsByIdx   = Math.max(1, Math.floor(MAX_INDICES / wcIdxPerRing));
+    const maxAffordableRings = Math.min(maxRingsByVerts, maxRingsByIdx);
+    // Estimate how many rows the schedule will visit (H / effective_rowStep, roughly).
+    // We need ceil(H / maxAffordableRings) as the minimum rowStep to stay in budget.
+    const minLineRowStep = Math.ceil(H / maxAffordableRings);
+
     const rdv = new DataView(this._ringScratch);
     let n = 0;
     let row = 0;
@@ -836,7 +859,8 @@ export class WebGPURenderer {
       const lat = rowLatFrac(row, 0);
       const nearest = nearestOf(lat);
       const [rowStep, colStride] = exploreStrides || stridesForDistance(nearest);
-      const rs = rowStep * boost, cs = colStride * boost;
+      const rs = Math.max(minLineRowStep, rowStep * boost);
+      const cs = colStride * boost;
       let factor = exploreStrides ? 1 : subringFactorForDistance(nearest);
       factor = Math.max(1, Math.min(factor, subringCap === Infinity ? factor : Math.max(1, subringCap)));
       const subCount = Math.max(factor, 1);

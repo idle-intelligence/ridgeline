@@ -715,7 +715,15 @@ async function main() {
     const owp = bodySkyPos(b);
     const d = sub(owp, cam.pos);
     const sf = dot(d, cam.fwd), sx = dot(d, cam.right), sy = dot(d, cam.up);
-    if (raySphere(cam.pos, normalize(d), R_WORLD * 1.05)) { // behind the current body
+    // Clamp the occlusion sphere below the camera radius so the camera is always
+    // just outside it. At high altitude the 1.05 fudge hides markers a hair past
+    // the limb (terrain bulge). At low altitude (cam inside 1.05·R_WORLD) raySphere
+    // would always return null (near root goes negative → no positive t) and occlusion
+    // silently turns off; capping at 0.999·camR keeps the cam just outside the
+    // sphere so below-horizon directions are still properly occluded.
+    const camR = Math.hypot(...cam.pos);
+    const occR = Math.min(R_WORLD * 1.05, camR * 0.999);
+    if (raySphere(cam.pos, normalize(d), occR)) { // behind the current body
       marker.style.display = 'none';
       arrow.style.display = 'none';
       return;

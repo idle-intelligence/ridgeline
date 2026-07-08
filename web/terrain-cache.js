@@ -4,8 +4,18 @@
 // e.g. 'https://huggingface.co/datasets/idle-intelligence/ridgeline-terrain/resolve/main'
 // The local dev default is '../data' (relative to the web/ directory).
 //
-// Cache version: bump 'ridgeline-terrain-v1' → 'ridgeline-terrain-v2' whenever the .bin
-// files are re-baked so users automatically re-download the new data.
+// Cache version: bump CACHE_NAME whenever the .bin files are re-baked so users
+// automatically re-download the new data; stale older caches are deleted on load.
+// v2: Venus re-bake (radar-gap interpolation fill + dateline edge-column fix).
+
+const CACHE_NAME = 'ridgeline-terrain-v2';
+
+// Evict caches from previous versions (best-effort, async, non-blocking).
+try {
+  caches.keys().then(keys => keys.forEach(k => {
+    if (k.startsWith('ridgeline-terrain-') && k !== CACHE_NAME) caches.delete(k);
+  }));
+} catch (_) { /* Cache API unavailable — nothing to evict */ }
 
 const DATA_BASE = () => window.RIDGELINE_DATA_BASE ?? '../data';
 
@@ -26,7 +36,7 @@ export async function cachedFetch(url, onProgress) {
   // Try to open the cache; on failure (HTTP, non-secure context, etc.) skip caching.
   let cache = null;
   try {
-    cache = await caches.open('ridgeline-terrain-v1');
+    cache = await caches.open(CACHE_NAME);
   } catch (_) {
     // Cache API unavailable — proceed with a plain fetch below.
   }
