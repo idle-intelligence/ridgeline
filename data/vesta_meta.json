@@ -1,0 +1,23 @@
+{
+  "bbox": {
+    "lat_min": -90,
+    "lat_max": 90,
+    "lon_min": -180,
+    "lon_max": 180
+  },
+  "width": 11520,
+  "height": 5760,
+  "elev_min": -43053,
+  "elev_max": 38006,
+  "elev_scale_m": 2,
+  "elev_i16_min": -21526,
+  "elev_i16_max": 19003,
+  "dtype": "int16",
+  "byte_order": "little",
+  "row_order": "north_to_south",
+  "col_order": "west_to_east",
+  "reference_radius_m": 255000,
+  "rotation_period_h": 5.342,
+  "lon_convention_note": "equirectangular projection centred on lon 0\u00b0 (tiepoint x0=-801106 m \u2248 -half_width); output lon -180..180; NOTE: USGS Vesta products use Claudia coordinate system (IAU 2015); no additional lon shift applied",
+  "source": "NASA Dawn mission / DLR / USGS Astrogeology Science Center, Vesta Dawn HAMO DTM DLR Global 48ppd, public domain"
+}

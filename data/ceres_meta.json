@@ -1,0 +1,19 @@
+{
+  "bbox": {
+    "lat_min": -90,
+    "lat_max": 90,
+    "lon_min": -180,
+    "lon_max": 180
+  },
+  "width": 11520,
+  "height": 5760,
+  "elev_min": -27951,
+  "elev_max": 17056,
+  "dtype": "int16",
+  "byte_order": "little",
+  "row_order": "north_to_south",
+  "col_order": "west_to_east",
+  "reference_radius_m": 470000,
+  "rotation_period_h": 9.074,
+  "source": "NASA Dawn mission / DLR / USGS Astrogeology Science Center, Ceres Dawn FC HAMO DTM DLR Global 60ppd Oct2016, public domain"
+}

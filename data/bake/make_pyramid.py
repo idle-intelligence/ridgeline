@@ -30,6 +30,11 @@ BODIES = [
     ("venus_meta.json",   "venus_heightfield.bin",   "venus_heightfield"),
     ("mercury_meta.json", "mercury_heightfield.bin", "mercury_heightfield"),
     ("sun_meta.json",     "sun_heightfield.bin",     "sun_heightfield"),
+    ("ceres_meta.json",      "ceres_heightfield.bin",      "ceres_heightfield"),
+    ("vesta_meta.json",      "vesta_heightfield.bin",      "vesta_heightfield"),
+    ("enceladus_meta.json",  "enceladus_heightfield.bin",  "enceladus_heightfield"),
+    ("pluto_meta.json",      "pluto_heightfield.bin",      "pluto_heightfield"),
+    ("charon_meta.json",     "charon_heightfield.bin",     "charon_heightfield"),
 ]
 
 FACTORS = [4, 16]

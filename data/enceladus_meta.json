@@ -1,0 +1,20 @@
+{
+  "bbox": {
+    "lat_min": -90,
+    "lat_max": 90,
+    "lon_min": -180,
+    "lon_max": 180
+  },
+  "width": 7680,
+  "height": 3840,
+  "elev_min": -2722,
+  "elev_max": 2337,
+  "dtype": "int16",
+  "byte_order": "little",
+  "row_order": "north_to_south",
+  "col_order": "west_to_east",
+  "reference_radius_m": 252100,
+  "rotation_period_days": 1.370218,
+  "rotation_note": "tidally locked (synchronous with Saturn orbit)",
+  "source": "Cassini mission / Schenk & McKinnon 2024; Enceladus Cassini DEM global 200m, public domain"
+}

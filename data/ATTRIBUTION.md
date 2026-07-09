@@ -77,6 +77,86 @@ redistributes derived (resampled, reformatted) versions of them.
   yielding rich texture across the full dynamic range; formatted by
   `bake/bake_sun.py`.
 
+## Ceres — `ceres_heightfield.bin`
+
+- **Source:** Ceres Dawn FC HAMO DTM DLR Global 60ppd Oct2016.
+- **Mission:** NASA Dawn.
+- **Instrument:** Framing Camera (FC), High Altitude Mapping Orbit (HAMO).
+- **Provider:** DLR (German Aerospace Center) / USGS Astrogeology Science Center.
+- **URL:** https://planetarymaps.usgs.gov/mosaic/Ceres_Dawn_FC_HAMO_DTM_DLR_Global_60ppd_Oct2016.tif
+- **License:** Public domain (NASA / U.S. Government work; DLR data freely available).
+- **Processing:** uint16 radius-encoded values decoded to metres above the 470000 m
+  reference sphere (DN values = local radius in metres; subtract 470000); longitude
+  re-centered to −180..180 (roll by half-width if source is 0..360E); resampled from
+  native 21600×10800 to 11520×5760 by bilinear interpolation (factor 1.875);
+  formatted by `bake/bake_ceres.py`.
+
+## Vesta — `vesta_heightfield.bin`
+
+- **Source:** Vesta Dawn HAMO DTM DLR Global 48ppd.
+- **Mission:** NASA Dawn.
+- **Instrument:** Framing Camera (FC), High Altitude Mapping Orbit (HAMO).
+- **Provider:** DLR (German Aerospace Center) / USGS Astrogeology Science Center.
+- **URL:** https://planetarymaps.usgs.gov/mosaic/Vesta_Dawn_HAMO_DTM_DLR_Global_48ppd.tif
+- **License:** Public domain (NASA / U.S. Government work; DLR data freely available).
+- **Processing:** float32 values are local radii in metres; subtract 255000 m reference
+  to obtain topographic heights; longitude origin determined from GeoTIFF tiepoint
+  (see `lon_convention_note` in `vesta_meta.json` — a ~150° eastward shift relative to
+  the IAU Claudia system is a known quirk of this USGS delivery); resampled from native
+  17280×8640 to 11520×5760 by bilinear interpolation (factor 1.5); formatted by
+  `bake/bake_vesta.py`. Note: Vesta is highly non-spherical (triaxial axes ~286×278×223 km);
+  the sphere-mapped render appears lumpy — this reflects real topography.
+
+## Enceladus — `enceladus_heightfield.bin`
+
+- **Source:** Enceladus Cassini DEM Global 200m, Schenk & McKinnon 2024.
+- **Mission:** NASA/ESA Cassini-Huygens.
+- **Instrument:** Imaging Science Subsystem (ISS) stereo photogrammetry.
+- **Authors:** Paul Schenk & William McKinnon (2024).
+- **Provider:** USGS Astrogeology Science Center (ASC Astropedia).
+- **URL:** https://asc-astropedia.s3.us-west-2.amazonaws.com/Enceladus/Cassini/Enceladus_Cassini_DEM_global_200m_schenk2024.tif
+- **License:** Public domain (NASA / U.S. Government work).
+- **Processing:** float32 source values in kilometres converted to metres (×1000);
+  longitude convention inspected from GeoTIFF tiepoints (roll applied if 0..360E);
+  resampled from native 8049×4025 to 7680×3840 by numpy bilinear interpolation;
+  formatted by `bake/bake_enceladus.py`. South-polar tiger-stripe terrain is
+  anomalously low/rugged vs northern plains (global range ≈ ±2.7 km).
+
+## Pluto — `pluto_heightfield.bin`
+
+- **Source:** Pluto New Horizons Global DEM 300m, July 2017 (16-bit).
+- **Mission:** NASA New Horizons.
+- **Instruments:** LORRI (Long Range Reconnaissance Imager) and MVIC (Multispectral
+  Visible Imaging Camera).
+- **Provider:** USGS Astrogeology Science Center.
+- **URL:** https://planetarymaps.usgs.gov/mosaic/Pluto_NewHorizons_Global_DEM_300m_Jul2017_16bit.tif
+- **License:** Public domain (NASA / U.S. Government work).
+- **Processing:** int16 metres above the 1188300 m reference sphere; longitude
+  convention inspected from GeoTIFF tiepoints (roll applied if 0..360E); resampled
+  from native 24888×12444 to 11520×5760 by numpy bilinear interpolation; formatted
+  by `bake/bake_pluto.py`. **COVERAGE NOTE:** New Horizons imaged only the encounter
+  hemisphere (~0–180E) during the July 2015 flyby; the far side (~180–360E) is
+  synthetic smooth fill. Estimated ~50% real coverage (see `coverage_note` in
+  `pluto_meta.json` for exact fraction). Sputnik Planitia (~20N 180E) is a deep
+  basin ≈ −3.5 km; global range ≈ −4..+6 km.
+
+## Charon — `charon_heightfield.bin`
+
+- **Source:** Charon New Horizons Global DEM 300m, July 2017 (16-bit).
+- **Mission:** NASA New Horizons.
+- **Instruments:** LORRI (Long Range Reconnaissance Imager) and MVIC (Multispectral
+  Visible Imaging Camera).
+- **Provider:** USGS Astrogeology Science Center.
+- **URL:** https://planetarymaps.usgs.gov/mosaic/Charon_NewHorizons_Global_DEM_300m_Jul2017_16bit.tif
+- **License:** Public domain (NASA / U.S. Government work).
+- **Processing:** int16 metres above the 606000 m reference sphere; longitude
+  convention inspected from GeoTIFF tiepoints (roll applied if 0..360E); resampled
+  from native 12693×6347 to 5760×2880 by numpy bilinear interpolation; formatted by
+  `bake/bake_charon.py`. **COVERAGE NOTE:** Same one-hemisphere coverage caveat as
+  Pluto — encounter hemisphere only; far side is synthetic fill (~50%). Serenity
+  Chasma (equatorial canyon belt) and Kubrick Mons ("mountain in a moat") are
+  prominent features in the imaged hemisphere; global range ≈ −6..+5 km.
+
 To re-bake from the original sources, see `bake/README` notes in the bake
 scripts (they download the upstream files into `bake/cache/`, which is
 gitignored).
