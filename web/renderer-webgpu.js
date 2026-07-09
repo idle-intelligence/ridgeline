@@ -387,6 +387,8 @@ fn finalize() {
 
 // ── WGSL: LINE render (ports LINE_FRAG_SRC exactly) ──────────────────────────
 const RENDER_WGSL = /* wgsl */`
+// flags.x = ocean shading (1 = Earth: dim low elevations as ocean; 0 = airless body: all land).
+// flags.yzw = per-body tint (vec3, components >1 allowed for emissive boost). Default [1,1,1].
 struct VP { mvp : mat4x4<f32>, line_color : vec4<f32>, flags : vec4<f32> };
 @group(0) @binding(0) var<uniform> u : VP;
 struct VSOut { @builtin(position) pos : vec4<f32>, @location(0) strength : f32, @location(1) elev : f32 };
@@ -401,7 +403,6 @@ fn vs(@location(0) a_pos: vec3<f32>, @location(1) a_attr: vec2<f32>) -> VSOut {
 @fragment
 fn fs(i: VSOut) -> @location(0) vec4<f32> {
   let ev = clamp(i.elev, 0.0, 1.0);
-  // flags.x = ocean shading (1 = Earth: dim low elevations as ocean; 0 = airless body: all land).
   let isLand = max(step(0.0008, ev), 1.0 - u.flags.x);
   let e = pow(ev, 0.35);
   let landBright = mix(0.85, 1.45, e);
@@ -410,14 +411,16 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
   let alphaMul = mix(0.45, 1.0, isLand);
   let warmR = mix(0.0, 0.07, e) * isLand;
   let warmG = mix(0.0, 0.025, e) * isLand;
-  let col = clamp(u.line_color.rgb * bright + vec3<f32>(warmR, warmG, 0.0), vec3<f32>(0.0), vec3<f32>(1.0));
+  let tint = u.flags.yzw; // per-body tint; [1,1,1] = identity
+  let col = tint * clamp(u.line_color.rgb * bright + vec3<f32>(warmR, warmG, 0.0), vec3<f32>(0.0), vec3<f32>(1.0));
   return vec4<f32>(col, u.line_color.a * i.strength * alphaMul);
 }
 `;
 
 // ── WGSL: FILL render (flat dark depth occluder, elev=0 → FILL_FRAG_SRC at elev 0) ──
 const FILL_WGSL = /* wgsl */`
-struct U { mvp : mat4x4<f32>, color : vec4<f32> };
+// tint = per-body tint vec3 (components >1 allowed). Default [1,1,1] = identity.
+struct U { mvp : mat4x4<f32>, color : vec4<f32>, tint : vec4<f32> };
 @group(0) @binding(0) var<uniform> u : U;
 @vertex
 fn vs(@location(0) p: vec3<f32>) -> @builtin(position) vec4<f32> {
@@ -426,7 +429,7 @@ fn vs(@location(0) p: vec3<f32>) -> @builtin(position) vec4<f32> {
 @fragment
 fn fs() -> @location(0) vec4<f32> {
   // Matches FILL_FRAG_SRC at v_elev=0, v_strength=1: bright=1.0, warmR=0 → base fill color, opaque.
-  return vec4<f32>(u.color.rgb, 1.0);
+  return vec4<f32>(u.tint.rgb * u.color.rgb, 1.0);
 }
 `;
 
@@ -715,7 +718,7 @@ export class WebGPURenderer {
 
     // ── FILL render pipeline (compute-generated terrain-following strips, near regime) ──
     const fillMod = device.createShaderModule({ code: FILL_WGSL });
-    this.fillVP = device.createBuffer({ size: 16 * 4 + 4 * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.fillVP = device.createBuffer({ size: 16 * 4 + 4 * 4 + 4 * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.fillPipe = device.createRenderPipeline({
       layout: 'auto',
       vertex: { module: fillMod, entryPoint: 'vs', buffers: [{ arrayStride: 12, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }] }] },
@@ -854,13 +857,18 @@ export class WebGPURenderer {
 
     const rdv = new DataView(this._ringScratch);
     let n = 0;
+    // Strides are calibrated on Earth's full grid (6144 rows). Smaller grids (the Sun's
+    // 1440, or a coarse tier mid-refinement) would render proportionally sparser with the
+    // same absolute step — scale steps by grid density so visual density stays constant.
+    const gridScale = Math.min(1, H / 6144);
+    const dstride = (v) => Math.max(1, Math.round(v * gridScale));
     let row = 0;
     while (row < H) {
       const lat = rowLatFrac(row, 0);
       const nearest = nearestOf(lat);
       const [rowStep, colStride] = exploreStrides || stridesForDistance(nearest);
-      const rs = Math.max(minLineRowStep, rowStep * boost);
-      const cs = colStride * boost;
+      const rs = Math.max(minLineRowStep, dstride(rowStep) * boost);
+      const cs = dstride(colStride) * boost;
       let factor = exploreStrides ? 1 : subringFactorForDistance(nearest);
       factor = Math.max(1, Math.min(factor, subringCap === Infinity ? factor : Math.max(1, subringCap)));
       const subCount = Math.max(factor, 1);
@@ -902,8 +910,8 @@ export class WebGPURenderer {
         const nearest = nearestOf(lat);
         const [rowStep, colStride] = exploreStrides || stridesForDistance(nearest);
         const fc = exploreStrides ? 1 : FILL_COARSEN; // dense fills seal cleanly (no gaps/flicker)
-        const fillRowStep = Math.max(minFillRowStep, Math.max(1, rowStep * boost * fc));
-        const fillColStride = Math.max(1, colStride * boost * fc);
+        const fillRowStep = Math.max(minFillRowStep, Math.max(1, dstride(rowStep) * boost * fc));
+        const fillColStride = Math.max(1, dstride(colStride) * boost * fc);
         if (prev) {
           const stride = Math.max(prev[2], fillColStride);
           if (fn < MAX_FILL_ROWS) {
@@ -959,6 +967,7 @@ export class WebGPURenderer {
       gridW: eng.grid_width(), gridH: eng.grid_height(),
       elevMax: eng.elev_world_max(), vertScale: eng.vert_scale(),
       latMin: -90, latMax: 90, lonMin: -180, lonMax: 180,
+      tint: [1, 1, 1], // per-body tint multiplier; [1,1,1] = identity (explore.js: handle.tint = [r,g,b])
     };
   }
 
@@ -1099,10 +1108,15 @@ export class WebGPURenderer {
       rp.drawIndexed(this.occCount);
     }
 
+    // per-body line/fill tint — read from the CURRENT handle every frame (declared
+    // before the fill block: both fill and line uniforms consume it).
+    const tint = this.activeBody?.tint ?? [1, 1, 1];
+
     // per-ring FILL strips (near/mid regime) — terrain-following dark depth occluder
     if (emitFills && fillCount > 0) {
-      const fillU = new Float32Array(20);
+      const fillU = new Float32Array(24); // mvp(16) + color(4) + tint(4)
       fillU.set(mvp, 0); fillU.set(PALETTE.fill, 16);
+      fillU[20] = tint[0]; fillU[21] = tint[1]; fillU[22] = tint[2]; fillU[23] = 1.0;
       device.queue.writeBuffer(this.fillVP, 0, fillU);
       rp.setPipeline(this.fillPipe);
       rp.setBindGroup(0, this.fillBind);
@@ -1114,7 +1128,8 @@ export class WebGPURenderer {
     // lines (drawIndexedIndirect from compute output)
     const lineU = new Float32Array(24);
     lineU.set(mvp, 0); lineU.set(PALETTE.line, 16);
-    lineU[20] = this.hasOcean === false ? 0 : 1; // ocean shading on unless the body opts out
+    lineU[20] = this.hasOcean === false ? 0 : 1; // flags.x: ocean shading on unless the body opts out
+    lineU[21] = tint[0]; lineU[22] = tint[1]; lineU[23] = tint[2]; // flags.yzw: per-body tint
     device.queue.writeBuffer(this.lineVP, 0, lineU);
     rp.setPipeline(this.linePipe);
     rp.setBindGroup(0, this.lineBind);
