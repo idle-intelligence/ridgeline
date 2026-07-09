@@ -64,6 +64,21 @@ const ELEMENTS = {
   saturn:  { a0:9.53667594, da:-0.00125060, e0:0.05386179, de:-0.00050991,
              I0:2.48599187,   dI: 0.00193609, L0:49.95424423,  dL:  1222.49362201,
              w0:92.59887831,  dw:-0.41897216, O0:113.66242448, dO:-0.28867794 },
+  // Pluto: Standish (1992) / JPL approximate elements Table 2 (1800–2050 range, J2000 epoch).
+  // a few degrees accuracy is sufficient for marker placement.
+  pluto:   { a0:39.48211675, da:-0.00031596, e0:0.24882730, de: 0.00005170,
+             I0:17.14001206,  dI: 0.00004818, L0:238.92903833, dL:  145.20780515,
+             w0:224.06891629, dw:-0.04062942, O0:110.30393684, dO:-0.01183482 },
+  // Ceres: approximate elements from USNO/MPC orbital data (a, e, I, period).
+  // Mean longitude L0 at J2000 is approximate — the phase is plausible but not fitted.
+  ceres:   { a0:2.76750591,  da: 0.0,        e0:0.07850400, de: 0.0,
+             I0:10.59406704,  dI: 0.0,        L0:291.40,      dL: 68.00 * 36525 / 1682,
+             w0:73.59759364,  dw: 0.0,        O0: 80.32942800, dO: 0.0 },
+  // Vesta: approximate elements from USNO/MPC orbital data (a, e, I, period).
+  // Mean longitude L0 at J2000 is approximate — the phase is plausible but not fitted.
+  vesta:   { a0:2.36126423,  da: 0.0,        e0:0.08874128, de: 0.0,
+             I0: 7.14187571,  dI: 0.0,        L0:103.85,      dL: 68.00 * 36525 / 1325,
+             w0:151.19853039, dw: 0.0,        O0:103.81050905, dO: 0.0 },
 };
 
 /**
@@ -79,12 +94,17 @@ const ELEMENTS = {
  * sun:     7.25° (inclination of solar equator to ecliptic)
  */
 export const OBLIQUITY = {
-  mercury: 0.03,
+  mercury:   0.03,
   venus:   177.4,
-  earth:   23.44,
-  moon:    1.54,
-  mars:    25.19,
-  sun:     7.25,
+  earth:    23.44,
+  moon:      1.54,
+  mars:     25.19,
+  sun:       7.25,
+  ceres:     4.0,
+  vesta:    27.0,
+  enceladus: 27.0,   // approximately co-planar with Saturn's equator
+  pluto:   119.6,
+  charon:  119.6,
 };
 
 // ── Time ─────────────────────────────────────────────────────────────────────
@@ -249,11 +269,21 @@ export function moonGeoEcl(jd) {
 
 // ── Direction helpers ─────────────────────────────────────────────────────────
 
-/** Heliocentric ecliptic J2000 position of a body (handles 'sun' and 'moon'). */
+// Bodies whose heliocentric position is indistinguishable from their parent for
+// marker-direction purposes (the offset is tiny vs interplanetary distances).
+// eclDirection() routes both observer and target through these aliases so that,
+// e.g., looking at Enceladus from Earth gives the same direction as Saturn.
+const ALIASES = {
+  enceladus: 'saturn',
+  charon:    'pluto',
+};
+
+/** Heliocentric ecliptic J2000 position of a body (handles 'sun', 'moon', and aliases). */
 function helioPos(id, jd) {
-  if (id === 'sun')  return [0, 0, 0];
-  if (id === 'moon') return add3(helioEcl('earth', jd), moonGeoEcl(jd));
-  return helioEcl(id, jd);
+  const resolved = ALIASES[id] ?? id;
+  if (resolved === 'sun')  return [0, 0, 0];
+  if (resolved === 'moon') return add3(helioEcl('earth', jd), moonGeoEcl(jd));
+  return helioEcl(resolved, jd);
 }
 
 function add3(a, b)  { return [a[0]+b[0], a[1]+b[1], a[2]+b[2]]; }

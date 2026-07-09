@@ -189,6 +189,65 @@ const MERCURY = new Body({
   view: { lat: 30, lon: -170, altitude: ALT_START, tilt: TILT_START, heading: 0 }, // Caloris basin
   orbit: { aroundId: 'sun', periodSec: 88 * DAY_SEC, inclinationDeg: 7 },
 });
+const CERES = new Body({
+  id: 'ceres', name: 'CERES',
+  metaUrl: dataUrl('ceres_meta.json'), dataUrl: dataUrl('ceres_heightfield.bin'),
+  hfStem: 'ceres_heightfield',
+  radiusM: 470000, rotationPeriodSec: 9.074 * 3600,
+  veFactor: 0.32, color: '#b8b0a0', hasOcean: false,
+  modes: [[50, 'SURFACE'], [1500, 'LOW'], [12000, 'ORBIT'], [Infinity, 'DEEP SPACE']],
+  view: { lat: 19.8, lon: -120, altitude: ALT_START, tilt: TILT_START, heading: 0 }, // Occator crater
+  orbit: { aroundId: 'sun', periodSec: 1682 * DAY_SEC },
+});
+// Note: Vesta's meta has elev_scale_m: 2 (int16 values are in 2 m units, range exceeded
+// plain int16 meters). Vesta is also highly triaxial (axes ~286/279/223 km), so the sphere
+// render is intentionally lumpy — the reference-sphere fit is coarse by design.
+const VESTA = new Body({
+  id: 'vesta', name: 'VESTA',
+  metaUrl: dataUrl('vesta_meta.json'), dataUrl: dataUrl('vesta_heightfield.bin'),
+  hfStem: 'vesta_heightfield',
+  radiusM: 262700, rotationPeriodSec: 5.342 * 3600,
+  veFactor: 0.42, color: '#cfc3aa', hasOcean: false,
+  modes: [[50, 'SURFACE'], [1500, 'LOW'], [12000, 'ORBIT'], [Infinity, 'DEEP SPACE']],
+  view: { lat: -75, lon: -60, altitude: ALT_START, tilt: TILT_START, heading: 0 }, // Rheasilvia basin
+  orbit: { aroundId: 'sun', periodSec: 1325 * DAY_SEC },
+});
+const ENCELADUS = new Body({
+  id: 'enceladus', name: 'ENCELADUS',
+  metaUrl: dataUrl('enceladus_meta.json'), dataUrl: dataUrl('enceladus_heightfield.bin'),
+  hfStem: 'enceladus_heightfield',
+  radiusM: 252100, rotationPeriodSec: 1.370218 * DAY_SEC, // tidally locked to Saturn
+  veFactor: 3.3, color: '#dfe9ec', hasOcean: false,
+  modes: [[50, 'SURFACE'], [1500, 'LOW'], [12000, 'ORBIT'], [Infinity, 'DEEP SPACE']],
+  view: { lat: -60, lon: 0, altitude: ALT_START, tilt: TILT_START, heading: 0 }, // south-polar tiger-stripe terrain
+  orbit: { aroundId: 'saturn', periodSec: 1.370218 * DAY_SEC },
+});
+// Note: ~54% of the map is synthetic far-side fill (meta coverage_note — New Horizons imaged
+// only ~46% of Pluto on the July 2015 flyby; the unimaged hemisphere is filled with the mean
+// elevation for rendering continuity).
+// Pluto spins RETROGRADE — negative rotationPeriodSec flips rotDegPerSec's sign, matching Venus.
+const PLUTO = new Body({
+  id: 'pluto', name: 'PLUTO',
+  metaUrl: dataUrl('pluto_meta.json'), dataUrl: dataUrl('pluto_heightfield.bin'),
+  hfStem: 'pluto_heightfield',
+  radiusM: 1188300, rotationPeriodSec: -6.38723 * DAY_SEC, // retrograde (tidally locked with Charon)
+  veFactor: 1.4, color: '#d8c7b8', hasOcean: false,
+  modes: [[50, 'SURFACE'], [1500, 'LOW'], [12000, 'ORBIT'], [Infinity, 'DEEP SPACE']],
+  view: { lat: 25, lon: 10, altitude: ALT_START, tilt: TILT_START, heading: 0 }, // Sputnik Planitia
+  orbit: { aroundId: 'sun', periodSec: 90560 * DAY_SEC },
+});
+// Note: ~54% of the map is synthetic far-side fill (meta coverage_note — same New Horizons
+// flyby coverage caveat as Pluto above).
+const CHARON = new Body({
+  id: 'charon', name: 'CHARON',
+  metaUrl: dataUrl('charon_meta.json'), dataUrl: dataUrl('charon_heightfield.bin'),
+  hfStem: 'charon_heightfield',
+  radiusM: 606000, rotationPeriodSec: 6.38723 * DAY_SEC, // tidally locked to Pluto
+  veFactor: 0.64, color: '#a8a09b', hasOcean: false,
+  modes: [[50, 'SURFACE'], [1500, 'LOW'], [12000, 'ORBIT'], [Infinity, 'DEEP SPACE']],
+  view: { lat: 5, lon: 120, altitude: ALT_START, tilt: TILT_START, heading: 0 }, // Serenity Chasma
+  orbit: { aroundId: 'pluto', periodSec: 6.38723 * DAY_SEC },
+});
 const SUN = new Body({
   id: 'sun', name: 'SUN',
   metaUrl: dataUrl('sun_meta.json'), dataUrl: dataUrl('sun_heightfield.bin'),
@@ -207,7 +266,7 @@ const SUN = new Body({
   view: { lat: 15, lon: 0, altitude: ALT_START, tilt: TILT_START, heading: 0 },
   orbit: null, // heliocentric origin — the ephemeris treats 'sun' as [0,0,0]
 });
-const REGISTRY = [EARTH, MOON, MARS, VENUS, MERCURY, SUN];
+const REGISTRY = [EARTH, MOON, MARS, VENUS, MERCURY, CERES, VESTA, ENCELADUS, PLUTO, CHARON, SUN];
 
 let active = EARTH;
 let timeSpeed = 1000;        // × real time
@@ -350,8 +409,13 @@ function hudText() {
   const spd = timeSpeed === 0 ? '⏸' : timeSpeed < 1 ? timeSpeed+'×' : timeSpeed >= 1000 ? (timeSpeed/1000).toFixed(0)+'k×' : timeSpeed+'×';
   const headDeg = ((heading*180/Math.PI)%360+360)%360;
   const compassIdx = Math.round(headDeg/45) % 8;
-  // Ground elevation under the camera (real metres): +21 km at Olympus Mons, −5 km in a basin.
-  const gndKm = groundElevM / 1000;
+  // Ground elevation under the camera (human-readable metres): +21 km at Olympus Mons, −5 km in a basin.
+  // For Vesta (elev_scale_m: 2) the raw int16 values are in 2 m units, so we scale the DISPLAYED
+  // value by elev_scale_m to recover real metres. We do NOT scale sampleElevM/terrain-follow —
+  // the rendered sphere bulge uses raw int16 as-is, so camera clearance must stay in raw units
+  // to match the visuals; only the human-facing km number gets the scale factor.
+  const elevScaleM = active.meta?.elev_scale_m ?? 1;
+  const gndKm = (groundElevM * elevScaleM) / 1000;
   const gnd = `${gndKm >= 0 ? '+' : '−'}${Math.abs(gndKm).toFixed(1)} km`;
   const refine = lodLabel[active.id] ? ` · LOD ${lodLabel[active.id]}↻` : '';
   return `${active.name} · ${active.modeFor(altitude)}`
@@ -431,6 +495,20 @@ async function main() {
   } catch (e) { console.error('[explore] init:', e); showErr(e.message); return; }
 
   // ── Background refinement machinery ──────────────────────────────────────────
+  // Mobile memory guard: the full-res Earth heightfield is 151 MB on the GPU plus ~151 MB
+  // in WASM memory (~308 MB heap observed), for ~271 MB GPU total. On constrained devices
+  // (phones with ≤ 4 GB RAM or adapters with small maxBufferSize) we cap refinement at d4
+  // (~9 MB GPU HF, ~129 MB GPU total) to prevent tab-kills. The d4 tier still renders
+  // recognizable continents and satisfying terrain detail.
+  // Heuristic: navigator.deviceMemory < 4 (Chrome/Edge only; undefined → unconstrained)
+  // OR adapter.maxBufferSize < 256 MB (proxy for an integrated/mobile GPU limit).
+  const _adapterMaxBuf = renderer.adapterLimits?.maxStorageBufferBindingSize ?? Infinity;
+  const _deviceMemGb = typeof navigator.deviceMemory === 'number' ? navigator.deviceMemory : Infinity;
+  const _constrainedDevice = _deviceMemGb < 4 || _adapterMaxBuf < 256 * 1024 * 1024;
+  if (_constrainedDevice) {
+    console.log(`[explore] constrained device (deviceMemory=${_deviceMemGb} GB, adapterMaxBuf=${(_adapterMaxBuf/1e6).toFixed(0)} MB) — capping refinement at d4`);
+  }
+
   // refineBody: fetch d4 then full for a body, upgrading the tier atomically each time.
   // If the body is not active when a tier arrives, we still upgrade its stored state
   // (so it's ready for future jumpTo), but skip renderer.useBody. Non-active bodies
@@ -442,10 +520,11 @@ async function main() {
   async function refineBody(b) {
     // Issue (or re-issue) a refinement chain for b starting at d4, then full.
     // Cancels any previous in-flight chain for this body.
+    // On constrained devices, stop at d4 (skip the 151 MB full-res upgrade).
     const token = { cancelled: false };
     refineTokens.set(b.id, token);
 
-    for (const f of [4, 1]) {
+    for (const f of (_constrainedDevice ? [4] : [4, 1])) {
       if (token.cancelled) break;
       if (b.tier !== 0 && f >= b.tier) continue; // already at this resolution or finer
 

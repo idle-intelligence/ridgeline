@@ -204,3 +204,49 @@ test('OBLIQUITY table has expected keys and sane values', () => {
     assert.ok(Math.abs(OBLIQUITY[id] - val) < 0.01, `${id}: got ${OBLIQUITY[id]}, want ${val}`);
   }
 });
+
+// ── Wave-2 bodies: Ceres, Vesta, Pluto ───────────────────────────────────────
+
+test('Ceres heliocentric distance 2.5..3.0 AU', () => {
+  for (let y = 2000; y <= 2010; y++) {
+    const r = dist3(helioEcl('ceres', jdOf(y, 1, 1)));
+    assert.ok(r >= 2.5 && r <= 3.0, `Ceres r=${r.toFixed(3)} AU on ${y}`);
+  }
+});
+
+test('Vesta heliocentric distance 2.1..2.6 AU', () => {
+  for (let y = 2000; y <= 2010; y++) {
+    const r = dist3(helioEcl('vesta', jdOf(y, 1, 1)));
+    assert.ok(r >= 2.1 && r <= 2.6, `Vesta r=${r.toFixed(3)} AU on ${y}`);
+  }
+});
+
+test('Pluto heliocentric distance 29..50 AU across a decade sweep', () => {
+  for (let y = 2000; y <= 2010; y++) {
+    const r = dist3(helioEcl('pluto', jdOf(y, 1, 1)));
+    assert.ok(r >= 29 && r <= 50, `Pluto r=${r.toFixed(2)} AU on ${y}`);
+  }
+});
+
+test('alias: eclDirection earth→enceladus ≈ earth→saturn (dot > 0.999)', () => {
+  const jd = jdOf(2020, 6, 15);
+  const dEnceladus = eclDirection('earth', 'enceladus', jd);
+  const dSaturn    = eclDirection('earth', 'saturn',    jd);
+  const d = dot3(dEnceladus, dSaturn);
+  assert.ok(d > 0.999, `dot(enceladus, saturn)=${d.toFixed(6)} — alias not routing`);
+});
+
+test('alias: eclDirection earth→charon ≈ earth→pluto (dot > 0.999)', () => {
+  const jd = jdOf(2015, 7, 14); // New Horizons flyby date
+  const dCharon = eclDirection('earth', 'charon', jd);
+  const dPluto  = eclDirection('earth', 'pluto',  jd);
+  const d = dot3(dCharon, dPluto);
+  assert.ok(d > 0.999, `dot(charon, pluto)=${d.toFixed(6)} — alias not routing`);
+});
+
+test('Pluto sky direction is a unit vector', () => {
+  const jd = jdOf(2020, 1, 1);
+  const d = bodySkyDirection('earth', 'pluto', jd, OBLIQUITY.earth);
+  const len = dist3(d);
+  assert.ok(Math.abs(len - 1) < 1e-9, `length=${len}`);
+});
