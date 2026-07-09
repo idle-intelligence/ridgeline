@@ -511,23 +511,27 @@ function mat4Mul(a, b) {
 // Invert a column-major 4x4 (for the starfield world-ray reconstruction). Returns Float32Array(16) or null.
 function mat4Invert(m) {
   const inv = new Float32Array(16);
+  return mat4InvertInto(m, inv) ? inv : null;
+}
+// In-place variant: writes into `out` (Float32Array(16)), returns true on success.
+function mat4InvertInto(m, out) {
   const a00=m[0],a01=m[1],a02=m[2],a03=m[3], a10=m[4],a11=m[5],a12=m[6],a13=m[7];
   const a20=m[8],a21=m[9],a22=m[10],a23=m[11], a30=m[12],a31=m[13],a32=m[14],a33=m[15];
   const b00=a00*a11-a01*a10, b01=a00*a12-a02*a10, b02=a00*a13-a03*a10, b03=a01*a12-a02*a11;
   const b04=a01*a13-a03*a11, b05=a02*a13-a03*a12, b06=a20*a31-a21*a30, b07=a20*a32-a22*a30;
   const b08=a20*a33-a23*a30, b09=a21*a32-a22*a31, b10=a21*a33-a23*a31, b11=a22*a33-a23*a32;
   let det = b00*b11-b01*b10+b02*b09+b03*b08-b04*b07+b05*b06;
-  if (!det) return null;
+  if (!det) return false;
   det = 1.0 / det;
-  inv[0]=(a11*b11-a12*b10+a13*b09)*det; inv[1]=(a02*b10-a01*b11-a03*b09)*det;
-  inv[2]=(a31*b05-a32*b04+a33*b03)*det; inv[3]=(a22*b04-a21*b05-a23*b03)*det;
-  inv[4]=(a12*b08-a10*b11-a13*b07)*det; inv[5]=(a00*b11-a02*b08+a03*b07)*det;
-  inv[6]=(a32*b02-a30*b05-a33*b01)*det; inv[7]=(a20*b05-a22*b02+a23*b01)*det;
-  inv[8]=(a10*b10-a11*b08+a13*b06)*det; inv[9]=(a01*b08-a00*b10-a03*b06)*det;
-  inv[10]=(a30*b04-a31*b02+a33*b00)*det; inv[11]=(a21*b02-a20*b04-a23*b00)*det;
-  inv[12]=(a11*b07-a10*b09-a12*b06)*det; inv[13]=(a00*b09-a01*b07+a02*b06)*det;
-  inv[14]=(a31*b01-a30*b03-a32*b00)*det; inv[15]=(a20*b03-a21*b01+a22*b00)*det;
-  return inv;
+  out[0]=(a11*b11-a12*b10+a13*b09)*det; out[1]=(a02*b10-a01*b11-a03*b09)*det;
+  out[2]=(a31*b05-a32*b04+a33*b03)*det; out[3]=(a22*b04-a21*b05-a23*b03)*det;
+  out[4]=(a12*b08-a10*b11-a13*b07)*det; out[5]=(a00*b11-a02*b08+a03*b07)*det;
+  out[6]=(a32*b02-a30*b05-a33*b01)*det; out[7]=(a20*b05-a22*b02+a23*b01)*det;
+  out[8]=(a10*b10-a11*b08+a13*b06)*det; out[9]=(a01*b08-a00*b10-a03*b06)*det;
+  out[10]=(a30*b04-a31*b02+a33*b00)*det; out[11]=(a21*b02-a20*b04-a23*b00)*det;
+  out[12]=(a11*b07-a10*b09-a12*b06)*det; out[13]=(a00*b09-a01*b07+a02*b06)*det;
+  out[14]=(a31*b01-a30*b03-a32*b00)*det; out[15]=(a20*b03-a21*b01+a22*b00)*det;
+  return true;
 }
 
 // Dark occluder DOME (positions only) at OCCLUDER_R — matches geometry.rs's gated dome.
@@ -774,6 +778,12 @@ export class WebGPURenderer {
     this._camScratch = new ArrayBuffer(96);
     this._ringScratch = new ArrayBuffer(MAX_RINGS * 16);
     this._fillRowScratch = new ArrayBuffer(MAX_FILL_ROWS * 32);
+    this._zeroCounters = new Uint32Array(4); // preallocated zero array — reused each frame for counter reset
+    // Preallocated uniform scratch arrays — avoids per-frame GC pressure from small typed arrays.
+    this._lineUScratch = new Float32Array(24); // mvp(16)+color(4)+flags(4) — written every frame
+    this._fillUScratch = new Float32Array(24); // mvp(16)+color(4)+tint(4) — written when fills active
+    this._occUScratch = new Float32Array(20);  // mvp(16)+color(4) — written in disc regime
+    this._invVPScratch = new Float32Array(16); // star invVP — written every frame
     this._lastCpuGenMs = 0;
     this.resize(canvas.width, canvas.height);
   }
@@ -1051,7 +1061,7 @@ export class WebGPURenderer {
     device.queue.writeBuffer(this.camBuf, 0, this._camScratch);
     device.queue.writeBuffer(this.ringBuf, 0, this._ringScratch, 0, ringCount * 16);
     if (fillCount > 0) device.queue.writeBuffer(this.fillRowBuf, 0, this._fillRowScratch, 0, fillCount * 32);
-    device.queue.writeBuffer(this.counterBuf, 0, new Uint32Array([0, 0, 0, 0]));
+    device.queue.writeBuffer(this.counterBuf, 0, this._zeroCounters);
 
     // ── Compute: LINE + FILL geometry + indices ──
     {
@@ -1087,9 +1097,8 @@ export class WebGPURenderer {
     // Use star_view_proj if provided (explore mode: inertially-fixed MVP so stars don't rotate
     // with the planet); otherwise fall back to the main MVP.
     const starMvp = eng.star_view_proj ? eng.star_view_proj() : mvp;
-    const invVP = mat4Invert(starMvp);
-    if (invVP) {
-      device.queue.writeBuffer(this.starU, 0, invVP);
+    if (mat4InvertInto(starMvp, this._invVPScratch)) {
+      device.queue.writeBuffer(this.starU, 0, this._invVPScratch);
       rp.setPipeline(this.starPipe);
       rp.setBindGroup(0, this.starBind);
       rp.draw(3);
@@ -1098,9 +1107,8 @@ export class WebGPURenderer {
     // occluder DOME — only in the disc/from-afar regime; at low altitude the dome's near
     // surface becomes visible from outside and creates a dark band across the terrain.
     if (!emitFills) {
-      const occU = new Float32Array(20);
-      occU.set(mvp, 0); occU.set(PALETTE.fill, 16);
-      device.queue.writeBuffer(this.occVP, 0, occU);
+      this._occUScratch.set(mvp, 0); this._occUScratch.set(PALETTE.fill, 16);
+      device.queue.writeBuffer(this.occVP, 0, this._occUScratch);
       rp.setPipeline(this.occPipe);
       rp.setBindGroup(0, this.occBind);
       rp.setVertexBuffer(0, this.occVBO);
@@ -1114,10 +1122,9 @@ export class WebGPURenderer {
 
     // per-ring FILL strips (near/mid regime) — terrain-following dark depth occluder
     if (emitFills && fillCount > 0) {
-      const fillU = new Float32Array(24); // mvp(16) + color(4) + tint(4)
-      fillU.set(mvp, 0); fillU.set(PALETTE.fill, 16);
-      fillU[20] = tint[0]; fillU[21] = tint[1]; fillU[22] = tint[2]; fillU[23] = 1.0;
-      device.queue.writeBuffer(this.fillVP, 0, fillU);
+      this._fillUScratch.set(mvp, 0); this._fillUScratch.set(PALETTE.fill, 16);
+      this._fillUScratch[20] = tint[0]; this._fillUScratch[21] = tint[1]; this._fillUScratch[22] = tint[2]; this._fillUScratch[23] = 1.0;
+      device.queue.writeBuffer(this.fillVP, 0, this._fillUScratch);
       rp.setPipeline(this.fillPipe);
       rp.setBindGroup(0, this.fillBind);
       rp.setVertexBuffer(0, this.fillPosBuf);
@@ -1126,11 +1133,10 @@ export class WebGPURenderer {
     }
 
     // lines (drawIndexedIndirect from compute output)
-    const lineU = new Float32Array(24);
-    lineU.set(mvp, 0); lineU.set(PALETTE.line, 16);
-    lineU[20] = this.hasOcean === false ? 0 : 1; // flags.x: ocean shading on unless the body opts out
-    lineU[21] = tint[0]; lineU[22] = tint[1]; lineU[23] = tint[2]; // flags.yzw: per-body tint
-    device.queue.writeBuffer(this.lineVP, 0, lineU);
+    this._lineUScratch.set(mvp, 0); this._lineUScratch.set(PALETTE.line, 16);
+    this._lineUScratch[20] = this.hasOcean === false ? 0 : 1; // flags.x: ocean shading on unless the body opts out
+    this._lineUScratch[21] = tint[0]; this._lineUScratch[22] = tint[1]; this._lineUScratch[23] = tint[2]; // flags.yzw: per-body tint
+    device.queue.writeBuffer(this.lineVP, 0, this._lineUScratch);
     rp.setPipeline(this.linePipe);
     rp.setBindGroup(0, this.lineBind);
     rp.setVertexBuffer(0, this.posBuf);
