@@ -7,6 +7,7 @@ import {
   mat4LookAt, mat4Perspective, mat4Mul,
   vec3ToLatLon, rotateY, rodrigues, raySphere, clampPolar,
 } from './mathutil.js';
+import { toJD, bodySkyDirection, OBLIQUITY } from './ephemeris.js';
 
 const R_WORLD = WORLD_RADIUS;
 const VERT_EXAGGERATION = 8.0; // matches the renderer's ve_ratio = ve / VERT_EXAGGERATION
@@ -78,7 +79,8 @@ const lodLabel = {};
 // Tier dims: meta.width/factor × meta.height/factor (integer division, exact by bake design).
 // URL for a tier: stem + (f===1 ? '.bin' : `_d${f}.bin`)
 function tierUrl(b, f) {
-  return dataUrl(f === 1 ? `${b.hfStem}.bin` : `${b.hfStem}_d${f}.bin`);
+  const q = b.cacheBust ? `?${b.cacheBust}` : ''; // per-body re-bake bust (Cache API keys include the query)
+  return dataUrl((f === 1 ? `${b.hfStem}.bin` : `${b.hfStem}_d${f}.bin`) + q);
 }
 function tierDims(meta, f) {
   return { w: Math.floor(meta.width / f), h: Math.floor(meta.height / f) };
@@ -98,6 +100,7 @@ function _applyTier(b, f, buf, meta, Engine, renderer, isActive) {
   const newHandle = renderer.addBody(newEngine, wasmMem);
   newHandle.elevMinWu = meta.elev_min * newHandle.vertScale;
   newHandle.hasOcean = b.hasOcean;
+  if (b.tint) newHandle.tint = b.tint; // per-body line/fill tint (e.g. the Sun's warm glow)
 
   // Destroy previous resources before overwriting.
   const oldHandle = b.handle;
@@ -186,11 +189,44 @@ const MERCURY = new Body({
   view: { lat: 30, lon: -170, altitude: ALT_START, tilt: TILT_START, heading: 0 }, // Caloris basin
   orbit: { aroundId: 'sun', periodSec: 88 * DAY_SEC, inclinationDeg: 7 },
 });
-const REGISTRY = [EARTH, MOON, MARS, VENUS, MERCURY];
+const SUN = new Body({
+  id: 'sun', name: 'SUN',
+  metaUrl: dataUrl('sun_meta.json'), dataUrl: dataUrl('sun_heightfield.bin'),
+  hfStem: 'sun_heightfield',
+  // The Sun's "terrain" is the SDO/HMI Carrington synoptic MAGNETOGRAM (CR2300):
+  // ridges are magnetic field strength (signed-sqrt Gauss mapping — see bake_sun.py),
+  // so bipolar active regions render as mountain+trench pairs in the activity belts.
+  radiusM: 696000000, rotationPeriodSec: 25.38 * DAY_SEC, // Carrington sidereal rotation
+  // Field-values are tiny relative to the huge radius — boost ve so the magnetic
+  // ridges read like Earth's mountains do (≈ Earth relief ratio × 32).
+  veFactor: 2, color: '#ffcf6a', hasOcean: false,
+  cacheBust: 'r2', // re-bake 2: needle cap ±10000
+  autoTilt: false, // no resting-pitch morphs on the Sun — zooming keeps your angle
+  tint: [1.35, 0.82, 0.38], // warm gold — blue cut hard so bright ridges stay amber, not clipped white
+  modes: [[50, 'SURFACE'], [1500, 'CORONA'], [12000, 'ORBIT'], [Infinity, 'DEEP SPACE']],
+  view: { lat: 15, lon: 0, altitude: ALT_START, tilt: TILT_START, heading: 0 },
+  orbit: null, // heliocentric origin — the ephemeris treats 'sun' as [0,0,0]
+});
+const REGISTRY = [EARTH, MOON, MARS, VENUS, MERCURY, SUN];
 
 let active = EARTH;
 let timeSpeed = 1000;        // × real time
-let simTimeSec = 0.0;       // accumulated simulated seconds — drives each body's marker by its own period
+let simTimeSec = 0.0;       // accumulated simulated seconds
+
+// Ephemeris time: real wall-clock epoch captured at startup.
+// Each frame: jd = toJD(simEpochMs + simTimeSec * 1000), so at 1000× time speed
+// a real second advances the sim by 1000 s, sweeping the true orbital configuration.
+const simEpochMs = Date.now();
+
+// Distance of sky markers from the planet centre in world units.
+// Must be < Z_FAR (200 000) and >> R_WORLD (6 000) so markers stay in view.
+const MARKER_DIST = 120_000;
+
+// Marker-only entries for bodies that are not (yet) explorable planets.
+// Format matches the fields that updateBodyMarker and the widget loop actually
+// use: id, name, color. (Empty now that the Sun is a full Body — kept as the
+// seam for future non-landable markers, e.g. Jupiter.)
+const MARKER_ONLY = [];
 
 // ── Input state ───────────────────────────────────────────────────────────────
 let dragActive = false, dragTurn = false;
@@ -324,16 +360,14 @@ function hudText() {
     + `\nTIME ${spd}${refine}`;
 }
 
-// Far sky position of a body, for its marker. Each body advances at its OWN orbital rate
-// (angle = simTime / period), so the Moon (~27 d) sweeps far faster than Mars (~687 d).
-// A golden-angle index offset + per-body inclination keep multiple markers from overlapping.
-function bodySkyPos(b) {
-  const i = REGISTRY.indexOf(b);
-  const periodSec = b.orbit?.periodSec ?? 365.25 * DAY_SEC; // Earth (no orbit) → 1 year
-  const a = (simTimeSec / periodSec * 360 + i * 137.5) * Math.PI / 180;
-  const incl = ((b.orbit?.inclinationDeg ?? 15) + i * 9) * Math.PI / 180;
-  const dir = normalize([Math.cos(a), Math.sin(incl), -Math.sin(a)]);
-  return scale(dir, 90000); // far but within Z_FAR
+// Sky marker world position for a body, computed from real Keplerian ephemeris.
+// dir = bodySkyDirection(active body, target body, jd) gives a unit vector in the
+// observer's render frame; we scale it to MARKER_DIST (inside Z_FAR).
+// The active body is passed in so this can be called for both REGISTRY bodies and
+// MARKER_ONLY entries (like the Sun) without any special-casing.
+function bodySkyMarkerPos(targetId, jd) {
+  const dir = bodySkyDirection(active.id, targetId, jd, OBLIQUITY[active.id] ?? 0);
+  return scale(dir, MARKER_DIST);
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
@@ -484,8 +518,11 @@ async function main() {
   });
 
   // ── Per-body sky markers: on-screen dot (click to jump) or off-screen edge arrow ──
+  // ALL_MARKERS = explorable bodies (REGISTRY) + marker-only entries (MARKER_ONLY, e.g. Sun).
+  // updateBodyMarker uses only id/name/color + computed position — safe to mix both kinds.
+  const ALL_MARKERS = [...REGISTRY, ...MARKER_ONLY];
   const widgets = new Map();
-  for (const b of REGISTRY) {
+  for (const b of ALL_MARKERS) {
     const marker = document.createElement('div');
     marker.style.cssText = 'position:fixed; display:none; transform:translate(-50%,-50%); cursor:pointer;'
       + ' font:11px monospace; text-align:center; pointer-events:auto; z-index:5;';
@@ -497,7 +534,8 @@ async function main() {
       + ` border:1px solid #fff; box-shadow:0 0 8px rgba(255,255,255,0.4); background:${b.color};`;
     lbl.style.color = b.color;
     lbl.textContent = '▸ ' + b.name;
-    marker.addEventListener('click', () => jumpTo(b));
+    // Marker-only entries (no Body.resetView etc.) are not jumpable — suppress the click handler.
+    if (b instanceof Body) marker.addEventListener('click', () => jumpTo(b));
 
     const arrow = document.createElement('div');
     arrow.style.cssText = 'position:fixed; display:none; transform:translate(-50%,-50%);'
@@ -508,7 +546,7 @@ async function main() {
     const albl = arrow.querySelector('.albl');
     chev.style.cssText = `display:inline-block; font-size:20px; line-height:1; color:${b.color};`;
     albl.style.cssText = `display:block; font:10px monospace; margin-top:2px; color:${b.color};`;
-    arrow.addEventListener('click', () => jumpTo(b));
+    if (b instanceof Body) arrow.addEventListener('click', () => jumpTo(b));
 
     widgets.set(b.id, { marker, arrow, chev, lbl, albl });
   }
@@ -686,7 +724,7 @@ async function main() {
     // Auto-tilt re-arms on the first mode change after spawn/jumpTo (so spawn framing holds).
     // It is disabled by user pitch drag (right-drag / two-finger) and re-armed on jumpTo.
     const mode = active.modeFor(active.view.altitude);
-    if (active._prevMode !== undefined && mode !== active._prevMode) active._autoTilt = true;
+    if (active._prevMode !== undefined && mode !== active._prevMode && active.autoTilt) active._autoTilt = true;
     if (active._autoTilt) {
       const target = tiltRestForAlt(active.view.altitude, active);
       active.view.tilt += (target - active.view.tilt) * Math.min(1, dt * 1.4);
@@ -698,9 +736,13 @@ async function main() {
     renderer.draw(makeProxy(cam), null);
     if (!loadingDone) { document.getElementById('loading').style.display = 'none'; loadingDone = true; }
     document.getElementById('info').textContent = hudText();
-    // Process EVERY body each frame — including the active one, which must be HIDDEN
-    // (skipping it would leave its marker frozen on screen with a stale label).
-    for (const b of REGISTRY) updateBodyMarker(cam, b);
+    // Compute Julian Date for this frame from the simulated clock.
+    // simEpochMs anchors the simulation to the real calendar so 1000× time speed
+    // sweeps the true planetary configuration.
+    const jd = toJD(simEpochMs + simTimeSec * 1000);
+    // Process ALL markers each frame — REGISTRY bodies + MARKER_ONLY (e.g. Sun).
+    // The active body's marker is hidden inside updateBodyMarker.
+    for (const b of ALL_MARKERS) updateBodyMarker(cam, b, jd);
 
     requestAnimationFrame(frame);
   }
@@ -708,11 +750,12 @@ async function main() {
   // Per-body marker. The active body is always hidden. For others: behind the current
   // body → hide; on-screen & unblocked → dot; in front but off-view → edge arrow. The
   // label is read straight from b.name at render time (can't desync from the body).
-  function updateBodyMarker(cam, b) {
+  // Works for both Body instances (REGISTRY) and MARKER_ONLY plain objects (e.g. Sun).
+  function updateBodyMarker(cam, b, jd) {
     const { marker, arrow, chev, lbl, albl } = widgets.get(b.id);
     if (b === active) { marker.style.display = 'none'; arrow.style.display = 'none'; return; }
     const cw = canvas.width, ch = canvas.height;
-    const owp = bodySkyPos(b);
+    const owp = bodySkyMarkerPos(b.id, jd);
     const d = sub(owp, cam.pos);
     const sf = dot(d, cam.fwd), sx = dot(d, cam.right), sy = dot(d, cam.up);
     // Clamp the occlusion sphere below the camera radius so the camera is always
