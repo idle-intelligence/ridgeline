@@ -1,0 +1,26 @@
+{
+  "bbox": {
+    "lat_min": -90,
+    "lat_max": 90,
+    "lon_min": -180,
+    "lon_max": 180
+  },
+  "width": 2880,
+  "height": 1440,
+  "elev_min": -10000,
+  "elev_max": 10000,
+  "dtype": "int16",
+  "byte_order": "little",
+  "row_order": "north_to_south",
+  "col_order": "west_to_east",
+  "reference_radius_m": 696000000,
+  "source": "NASA SDO/HMI synoptic magnetogram CR2300 via JSOC/Stanford",
+  "carrington_rotation": 2300,
+  "carrington_date_start": "2025-07-19",
+  "carrington_date_end": "2025-08-15",
+  "rotation_period_note": "Carrington sidereal rotation 25.38 days",
+  "value_kind": "magnetic_field",
+  "value_unit": "gauss",
+  "value_mapping": "elev_int16 = round(sign(B) * sqrt(|B| / 1500.0) * 30000); inverse: B_gauss = sign(elev) * (elev / 30000)^2 * 1500; NaN/nodata -> 0",
+  "value_mapping_rationale": "Signed sqrt compression spreads quiet-sun |B|~5G into elev~+/-700 for visible texture while strong active-region |B|~1000G map to elev~+/-24500, safely within int16 range (+/-30000 clipped to +/-32000)."
+}

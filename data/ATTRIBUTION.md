@@ -57,6 +57,26 @@ redistributes derived (resampled, reformatted) versions of them.
   half-width from 0..360E source); downsampled ÷2 by exact block mean from native
   23040×11520 to 11520×5760; formatted by `bake/bake_mercury.py`.
 
+## Sun — `sun_heightfield.bin`
+
+- **Source:** NASA SDO/HMI Synoptic Radial Magnetogram, Carrington Rotation 2300
+  (2025-07-19 – 2025-08-15).  Product: `hmi.Synoptic_Mr` (3600×1440 sin-latitude).
+- **Mission:** NASA Solar Dynamics Observatory (SDO).
+- **Instrument:** Helioseismic and Magnetic Imager (HMI).
+- **Provider:** Joint Science Operations Center (JSOC), Stanford University.
+- **URL:** https://jsoc1.stanford.edu/data/hmi/synoptic/
+- **Courtesy:** HMI data courtesy of NASA/SDO and the HMI science team.
+- **License:** Public domain (NASA / U.S. Government work; JSOC data are freely
+  available for scientific and educational use).
+- **Processing:** the radial magnetic field (Gauss, float32) is resampled from
+  uniform sin-latitude × Carrington-longitude to equirectangular 2880×1440
+  (uniform geographic lat/lon, col 0 = −180°, row 0 = +90N); NaN polar-cap
+  gaps → 0 G; values encoded via signed sqrt compression
+  `elev = round(sign(B) × sqrt(|B|/1500) × 30000)` so that quiet-sun |B|~5 G
+  maps to |elev|~700 and active-region |B|~1000 G maps to |elev|~24500,
+  yielding rich texture across the full dynamic range; formatted by
+  `bake/bake_sun.py`.
+
 To re-bake from the original sources, see `bake/README` notes in the bake
 scripts (they download the upstream files into `bake/cache/`, which is
 gitignored).

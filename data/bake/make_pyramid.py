@@ -29,6 +29,7 @@ BODIES = [
     ("mars_meta.json",    "mars_heightfield.bin",    "mars_heightfield"),
     ("venus_meta.json",   "venus_heightfield.bin",   "venus_heightfield"),
     ("mercury_meta.json", "mercury_heightfield.bin", "mercury_heightfield"),
+    ("sun_meta.json",     "sun_heightfield.bin",     "sun_heightfield"),
 ]
 
 FACTORS = [4, 16]
