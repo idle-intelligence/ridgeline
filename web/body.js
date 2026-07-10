@@ -35,7 +35,10 @@ export class Body {
     this.color = spec.color;              // accent colour (sky marker / arrow)
     this.hasOcean = spec.hasOcean ?? true; // false → render all terrain as land (airless body)
     this.tint = spec.tint ?? null;         // optional [r,g,b] line/fill tint (>1 = emissive boost)
-    this.autoTilt = spec.autoTilt ?? true; // false → never morph the resting pitch (e.g. the Sun)
+    // Bodies under 700 km mean radius are too small / potato-shaped for the altitude-based
+    // resting-pitch morph to feel right (Vesta's weird shape breaks the assumption).
+    // Explicit spec values still win (e.g. the Sun sets autoTilt: false explicitly).
+    this.autoTilt = spec.autoTilt ?? (spec.radiusM >= 700_000);
     this.trueShape = spec.trueShape ?? false; // true → pin ve to fixedVe (true-proportion rendering)
 
     // HUD altitude bands: ascending [[ceilWu, label], …]; last is the catch-all.

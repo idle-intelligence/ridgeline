@@ -433,12 +433,23 @@ fn fs() -> @location(0) vec4<f32> {
 }
 `;
 
-// ── WGSL: dark occluder DOME (gated to the disc regime, matches geometry.rs) ──
+// ── WGSL: displaced occluder mesh — per-vertex minElevRaw attribute ──────────
+// Vertex layout: @location(0) vec2<f32> latLon (degrees), @location(1) f32 minElevRaw (int16 units).
+// Uniform: mvp, color, vertScale (wu per int16 unit), ve8 (ve / VERT_EXAGGERATION), margin.
+// Radius = R_WORLD + minElevRaw * vertScale * ve8 − margin.
+// For bodies with flat terrain (Earth: minElevRaw ≈ 0), radius ≈ R_WORLD − margin ≈ OCCLUDER_R.
+// For Vesta craters, minElevRaw < 0 → shell dips with the terrain → no poke-through ever.
 const OCCLUDER_WGSL = /* wgsl */`
-struct U { mvp : mat4x4<f32>, color : vec4<f32> };
+struct U { mvp : mat4x4<f32>, color : vec4<f32>, vertScale : f32, ve8 : f32, margin : f32, _pad : f32 };
 @group(0) @binding(0) var<uniform> u : U;
+const PI : f32 = 3.14159265359;
 @vertex
-fn vs(@location(0) p: vec3<f32>) -> @builtin(position) vec4<f32> {
+fn vs(@location(0) latLon: vec2<f32>, @location(1) minElevRaw: f32) -> @builtin(position) vec4<f32> {
+  let phi = latLon.x * (PI / 180.0);
+  let lam = latLon.y * (PI / 180.0);
+  let r = ${R_WORLD} + minElevRaw * u.vertScale * u.ve8 - u.margin;
+  let cp = cos(phi); let sp = sin(phi);
+  let p = vec3<f32>(r * cp * cos(lam), r * sp, -r * cp * sin(lam));
   return u.mvp * vec4<f32>(p, 1.0);
 }
 @fragment
@@ -534,17 +545,20 @@ function mat4InvertInto(m, out) {
   return true;
 }
 
-// Dark occluder DOME (positions only) at OCCLUDER_R — matches geometry.rs's gated dome.
-function buildOccluderSphere(stacks, slices) {
-  const r = OCCLUDER_R;
-  const verts = [];
+// Displaced occluder mesh base: generates (lat, lon) per vertex and triangle indices.
+// Per-vertex minElevRaw is computed in _makeBody from the body's heightfield (CPU, one-off).
+// STACKS×SLICES covers the full sphere; rowLen = slices+1, vertCount = (stacks+1)×rowLen.
+const OCC_STACKS = 64;
+const OCC_SLICES = 128;
+function buildOccluderMeshBase() {
+  const stacks = OCC_STACKS, slices = OCC_SLICES;
+  const latLon = []; // vec2<f32> per vertex: [lat_deg, lon_deg]
   const idx = [];
   for (let i = 0; i <= stacks; i++) {
-    const phi = Math.PI * (i / stacks) - Math.PI / 2;
+    const lat = -90 + 180 * (i / stacks); // −90 (south pole) → +90 (north)
     for (let j = 0; j <= slices; j++) {
-      const lam = 2 * Math.PI * (j / slices) - Math.PI;
-      const cp = Math.cos(phi), sp = Math.sin(phi);
-      verts.push(r * cp * Math.cos(lam), r * sp, -r * cp * Math.sin(lam));
+      const lon = -180 + 360 * (j / slices);
+      latLon.push(lat, lon);
     }
   }
   const rowLen = slices + 1;
@@ -554,7 +568,50 @@ function buildOccluderSphere(stacks, slices) {
       idx.push(a, b, a + 1, a + 1, b, b + 1);
     }
   }
-  return { verts: new Float32Array(verts), idx: new Uint32Array(idx) };
+  return { latLon: new Float32Array(latLon), idx: new Uint32Array(idx) };
+}
+
+// Compute per-vertex minElevRaw over the Voronoi cell ±half a mesh cell in lat/lon.
+// hf is Int16Array (row-major, row 0 = north = +90°), gridW×gridH.
+// Each occluder mesh vertex covers lat±halfCellLat × lon±halfCellLon degrees.
+// We sample ALL heightfield cells whose centre falls within that region and take the MIN.
+// A generous region (err larger) ensures concave corners can never poke above the mesh.
+function computeMinElevPerVertex(hf, gridW, gridH, stacks, slices) {
+  const vertCount = (stacks + 1) * (slices + 1);
+  const minElev = new Float32Array(vertCount);
+  // Cell sizes for the occluder mesh in degrees
+  const cellLat = 180 / stacks;   // degrees per mesh row
+  const cellLon = 360 / slices;   // degrees per mesh column
+  const halfCellLat = cellLat * 0.6; // slightly larger than half — err on safe side
+  const halfCellLon = cellLon * 0.6;
+  // Precompute row/col → heightfield index mapping
+  const latPerRow  = 180 / (gridH - 1); // degrees per data row
+  const lonPerCol  = 360 / (gridW - 1); // degrees per data col
+  for (let i = 0; i <= stacks; i++) {
+    const latCenter = -90 + 180 * (i / stacks);
+    const latLo = latCenter - halfCellLat, latHi = latCenter + halfCellLat;
+    // heightfield row 0 = +90 (north), row (gridH-1) = -90 (south)
+    const rLo = Math.floor((90 - latHi) / latPerRow);
+    const rHi  = Math.ceil((90 - latLo) / latPerRow);
+    const rMin = Math.max(0, rLo), rMax = Math.min(gridH - 1, rHi);
+    for (let j = 0; j <= slices; j++) {
+      const lonCenter = -180 + 360 * (j / slices);
+      const lonLo = lonCenter - halfCellLon, lonHi = lonCenter + halfCellLon;
+      const cLo = Math.floor((lonLo + 180) / lonPerCol);
+      const cHi  = Math.ceil((lonHi + 180) / lonPerCol);
+      const cMin = Math.max(0, cLo), cMax = Math.min(gridW - 1, cHi);
+      let mn = 32767;
+      for (let r = rMin; r <= rMax; r++) {
+        const rowBase = r * gridW;
+        for (let c = cMin; c <= cMax; c++) {
+          const v = hf[rowBase + c];
+          if (v < mn) mn = v;
+        }
+      }
+      minElev[i * (slices + 1) + j] = mn === 32767 ? 0 : mn;
+    }
+  }
+  return minElev;
 }
 
 export class WebGPURenderer {
@@ -732,18 +789,28 @@ export class WebGPURenderer {
     });
     this.fillBind = device.createBindGroup({ layout: this.fillPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.fillVP } }] });
 
-    // ── Occluder DOME (gated to the disc regime) ──
+    // ── Displaced occluder mesh (shared geometry, per-body minElev buffer) ──
+    // occLatLonBuf: shared (lat,lon) vertex positions (static, same for every body).
+    // Per-body minElev f32 buffer is built in _makeBody and attached as VBO slot 1.
     const occMod = device.createShaderModule({ code: OCCLUDER_WGSL });
-    const occ = buildOccluderSphere(64, 128);
-    this.occCount = occ.idx.length;
-    this.occVBO = device.createBuffer({ size: occ.verts.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
-    device.queue.writeBuffer(this.occVBO, 0, occ.verts);
-    this.occIBO = device.createBuffer({ size: occ.idx.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
-    device.queue.writeBuffer(this.occIBO, 0, occ.idx);
-    this.occVP = device.createBuffer({ size: 16 * 4 + 4 * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const occBase = buildOccluderMeshBase();
+    this.occCount = occBase.idx.length;
+    this.occLatLonBuf = device.createBuffer({ size: occBase.latLon.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(this.occLatLonBuf, 0, occBase.latLon);
+    this.occIBO = device.createBuffer({ size: occBase.idx.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(this.occIBO, 0, occBase.idx);
+    // Uniform: mvp(16f) + color(4f) + vertScale(1f) + ve8(1f) + margin(1f) + pad(1f) = 24 floats
+    this.occVP = device.createBuffer({ size: 24 * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this._occUScratch = new Float32Array(24);
     this.occPipe = device.createRenderPipeline({
       layout: 'auto',
-      vertex: { module: occMod, entryPoint: 'vs', buffers: [{ arrayStride: 12, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }] }] },
+      vertex: {
+        module: occMod, entryPoint: 'vs',
+        buffers: [
+          { arrayStride: 8,  attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }] }, // latLon
+          { arrayStride: 4,  attributes: [{ shaderLocation: 1, offset: 0, format: 'float32'   }] }, // minElevRaw
+        ],
+      },
       fragment: { module: occMod, entryPoint: 'fs', targets: [{ format: this.format }] },
       primitive: { topology: 'triangle-list', cullMode: 'none' },
       depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less-equal' },
@@ -782,7 +849,7 @@ export class WebGPURenderer {
     // Preallocated uniform scratch arrays — avoids per-frame GC pressure from small typed arrays.
     this._lineUScratch = new Float32Array(24); // mvp(16)+color(4)+flags(4) — written every frame
     this._fillUScratch = new Float32Array(24); // mvp(16)+color(4)+tint(4) — written when fills active
-    this._occUScratch = new Float32Array(20);  // mvp(16)+color(4) — written in disc regime
+    // _occUScratch (24 floats: mvp+color+vertScale+ve8+margin+pad) already created above with the occluder pipeline
     this._invVPScratch = new Float32Array(16); // star invVP — written every frame
     this._lastCpuGenMs = 0;
     this.resize(canvas.width, canvas.height);
@@ -827,16 +894,9 @@ export class WebGPURenderer {
     // so coarse mid-distance fill strips — which gap/flicker on the Moon — only appear once
     // the camera is close enough that fills tessellate densely.
     const fillGate = exploreStrides ? 0.80 : OCCLUDER_FOV_GATE;
-    // Bodies with deep relief (e.g. Vesta ±16% R) cannot be approximated by a small sphere
-    // occluder — the gap between the shrunken sphere and the actual terrain surface leaks
-    // stars through the ring gaps at orbit altitude. For such bodies, enable terrain-following
-    // fill strips at ALL altitudes so the fill shell (not the sphere) provides occlusion.
-    // DEEP_RELIEF_WU=40: Earth (elev_min=0 → ratio=0) stays sphere-occluded; Vesta's minimum
-    // terrain is ~-980 wu below R_WORLD, well past the threshold.
-    const DEEP_RELIEF_WU = 40;
-    const ve = this._lastVe ?? 8.0; // ve written by draw() before _buildSchedule is called
-    const deepRelief = (this.elevMinWu * (ve / VERT_EXAGGERATION)) < -DEEP_RELIEF_WU;
-    const emitFills = discHalfAngle >= fillGate || deepRelief; // near/mid regime + deep-relief bodies
+    // Fills are near/mid-altitude only — the displaced occluder mesh handles high-altitude
+    // occlusion for all bodies (including deep-relief bodies like Vesta). No deepRelief override.
+    const emitFills = discHalfAngle >= fillGate;
     const H = this.gridH;
     const rowLatFrac = (r0, frac) => {
       const t = (r0 + frac) / (H - 1);
@@ -950,12 +1010,12 @@ export class WebGPURenderer {
 
     this._lastRingCount = n;
     this._lastFillCount = fn;
-    return { ringCount: n, fillCount: fn, discHalfAngle, emitFills, deepRelief };
+    return { ringCount: n, fillCount: fn, discHalfAngle, emitFills };
   }
 
   // Build a renderable BODY (planet/moon): upload its int16 heightfield to a GPU storage
-  // buffer and create the compute bind group referencing it. Shared output/geometry buffers
-  // are reused across bodies; only the heightfield + dims differ. Returns a body handle.
+  // buffer and create the compute bind group referencing it. Also computes the per-vertex
+  // minElevRaw for the displaced occluder mesh (one-off O(grid) CPU pass). Returns a body handle.
   _makeBody(eng, wasmMemory) {
     const device = this.device;
     const hfPtr = eng.heightfield_i16_ptr();
@@ -980,10 +1040,19 @@ export class WebGPURenderer {
         { binding: 10, resource: { buffer: this.fillIdxBuf } },
       ],
     });
-    console.log(`[webgpu] body uploaded: ${(hfBytes/1e6).toFixed(0)}MB int16 (${eng.grid_width()}x${eng.grid_height()})`);
+
+    // Compute per-vertex minElevRaw for the displaced occluder mesh (CPU, one-off).
+    // Each mesh vertex gets the minimum int16 value over its Voronoi cell in the heightfield.
+    const gridW = eng.grid_width(), gridH = eng.grid_height();
+    const hf = new Int16Array(wasmMemory.buffer, hfPtr, hfLen);
+    const minElevF32 = computeMinElevPerVertex(hf, gridW, gridH, OCC_STACKS, OCC_SLICES);
+    const minElevBuf = device.createBuffer({ size: minElevF32.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(minElevBuf, 0, minElevF32);
+
+    console.log(`[webgpu] body uploaded: ${(hfBytes/1e6).toFixed(0)}MB int16 (${gridW}x${gridH})`);
     return {
-      hfBuf, computeBind,
-      gridW: eng.grid_width(), gridH: eng.grid_height(),
+      hfBuf, minElevBuf, computeBind,
+      gridW, gridH,
       elevMax: eng.elev_world_max(), vertScale: eng.vert_scale(),
       latMin: -90, latMax: 90, lonMin: -180, lonMax: 180,
       tint: [1, 1, 1], // per-body tint multiplier; [1,1,1] = identity (explore.js: handle.tint = [r,g,b])
@@ -993,11 +1062,12 @@ export class WebGPURenderer {
   // Register an additional body (e.g. the Moon) for later swapping. Returns its handle.
   addBody(eng, wasmMemory) { return this._makeBody(eng, wasmMemory); }
 
-  // Destroy a body handle, freeing its GPU heightfield buffer. Do NOT call on the currently
+  // Destroy a body handle, freeing its GPU buffers. Do NOT call on the currently
   // active body (switch to another first). Safe to call on any non-active handle.
   destroyBody(b) {
     if (!b) return;
     try { b.hfBuf.destroy(); } catch (_) {}
+    try { b.minElevBuf.destroy(); } catch (_) {}
   }
 
   // Make a previously-built body handle the active one for subsequent draws.
@@ -1010,6 +1080,7 @@ export class WebGPURenderer {
     this.hasOcean = b.hasOcean !== false; // airless bodies (Moon) render all terrain as land
     this.latMin = b.latMin; this.latMax = b.latMax;
     this.lonMin = b.lonMin; this.lonMax = b.lonMax;
+    this._activeMinElevBuf = b.minElevBuf; // per-body minElev buffer for the displaced occluder
   }
 
   _writeCamera(camPos, ve, ringCount, fillCount) {
@@ -1060,11 +1131,11 @@ export class WebGPURenderer {
     const fwdArr = eng.cam_forward();
     this._camFwd = [fwdArr[0], fwdArr[1], fwdArr[2]];
     const ve = eng.current_ve();
-    this._lastVe = ve; // read by _buildSchedule for deepRelief check
+    this._lastVe = ve;
 
     // CPU work = the cheap ring + fill schedules ONLY (heavy vertex gen is on the GPU).
     const t0 = performance.now();
-    const { ringCount, fillCount, emitFills, deepRelief } = this._buildSchedule(camPos);
+    const { ringCount, fillCount, emitFills } = this._buildSchedule(camPos);
     this._lastCpuGenMs = performance.now() - t0;
 
     this._writeCamera(camPos, ve, ringCount, fillCount);
@@ -1114,33 +1185,25 @@ export class WebGPURenderer {
       rp.draw(3);
     }
 
-    // occluder DOME — only in the disc/from-afar regime; at low altitude the dome's near
-    // surface becomes visible from outside and creates a dark band across the terrain.
-    // For deep-relief bodies, fills handle the terrain-hugging occlusion at all altitudes;
-    // still render the sphere as the innermost backstop (handles fill-strip inter-row gaps).
-    if (!emitFills || deepRelief) {
-      // Scale the occluder to sit just below the lowest rendered terrain of the active body.
-      // The mesh is baked at OCCLUDER_R; we apply a scalar (occR / OCCLUDER_R) by pre-scaling
-      // the first three columns of the MVP (equivalent to MVP * diag(k, k, k, 1)).
-      // elevMinWu = meta.elev_min * vertScale (no ve factor; ve is applied here per frame).
-      // For Earth (elev_min=0) elevMinWu=0 → occR unchanged ≈ R_WORLD*0.985.
-      const occR = R_WORLD + Math.min(0, this.elevMinWu * (ve / VERT_EXAGGERATION)) - 2.0;
-      const occScale = occR / OCCLUDER_R;
-      const occMvp = this._occUScratch; // reuse preallocated scratch
-      occMvp.set(mvp, 0);
-      // Scale columns 0..2 (x,y,z) by occScale; column 3 (w/translation) unchanged.
-      for (let c = 0; c < 3; c++) {
-        const base = c * 4;
-        occMvp[base]     *= occScale;
-        occMvp[base + 1] *= occScale;
-        occMvp[base + 2] *= occScale;
-        occMvp[base + 3] *= occScale;
-      }
-      occMvp.set(PALETTE.fill, 16);
-      device.queue.writeBuffer(this.occVP, 0, this._occUScratch);
+    // Displaced occluder mesh — always drawn (at ALL altitudes, for every body).
+    // Vertex shader computes per-vertex radius = R_WORLD + minElevRaw*vertScale*(ve/8) − MARGIN,
+    // so the shell follows the terrain's minimum and can never poke above the ring surface.
+    // For Earth (minElevRaw ≈ 0 everywhere) radius ≈ R_WORLD − MARGIN, visually identical
+    // to the old fixed sphere. For Vesta the mesh dips into craters, eliminating black speckles.
+    if (this._activeMinElevBuf) {
+      const OCC_MARGIN = 8.0;
+      const u = this._occUScratch;
+      u.set(mvp, 0);
+      u.set(PALETTE.fill, 16);
+      u[20] = this.vertScale;
+      u[21] = ve / VERT_EXAGGERATION;
+      u[22] = OCC_MARGIN;
+      u[23] = 0.0; // pad
+      device.queue.writeBuffer(this.occVP, 0, u);
       rp.setPipeline(this.occPipe);
       rp.setBindGroup(0, this.occBind);
-      rp.setVertexBuffer(0, this.occVBO);
+      rp.setVertexBuffer(0, this.occLatLonBuf);
+      rp.setVertexBuffer(1, this._activeMinElevBuf);
       rp.setIndexBuffer(this.occIBO, 'uint32');
       rp.drawIndexed(this.occCount);
     }
