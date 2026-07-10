@@ -403,7 +403,11 @@ fn vs(@location(0) a_pos: vec3<f32>, @location(1) a_attr: vec2<f32>) -> VSOut {
 @fragment
 fn fs(i: VSOut) -> @location(0) vec4<f32> {
   let ev = clamp(i.elev, 0.0, 1.0);
-  let isLand = max(step(0.0008, ev), 1.0 - u.flags.x);
+  // "Ocean" (faint) = elevation EXACTLY at reference level 0: Earth's bake clamps sea
+  // there, and Pluto/Charon park their unimaged fill there. Real terrain BELOW zero
+  // (Charon's -14 km basins, Dead Sea) must stay bright — a signed test dithered
+  // land/faint across every zero crossing and speckled the disc at distance.
+  let isLand = max(step(0.0008, abs(ev)), 1.0 - u.flags.x);
   let e = pow(ev, 0.35);
   let landBright = mix(0.85, 1.45, e);
   let oceanBright = 0.12;
@@ -910,6 +914,26 @@ export class WebGPURenderer {
       return Math.hypot(px - camPos[0], py - camPos[1], pz - camPos[2]);
     };
 
+    // ── Screen-space ring density cap (moiré fix) ────────────────────────────
+    // At deep space the projected globe may be only ~330 px tall while the grid has ~360+
+    // latitude rows — sub-pixel ring spacing aliases into moiré speckle across the disc.
+    // Cap ring density so there are at least MIN_PX_PER_RING screen pixels between rings.
+    //
+    // Formula (FOV_Y = Math.PI/4 matches the app's 45° vertical FOV):
+    //   halfAngle   = asin(R_WORLD / camDist)          — angular radius of the globe
+    //   discHeightPx = tan(halfAngle) / tan(FOV_Y/2) × canvasHeight
+    //   maxRingsOnScreen = discHeightPx / MIN_PX_PER_RING
+    //   minRowStepScreen = ceil(H / max(8, maxRingsOnScreen))
+    //
+    // Note: the renderer has the mvp but not the FOV directly, so FOV_Y is hardcoded
+    // here to match main.js's Math.PI/4.  If the FOV ever changes, update this constant.
+    const FOV_Y = Math.PI / 4;
+    const MIN_PX_PER_RING = 2.0;
+    const canvasH = (this.canvas && this.canvas.height) ? this.canvas.height : 800;
+    const discHeightPx = (Math.tan(discHalfAngle) / Math.tan(FOV_Y / 2)) * canvasH;
+    const maxRingsOnScreen = discHeightPx / MIN_PX_PER_RING;
+    const minRowStepScreen = Math.ceil(H / Math.max(8, maxRingsOnScreen));
+
     // LINE rings (with sub-ring interpolation).
     // Pre-clamp row step so total worst-case vertex/index reservations stay inside the GPU
     // buffer budgets. Near the poles lon_pad→180° forces every ring to sweep the full 360°
@@ -932,7 +956,7 @@ export class WebGPURenderer {
     const maxAffordableRings = Math.min(maxRingsByVerts, maxRingsByIdx);
     // Estimate how many rows the schedule will visit (H / effective_rowStep, roughly).
     // We need ceil(H / maxAffordableRings) as the minimum rowStep to stay in budget.
-    const minLineRowStep = Math.ceil(H / maxAffordableRings);
+    const minLineRowStep = Math.max(Math.ceil(H / maxAffordableRings), minRowStepScreen);
 
     const rdv = new DataView(this._ringScratch);
     let n = 0;
@@ -983,7 +1007,7 @@ export class WebGPURenderer {
       // stays inside the budget; at coarse tiers this computes 1 (no change).
       const wcVertPerStrip = (this.gridW + 4) * 2;
       const maxStrips = Math.max(1, Math.floor(MAX_FILL_VERTS / wcVertPerStrip));
-      const minFillRowStep = Math.ceil(H / maxStrips);
+      const minFillRowStep = Math.max(Math.ceil(H / maxStrips), minRowStepScreen);
       while (frow < H) {
         const lat = this.latMax - (frow / (H - 1)) * (this.latMax - this.latMin);
         const nearest = nearestOf(lat);
