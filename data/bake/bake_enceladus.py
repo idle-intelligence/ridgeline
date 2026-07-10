@@ -42,7 +42,18 @@ SOURCE = ("Cassini mission / Schenk & McKinnon 2024; "
           "Enceladus Cassini DEM global 200m, public domain")
 
 # Source dims: 8049x4025 (float32, kilometres)
+#   col 0: all-nodata (garbage edge, discard)
+#   row 0: all-nodata (garbage edge, discard)
+#   cols 1..7920: 7920 unique longitude columns (full 360° wrap)
+#   cols 7921..8048: 128-col wrap overlap (duplicate of cols 1..128, discard)
+#   rows 1..4024: 4024 valid latitude rows
+# After discarding: unique extent is 7920 cols × 4024 rows.
+# The left edge of col 1 is at lon ≈ −182.91°; to align to −180..+180 we roll
+# left by 65 cols so the output grid starts exactly at lon −180°.
 SRC_W, SRC_H = 8049, 4025
+UNIQUE_COLS = 7920   # cols 1..7920 (unique, full wrap)
+UNIQUE_ROWS = 4024   # rows 1..4024
+LON_ROLL    = 65     # roll the unique columns left by this many to align lon=-180
 # Resample to 7680x3840 (like Moon grid)
 OUT_W, OUT_H = 7680, 3840
 
@@ -62,7 +73,7 @@ def download():
 
 
 def inspect_tiff():
-    """Inspect GeoTIFF tags; return (dtype, shape, nodata, need_roll)."""
+    """Inspect GeoTIFF tags; return (dtype, shape, nodata)."""
     import tifffile
     print(f"\n=== Enceladus GeoTIFF inspection ===")
     with tifffile.TiffFile(ENCELADUS_FILE) as tif:
@@ -70,7 +81,6 @@ def inspect_tiff():
         dtype = page.dtype
         shape = (page.imagelength, page.imagewidth)
         nodata_val = None
-        x_origin = None
 
         for tag in page.tags.values():
             if tag.name in ("GDAL_NODATA", "GDALNoDataValue"):
@@ -83,71 +93,87 @@ def inspect_tiff():
             if tag.name == "ModelTiepointTag":
                 vals = tag.value
                 print(f"  ModelTiepointTag: {vals}")
-                if len(vals) >= 6:
-                    x_origin = vals[3]
 
         print(f"  dtype   : {dtype}")
         print(f"  shape   : {shape[1]} x {shape[0]}  (width x height)")
         print(f"  nodata  : {nodata_val}")
+        print(f"  unique data: cols 1..{UNIQUE_COLS}, rows 1..{UNIQUE_ROWS}")
+        print(f"  col 0: all-nodata (discarded); cols {UNIQUE_COLS+1}..{SRC_W-1}: wrap overlap (discarded)")
+        print(f"  row 0: all-nodata (discarded)")
 
-    need_roll = True
-    if x_origin is not None:
-        print(f"  x_origin (lon of left edge): {x_origin}")
-        if x_origin < -90:
-            need_roll = False
-            print("  lon convention: -180..180 already (no roll)")
-        else:
-            print("  lon convention: 0..360E (will roll by half-width)")
-    else:
-        print("  lon convention: unknown (assuming -180..180, no roll)")
-        need_roll = False
-
-    return dtype, shape, nodata_val, need_roll
+    return dtype, shape, nodata_val
 
 
-def load_elev(dtype, shape, nodata_val, need_roll):
-    """Read Enceladus DEM -> float32 elevation metres above reference sphere."""
+def load_elev(dtype, shape, nodata_val):
+    """Read Enceladus DEM -> float32 elevation metres above reference sphere.
+
+    Wrap-seam fix:
+      - col 0 is fully nodata (garbage edge) — discard.
+      - row 0 is fully nodata (garbage edge) — discard.
+      - cols 7921..8048 duplicate cols 1..128 (128-col wrap overlap) — discard.
+      - The 7920 unique columns (cols 1..7920) start at lon ≈ −182.91°.
+        Rolling left by LON_ROLL=65 aligns the grid to exactly −180..+180°,
+        eliminating the flat-mean crease that appeared at the date line.
+      - The bilinear resample uses periodic (wrap) boundary conditions at the
+        lon seam so output col 0 and output col W−1 interpolate smoothly.
+    """
     import tifffile
 
-    H, W = shape
-    print(f"\nloading {ENCELADUS_FILE} ({W}x{H}, dtype={dtype}) ...")
+    H_raw, W_raw = shape
+    print(f"\nloading {ENCELADUS_FILE} ({W_raw}x{H_raw}, dtype={dtype}) ...")
     data = tifffile.imread(ENCELADUS_FILE)
     print(f"  loaded shape: {data.shape}, dtype: {data.dtype}")
-    print(f"  raw range: {data.min():.4f} .. {data.max():.4f}  (expected ~km)")
 
     elev = data.astype(np.float64)
 
-    # Mask nodata before converting units
-    nodata_count = 0
+    # Mask nodata (fill-value is ≈ −3.4e38 for float32)
     if nodata_val is not None:
-        mask = np.abs(elev - nodata_val) < 1e-3 * abs(nodata_val + 1)
+        mask = elev < nodata_val * 0.5   # anything < half the huge negative sentinel
         nodata_count = int(mask.sum())
-        if nodata_count > 0:
-            print(f"  nodata pixels: {nodata_count:,}  (will fill with valid mean after km->m)")
+        print(f"  nodata pixels (raw): {nodata_count:,}  "
+              f"(col 0 all-nodata + {nodata_count - H_raw} scattered)")
+    else:
+        mask = np.zeros_like(elev, dtype=bool)
+
+    # ── Discard garbage edges and wrap overlap ────────────────────────────────
+    # cols 1..UNIQUE_COLS (inclusive), rows 1..UNIQUE_ROWS (inclusive)
+    elev = elev[1:UNIQUE_ROWS + 1, 1:UNIQUE_COLS + 1]   # (4024, 7920)
+    mask = mask[1:UNIQUE_ROWS + 1, 1:UNIQUE_COLS + 1]
+    print(f"  after discard: shape {elev.shape}  (rows 1..{UNIQUE_ROWS}, cols 1..{UNIQUE_COLS})")
 
     # Source is in KILOMETRES — convert to metres
     print("  converting km -> m (x1000)")
     elev *= 1000.0
-    print(f"  elev range after km->m: {elev.min():.0f} .. {elev.max():.0f} m")
+    print(f"  elev range after km->m: {elev[~mask].min():.0f} .. {elev[~mask].max():.0f} m")
 
-    if nodata_count > 0:
+    # Fill any scattered nodata with valid mean (extremely few pixels)
+    scattered = int(mask.sum())
+    if scattered > 0:
         valid_mean = float(elev[~mask].mean())
         elev[mask] = valid_mean
-        print(f"  filled {nodata_count:,} nodata pixels with valid mean ({valid_mean:.0f} m)")
+        print(f"  filled {scattered:,} scattered nodata pixels with valid mean ({valid_mean:.0f} m)")
 
     elev = elev.astype(np.float32)
     print(f"  elev range (metres above ref): {elev.min():.0f} .. {elev.max():.0f}")
 
-    if need_roll:
-        elev = np.roll(elev, W // 2, axis=1)
-        print(f"  rolled by {W // 2} cols to center on 0° meridian")
+    # ── Roll to align lon=-180 to column 0 ───────────────────────────────────
+    # The first unique col (original col 1) has its left edge at lon ≈ −182.91°.
+    # Rolling left by LON_ROLL=65 shifts col 65 to position 0, whose left edge
+    # is exactly lon −180°.  The roll is periodic (np.roll wraps correctly).
+    elev = np.roll(elev, -LON_ROLL, axis=1)
+    print(f"  rolled left by {LON_ROLL} cols → left edge now lon ≈ −180°")
 
     return elev
 
 
 def resample_to(arr, out_h, out_w):
     """Resample 2-D array to (out_h, out_w) using area-mean blocks where exact,
-    or numpy bilinear interpolation for non-integer ratios."""
+    or bilinear interpolation for non-integer ratios.
+
+    The longitude axis (cols) uses PERIODIC boundary conditions: c1 for the
+    last source column wraps to col 0, ensuring smooth interpolation across the
+    lon=±180° seam instead of clamping to the edge value.
+    """
     src_h, src_w = arr.shape
     if src_h % out_h == 0 and src_w % out_w == 0:
         fh = src_h // out_h
@@ -155,14 +181,15 @@ def resample_to(arr, out_h, out_w):
         print(f"  exact block-mean resample: /{fh} rows, /{fw} cols")
         return arr.reshape(out_h, fh, out_w, fw).mean(axis=(1, 3)).astype(np.float32)
     else:
-        print(f"  non-integer ratio {src_w}x{src_h} -> {out_w}x{out_h}, using numpy bilinear")
+        print(f"  non-integer ratio {src_w}x{src_h} -> {out_w}x{out_h}, using bilinear (lon periodic)")
         # Map output pixel centres to source coordinates
         row_coords = np.linspace(0, src_h - 1, out_h)
         col_coords = np.linspace(0, src_w - 1, out_w)
         r0 = np.floor(row_coords).astype(np.int32)
         c0 = np.floor(col_coords).astype(np.int32)
+        # Latitude: clamp at poles; longitude: wrap periodically
         r1 = np.clip(r0 + 1, 0, src_h - 1)
-        c1 = np.clip(c0 + 1, 0, src_w - 1)
+        c1 = (c0 + 1) % src_w           # periodic lon wrap
         dr = (row_coords - r0).astype(np.float32)[:, None]  # (out_h, 1)
         dc = (col_coords - c0).astype(np.float32)[None, :]  # (1, out_w)
         a = arr[r0[:, None], c0[None, :]]
@@ -176,8 +203,8 @@ def resample_to(arr, out_h, out_w):
 def main():
     download()
 
-    dtype, shape, nodata_val, need_roll = inspect_tiff()
-    elev = load_elev(dtype, shape, nodata_val, need_roll)
+    dtype, shape, nodata_val = inspect_tiff()
+    elev = load_elev(dtype, shape, nodata_val)
 
     H_src, W_src = elev.shape
     print(f"\nresampling {W_src}x{H_src} -> {OUT_W}x{OUT_H} ...")

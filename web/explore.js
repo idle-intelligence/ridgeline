@@ -196,7 +196,9 @@ const CERES = new Body({
   metaUrl: dataUrl('ceres_meta.json'), dataUrl: dataUrl('ceres_heightfield.bin'),
   hfStem: 'ceres_heightfield',
   radiusM: 470000, rotationPeriodSec: 9.074 * 3600,
-  veFactor: 0.32, color: '#b8b0a0', hasOcean: false,
+  // trueShape: true relief ±1.6% of radius (genuinely smooth — icy, relaxed dwarf planet).
+  // veFactor ignored under trueShape; kept for reference in case trueShape is toggled off.
+  trueShape: true, veFactor: 0.32, color: '#b8b0a0', hasOcean: false,
   modes: [[50, 'SURFACE'], [1500, 'LOW'], [12000, 'ORBIT'], [Infinity, 'DEEP SPACE']],
   view: { lat: 19.8, lon: -120, altitude: ALT_START, tilt: TILT_START, heading: 0 }, // Occator crater
   orbit: { aroundId: 'sun', periodSec: 1682 * DAY_SEC },
@@ -213,7 +215,8 @@ const VESTA = new Body({
   radiusM: 262700, rotationPeriodSec: 5.342 * 3600,
   trueShape: true, color: '#cfc3aa', hasOcean: false,
   modes: [[50, 'SURFACE'], [1500, 'LOW'], [12000, 'ORBIT'], [Infinity, 'DEEP SPACE']],
-  view: { lat: 0, lon: -60, altitude: ALT_START, tilt: TILT_START, heading: 0 }, // equatorial: spin axis vertical, potato profile visible (old -75° stared into Rheasilvia basin where occluder dominated)
+  // spawn 30% farther: the true-shape bulge (~+15% radius) needs framing headroom
+  view: { lat: 0, lon: -60, altitude: ALT_START * 1.3, tilt: TILT_START, heading: 0 }, // equatorial: spin axis vertical, potato profile visible (old -75° stared into Rheasilvia basin where occluder dominated)
   orbit: { aroundId: 'sun', periodSec: 1325 * DAY_SEC },
 });
 const ENCELADUS = new Body({
@@ -221,7 +224,10 @@ const ENCELADUS = new Body({
   metaUrl: dataUrl('enceladus_meta.json'), dataUrl: dataUrl('enceladus_heightfield.bin'),
   hfStem: 'enceladus_heightfield',
   radiusM: 252100, rotationPeriodSec: 1.370218 * DAY_SEC, // tidally locked to Saturn
-  veFactor: 3.3, color: '#dfe9ec', hasOcean: false,
+  // trueShape: true relief ±1% of radius (very smooth icy shell, cryo-ocean world).
+  // veFactor ignored under trueShape; kept for reference in case trueShape is toggled off.
+  trueShape: true, veFactor: 3.3, color: '#dfe9ec', hasOcean: false,
+  cacheBust: 'r2', // data changed: wrap-seam fix (drop duplicate col/row, roll to lon=-180)
   modes: [[50, 'SURFACE'], [1500, 'LOW'], [12000, 'ORBIT'], [Infinity, 'DEEP SPACE']],
   view: { lat: -60, lon: 0, altitude: ALT_START, tilt: TILT_START, heading: 0 }, // south-polar tiger-stripe terrain
   orbit: { aroundId: 'saturn', periodSec: 1.370218 * DAY_SEC },
@@ -229,6 +235,8 @@ const ENCELADUS = new Body({
 // Note: ~54% of the far side is unimaged (New Horizons July 2015 flyby); that hemisphere fills
 // at reference level 0 and renders like ocean. cacheBust r2: data changed (fill 0 not mean).
 // Pluto spins RETROGRADE — negative rotationPeriodSec flips rotDegPerSec's sign, matching Venus.
+// Pluto stays exaggerated (veFactor 1.4): the New Horizons encounter terrain (Sputnik Planitia,
+// al-Idrisi Montes) is the visual showcase — exaggeration makes it legible at orbital altitude.
 const PLUTO = new Body({
   id: 'pluto', name: 'PLUTO',
   metaUrl: dataUrl('pluto_meta.json'), dataUrl: dataUrl('pluto_heightfield.bin'),
@@ -247,7 +255,9 @@ const CHARON = new Body({
   metaUrl: dataUrl('charon_meta.json'), dataUrl: dataUrl('charon_heightfield.bin'),
   hfStem: 'charon_heightfield',
   radiusM: 606000, rotationPeriodSec: 6.38723 * DAY_SEC, // tidally locked to Pluto
-  veFactor: 0.64, color: '#a8a09b', hasOcean: true, // far side = unimaged, renders like ocean
+  // trueShape: true relief ±2.3% of radius (most rugged of the small icy bodies here).
+  // veFactor ignored under trueShape; kept for reference in case trueShape is toggled off.
+  trueShape: true, veFactor: 0.64, color: '#a8a09b', hasOcean: true, // far side = unimaged, renders like ocean
   cacheBust: 'r2', // data changed: nodata fill is now 0 instead of mean
   modes: [[50, 'SURFACE'], [1500, 'LOW'], [12000, 'ORBIT'], [Infinity, 'DEEP SPACE']],
   view: { lat: 5, lon: 120, altitude: ALT_START, tilt: TILT_START, heading: 0 }, // Serenity Chasma
