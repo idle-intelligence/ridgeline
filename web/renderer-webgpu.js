@@ -827,7 +827,16 @@ export class WebGPURenderer {
     // so coarse mid-distance fill strips — which gap/flicker on the Moon — only appear once
     // the camera is close enough that fills tessellate densely.
     const fillGate = exploreStrides ? 0.80 : OCCLUDER_FOV_GATE;
-    const emitFills = discHalfAngle >= fillGate; // near/mid regime — matches geometry.rs
+    // Bodies with deep relief (e.g. Vesta ±16% R) cannot be approximated by a small sphere
+    // occluder — the gap between the shrunken sphere and the actual terrain surface leaks
+    // stars through the ring gaps at orbit altitude. For such bodies, enable terrain-following
+    // fill strips at ALL altitudes so the fill shell (not the sphere) provides occlusion.
+    // DEEP_RELIEF_WU=40: Earth (elev_min=0 → ratio=0) stays sphere-occluded; Vesta's minimum
+    // terrain is ~-980 wu below R_WORLD, well past the threshold.
+    const DEEP_RELIEF_WU = 40;
+    const ve = this._lastVe ?? 8.0; // ve written by draw() before _buildSchedule is called
+    const deepRelief = (this.elevMinWu * (ve / VERT_EXAGGERATION)) < -DEEP_RELIEF_WU;
+    const emitFills = discHalfAngle >= fillGate || deepRelief; // near/mid regime + deep-relief bodies
     const H = this.gridH;
     const rowLatFrac = (r0, frac) => {
       const t = (r0 + frac) / (H - 1);
@@ -941,7 +950,7 @@ export class WebGPURenderer {
 
     this._lastRingCount = n;
     this._lastFillCount = fn;
-    return { ringCount: n, fillCount: fn, discHalfAngle, emitFills };
+    return { ringCount: n, fillCount: fn, discHalfAngle, emitFills, deepRelief };
   }
 
   // Build a renderable BODY (planet/moon): upload its int16 heightfield to a GPU storage
@@ -1051,10 +1060,11 @@ export class WebGPURenderer {
     const fwdArr = eng.cam_forward();
     this._camFwd = [fwdArr[0], fwdArr[1], fwdArr[2]];
     const ve = eng.current_ve();
+    this._lastVe = ve; // read by _buildSchedule for deepRelief check
 
     // CPU work = the cheap ring + fill schedules ONLY (heavy vertex gen is on the GPU).
     const t0 = performance.now();
-    const { ringCount, fillCount, emitFills } = this._buildSchedule(camPos);
+    const { ringCount, fillCount, emitFills, deepRelief } = this._buildSchedule(camPos);
     this._lastCpuGenMs = performance.now() - t0;
 
     this._writeCamera(camPos, ve, ringCount, fillCount);
@@ -1106,7 +1116,9 @@ export class WebGPURenderer {
 
     // occluder DOME — only in the disc/from-afar regime; at low altitude the dome's near
     // surface becomes visible from outside and creates a dark band across the terrain.
-    if (!emitFills) {
+    // For deep-relief bodies, fills handle the terrain-hugging occlusion at all altitudes;
+    // still render the sphere as the innermost backstop (handles fill-strip inter-row gaps).
+    if (!emitFills || deepRelief) {
       // Scale the occluder to sit just below the lowest rendered terrain of the active body.
       // The mesh is baked at OCCLUDER_R; we apply a scalar (occR / OCCLUDER_R) by pre-scaling
       // the first three columns of the MVP (equivalent to MVP * diag(k, k, k, 1)).
