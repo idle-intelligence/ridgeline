@@ -202,12 +202,14 @@ const CERES = new Body({
 // Note: Vesta's meta has elev_scale_m: 2 (int16 values are in 2 m units, range exceeded
 // plain int16 meters). Vesta is also highly triaxial (axes ~286/279/223 km), so the sphere
 // render is intentionally lumpy — the reference-sphere fit is coarse by design.
+// trueShape: true pins ve to fixedVe so rendered radial deviations are true proportions.
+// veFactor is unused when trueShape=true (fixedVe is derived from meta+radius in computeCamera).
 const VESTA = new Body({
   id: 'vesta', name: 'VESTA',
   metaUrl: dataUrl('vesta_meta.json'), dataUrl: dataUrl('vesta_heightfield.bin'),
   hfStem: 'vesta_heightfield',
   radiusM: 262700, rotationPeriodSec: 5.342 * 3600,
-  veFactor: 0.42, color: '#cfc3aa', hasOcean: false,
+  trueShape: true, color: '#cfc3aa', hasOcean: false,
   modes: [[50, 'SURFACE'], [1500, 'LOW'], [12000, 'ORBIT'], [Infinity, 'DEEP SPACE']],
   view: { lat: -75, lon: -60, altitude: ALT_START, tilt: TILT_START, heading: 0 }, // Rheasilvia basin
   orbit: { aroundId: 'sun', periodSec: 1325 * DAY_SEC },
@@ -222,28 +224,29 @@ const ENCELADUS = new Body({
   view: { lat: -60, lon: 0, altitude: ALT_START, tilt: TILT_START, heading: 0 }, // south-polar tiger-stripe terrain
   orbit: { aroundId: 'saturn', periodSec: 1.370218 * DAY_SEC },
 });
-// Note: ~54% of the map is synthetic far-side fill (meta coverage_note — New Horizons imaged
-// only ~46% of Pluto on the July 2015 flyby; the unimaged hemisphere is filled with the mean
-// elevation for rendering continuity).
+// Note: ~54% of the far side is unimaged (New Horizons July 2015 flyby); that hemisphere fills
+// at reference level 0 and renders like ocean. cacheBust r2: data changed (fill 0 not mean).
 // Pluto spins RETROGRADE — negative rotationPeriodSec flips rotDegPerSec's sign, matching Venus.
 const PLUTO = new Body({
   id: 'pluto', name: 'PLUTO',
   metaUrl: dataUrl('pluto_meta.json'), dataUrl: dataUrl('pluto_heightfield.bin'),
   hfStem: 'pluto_heightfield',
   radiusM: 1188300, rotationPeriodSec: -6.38723 * DAY_SEC, // retrograde (tidally locked with Charon)
-  veFactor: 1.4, color: '#d8c7b8', hasOcean: false,
+  veFactor: 1.4, color: '#d8c7b8', hasOcean: true, // far side = unimaged, renders like ocean
+  cacheBust: 'r2', // data changed: nodata fill is now 0 instead of mean
   modes: [[50, 'SURFACE'], [1500, 'LOW'], [12000, 'ORBIT'], [Infinity, 'DEEP SPACE']],
   view: { lat: 25, lon: 10, altitude: ALT_START, tilt: TILT_START, heading: 0 }, // Sputnik Planitia
   orbit: { aroundId: 'sun', periodSec: 90560 * DAY_SEC },
 });
-// Note: ~54% of the map is synthetic far-side fill (meta coverage_note — same New Horizons
-// flyby coverage caveat as Pluto above).
+// Note: ~54% of the far side is unimaged (same New Horizons flyby caveat as Pluto); fills at 0.
+// cacheBust r2: data changed (fill 0 not mean).
 const CHARON = new Body({
   id: 'charon', name: 'CHARON',
   metaUrl: dataUrl('charon_meta.json'), dataUrl: dataUrl('charon_heightfield.bin'),
   hfStem: 'charon_heightfield',
   radiusM: 606000, rotationPeriodSec: 6.38723 * DAY_SEC, // tidally locked to Pluto
-  veFactor: 0.64, color: '#a8a09b', hasOcean: false,
+  veFactor: 0.64, color: '#a8a09b', hasOcean: true, // far side = unimaged, renders like ocean
+  cacheBust: 'r2', // data changed: nodata fill is now 0 instead of mean
   modes: [[50, 'SURFACE'], [1500, 'LOW'], [12000, 'ORBIT'], [Infinity, 'DEEP SPACE']],
   view: { lat: 5, lon: 120, altitude: ALT_START, tilt: TILT_START, heading: 0 }, // Serenity Chasma
   orbit: { aroundId: 'pluto', periodSec: 6.38723 * DAY_SEC },
@@ -358,7 +361,21 @@ function _buildCamMvp(pos, tiltR, headR, aspect) {
 // it; starMvp uses the inertially-fixed direction so the starfield stays world-locked.
 function computeCamera(aspect) {
   const { gpos, altitude, tilt, heading, planetRot } = active.view;
-  const ve = veForAlt(altitude) * active.veFactor;
+  // trueShape bodies pin ve so rendered radial deviations equal true proportions.
+  // fixedVe = 8 × elevScale_m × (R_WORLD / radiusM) / vertScale
+  // (derivation: bulge_wu = raw × vertScale × (ve/8); true bulge = raw × elevScale_m × R_WORLD/radiusM;
+  //  equate → fixedVe = 8 × elevScale_m × (R_WORLD/radiusM) / vertScale)
+  // We derive once from meta+handle when both are available and cache on the body object.
+  let ve;
+  if (active.trueShape) {
+    if (active._fixedVe === undefined && active.meta && active.handle) {
+      const elevScaleM = active.meta.elev_scale_m ?? 1;
+      active._fixedVe = VERT_EXAGGERATION * elevScaleM * (R_WORLD / active.radiusM) / active.handle.vertScale;
+    }
+    ve = active._fixedVe ?? veForAlt(altitude);
+  } else {
+    ve = veForAlt(altitude) * active.veFactor;
+  }
   // Terrain-follow: at low altitude `altitude` is clearance ABOVE the local ground (AGL),
   // so the camera rides over the rendered relief and never sinks into a peak (e.g. Olympus
   // Mons). The contribution fades out by ~ATMO altitude so orbit/deep-space stay

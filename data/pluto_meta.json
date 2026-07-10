@@ -16,6 +16,6 @@
   "reference_radius_m": 1188300,
   "rotation_period_days": 6.38723,
   "rotation_note": "retrograde rotation (negative angular velocity; tidally locked with Charon)",
-  "coverage_note": "PARTIAL COVERAGE: New Horizons (July 2015 flyby) imaged ~46% of Pluto. Encounter hemisphere (~-90..+90E in USGS coords) has real topographic data; far side is nodata (sentinel -32768, filled with valid mean for rendering). 53.6% of source pixels (165,866,962/309,706,272) are nodata/unimaged.",
+  "coverage_note": "PARTIAL COVERAGE: New Horizons (July 2015 flyby) imaged ~46% of Pluto. Encounter hemisphere (~0-180E) has real topographic data; unimaged terrain (far side ~180-360E, 53.6% of source pixels) sits at reference level 0 and renders as featureless 'ocean'. (165,866,962/309,706,272 source pixels were nodata/unimaged)",
   "source": "NASA New Horizons mission, LORRI/MVIC instruments; Pluto New Horizons Global DEM 300m July 2017, public domain"
 }

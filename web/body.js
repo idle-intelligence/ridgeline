@@ -36,6 +36,7 @@ export class Body {
     this.hasOcean = spec.hasOcean ?? true; // false → render all terrain as land (airless body)
     this.tint = spec.tint ?? null;         // optional [r,g,b] line/fill tint (>1 = emissive boost)
     this.autoTilt = spec.autoTilt ?? true; // false → never morph the resting pitch (e.g. the Sun)
+    this.trueShape = spec.trueShape ?? false; // true → pin ve to fixedVe (true-proportion rendering)
 
     // HUD altitude bands: ascending [[ceilWu, label], …]; last is the catch-all.
     this.modes = spec.modes;
@@ -72,6 +73,7 @@ export class Body {
     this.view.planetRot = 0;
     this._autoTilt = false; // re-armed on mode change; disabled by user pitch drag
     this._prevMode = undefined;
+    this._fixedVe = undefined; // re-derived on first frame after meta+handle are available
   }
 
   // Real metres per world unit — drives the HUD km readout for this body.

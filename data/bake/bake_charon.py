@@ -16,8 +16,9 @@ URL: https://planetarymaps.usgs.gov/mosaic/Charon_NewHorizons_Global_DEM_300m_Ju
 
 CRITICAL NOTE ON COVERAGE: New Horizons only imaged one hemisphere during its
 2015 flyby. The encounter hemisphere (~0-180E, the Pluto-facing hemisphere) has
-real topographic data; the far side (~180-360E) is synthetic smooth fill.
-The coverage fraction is quantified at runtime and recorded in meta['coverage_note'].
+real topographic data; the unimaged far side (~180-360E) fills with exactly 0
+(reference level) and renders as featureless 'ocean'. The coverage fraction is
+quantified at runtime and recorded in meta['coverage_note'].
 
 Feature checks:
   - Serenity Chasma: equatorial belt of canyons, deep troughs (~-6 km range)
@@ -179,7 +180,7 @@ def load_elev(dtype, shape, nodata_val, scale, offset, need_roll):
             mask = np.abs(elev - nodata_val) < 1.0
         nodata_count = int(mask.sum())
         if nodata_count > 0:
-            print(f"  nodata pixels: {nodata_count:,}  (will fill with valid mean after decode)")
+            print(f"  nodata pixels: {nodata_count:,}  (will fill with 0 = reference level)")
 
     # Apply scale/offset if present
     if scale != 1.0 or offset != 0.0:
@@ -193,9 +194,8 @@ def load_elev(dtype, shape, nodata_val, scale, offset, need_roll):
             mask = data == int(nodata_val)
         else:
             mask = np.abs(data.astype(np.float64) - nodata_val) < 1.0
-        valid_mean = float(elev[~mask].mean())
-        elev[mask] = valid_mean
-        print(f"  filled {nodata_count:,} nodata pixels with valid mean ({valid_mean:.0f} m)")
+        elev[mask] = 0.0  # fill with reference level 0 → renders as featureless 'ocean'
+        print(f"  filled {nodata_count:,} nodata pixels with 0 (reference level / far side)")
 
     elev = elev.astype(np.float32)
     print(f"  elev range (metres above ref): {elev.min():.0f} .. {elev.max():.0f}")
@@ -254,9 +254,9 @@ def main():
     coverage_note = (
         f"PARTIAL COVERAGE: New Horizons (July 2015 flyby) imaged ~{(1-fill_fraction)*100:.0f}% "
         f"of Charon. Encounter hemisphere (~0-180E, Pluto-facing side) has real topographic data; "
-        f"far side (~180-360E) is nodata (sentinel -32768, filled with valid mean for rendering). "
-        f"{fill_fraction*100:.1f}% of source pixels ({fill_count:,}/{total_pixels:,}) "
-        f"are nodata/unimaged."
+        f"unimaged terrain (far side ~180-360E, {fill_fraction*100:.1f}% of source pixels) "
+        f"sits at reference level 0 and renders as featureless 'ocean'. "
+        f"({fill_count:,}/{total_pixels:,} source pixels were nodata/unimaged)"
     )
 
     os.makedirs(OUT_DIR, exist_ok=True)
@@ -329,12 +329,12 @@ def verify(elev16):
     # Serenity Chasma should show some relief in equatorial encounter hemisphere
     print(f"  Serenity Chasma region sample (equatorial, ~90-150E): mean {serenity_mean:.0f} m")
 
-    # Sample far side (should be flat near 0)
+    # Sample far side (should be 0 = reference level)
     far_vals = [sample(lat, lon)
                 for lat in range(-30, 30, 15)
                 for lon in range(-150, -30, 30)]
     far_mean = np.mean(far_vals)
-    print(f"  Far-side sampled mean (synthetic fill): {far_mean:.0f} m")
+    print(f"  Far-side sampled mean (ref-level 0 fill): {far_mean:.0f} m")
 
     mean_val = float(elev16.astype(np.float64).mean())
     print(f"  global mean: {mean_val:.0f} m")

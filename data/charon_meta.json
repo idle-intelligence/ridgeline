@@ -16,6 +16,6 @@
   "reference_radius_m": 606000,
   "rotation_period_days": 6.38723,
   "rotation_note": "tidally locked with Pluto (synchronous orbit; same face always toward Pluto)",
-  "coverage_note": "PARTIAL COVERAGE: New Horizons (July 2015 flyby) imaged ~46% of Charon. Encounter hemisphere (~0-180E, Pluto-facing side) has real topographic data; far side (~180-360E) is nodata (sentinel -32768, filled with valid mean for rendering). 54.4% of source pixels (43,794,826/80,562,471) are nodata/unimaged.",
+  "coverage_note": "PARTIAL COVERAGE: New Horizons (July 2015 flyby) imaged ~46% of Charon. Encounter hemisphere (~0-180E, Pluto-facing side) has real topographic data; unimaged terrain (far side ~180-360E, 54.4% of source pixels) sits at reference level 0 and renders as featureless 'ocean'. (43,794,826/80,562,471 source pixels were nodata/unimaged)",
   "source": "NASA New Horizons mission, LORRI/MVIC instruments; Charon New Horizons Global DEM 300m July 2017, public domain"
 }

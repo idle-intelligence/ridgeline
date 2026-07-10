@@ -15,10 +15,9 @@ Source: NASA New Horizons mission, LORRI/MVIC instruments, July 2017 DEM.
 URL: https://planetarymaps.usgs.gov/mosaic/Pluto_NewHorizons_Global_DEM_300m_Jul2017_16bit.tif
 
 CRITICAL NOTE ON COVERAGE: New Horizons only imaged one hemisphere during its
-2015 flyby. The unimaged hemisphere (encounter hemisphere ~0-180E is well covered;
-far side ~180-360E / 180W-0 is mostly synthetic smooth fill at ~0 m). The
-coverage fraction is quantified at runtime and recorded in the meta file under
-'coverage_note'. Expect roughly ~50% real coverage.
+2015 flyby. The encounter hemisphere (~0-180E) has real topographic data; the
+unimaged far side (~180-360E / 180W-0) fills with exactly 0 (reference level)
+and renders as featureless 'ocean'. Expect roughly ~50% real coverage.
 
 Feature checks:
   - Sputnik Planitia (~20N 180E = -180W, encounter hemisphere) is a deep basin ~-3.5 km
@@ -180,7 +179,7 @@ def load_elev(dtype, shape, nodata_val, scale, offset, need_roll):
             mask = np.abs(elev - nodata_val) < 1.0
         nodata_count = int(mask.sum())
         if nodata_count > 0:
-            print(f"  nodata pixels: {nodata_count:,}  (will fill with valid mean after decode)")
+            print(f"  nodata pixels: {nodata_count:,}  (will fill with 0 = reference level)")
 
     # Apply scale/offset if present
     if scale != 1.0 or offset != 0.0:
@@ -194,9 +193,8 @@ def load_elev(dtype, shape, nodata_val, scale, offset, need_roll):
             mask = data == int(nodata_val)
         else:
             mask = np.abs(data.astype(np.float64) - nodata_val) < 1.0
-        valid_mean = float(elev[~mask].mean())
-        elev[mask] = valid_mean
-        print(f"  filled {nodata_count:,} nodata pixels with valid mean ({valid_mean:.0f} m)")
+        elev[mask] = 0.0  # fill with reference level 0 → renders as featureless 'ocean'
+        print(f"  filled {nodata_count:,} nodata pixels with 0 (reference level / far side)")
 
     elev = elev.astype(np.float32)
     print(f"  elev range (metres above ref): {elev.min():.0f} .. {elev.max():.0f}")
@@ -255,9 +253,9 @@ def main():
     coverage_note = (
         f"PARTIAL COVERAGE: New Horizons (July 2015 flyby) imaged ~{(1-fill_fraction)*100:.0f}% "
         f"of Pluto. Encounter hemisphere (~0-180E) has real topographic data; "
-        f"far side (~180-360E) is nodata (sentinel -32768, filled with valid mean for rendering). "
-        f"{fill_fraction*100:.1f}% of source pixels ({fill_count:,}/{total_pixels:,}) "
-        f"are nodata/unimaged."
+        f"unimaged terrain (far side ~180-360E, {fill_fraction*100:.1f}% of source pixels) "
+        f"sits at reference level 0 and renders as featureless 'ocean'. "
+        f"({fill_count:,}/{total_pixels:,} source pixels were nodata/unimaged)"
     )
 
     os.makedirs(OUT_DIR, exist_ok=True)
@@ -323,7 +321,7 @@ def verify(elev16):
                for lon in [-10, 0, 10, 20]]
     sp_mean = np.mean(sp_vals) if sp_vals else 0
 
-    # Far side (nodata-filled region) — should be constant at fill mean (~442m)
+    # Far side (nodata-filled region) — should be 0 (reference level)
     far_vals = [sample(lat, lon)
                 for lat in range(-30, 30, 15)
                 for lon in range(100, 170, 20)]
@@ -342,7 +340,7 @@ def verify(elev16):
     print(f"  [{'OK ' if sp_ok else '??'}] "
           f"Sputnik Planitia region (~20-30N, 0-20E) is a basin: mean {sp_mean:.0f} m")
 
-    print(f"  Far-side sampled mean (nodata-filled, ~100-170E): {far_mean:.0f} m")
+    print(f"  Far-side sampled mean (ref-level 0 fill, ~100-170E): {far_mean:.0f} m")
 
     mean_val = float(elev16.astype(np.float64).mean())
     print(f"  global mean (biased by fill pixels): {mean_val:.0f} m")
