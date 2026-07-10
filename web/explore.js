@@ -837,19 +837,25 @@ async function main() {
     // sweeps the true planetary configuration.
     const jd = toJD(simEpochMs + simTimeSec * 1000);
     // Process ALL markers each frame — REGISTRY bodies + MARKER_ONLY (e.g. Sun).
-    // The active body's marker is hidden inside updateBodyMarker.
-    for (const b of ALL_MARKERS) updateBodyMarker(cam, b, jd);
+    // Collect placement records, then resolve label collisions across all visible markers.
+    const placements = [];
+    for (const b of ALL_MARKERS) {
+      const p = updateBodyMarker(cam, b, jd);
+      if (p) placements.push(p);
+    }
+    resolveLabelCollisions(placements);
 
     requestAnimationFrame(frame);
   }
 
   // Per-body marker. The active body is always hidden. For others: behind the current
-  // body → hide; on-screen & unblocked → dot; in front but off-view → edge arrow. The
-  // label is read straight from b.name at render time (can't desync from the body).
-  // Works for both Body instances (REGISTRY) and MARKER_ONLY plain objects (e.g. Sun).
+  // body → hide; on-screen & unblocked → dot; in front but off-view → edge arrow.
+  // Returns a placement record { b, kind, x, y, labelEl } for visible markers,
+  // or null for hidden ones. Dot/arrow widget positions are applied here; label
+  // vertical offsets are handled by resolveLabelCollisions after all markers are placed.
   function updateBodyMarker(cam, b, jd) {
     const { marker, arrow, chev, lbl, albl } = widgets.get(b.id);
-    if (b === active) { marker.style.display = 'none'; arrow.style.display = 'none'; return; }
+    if (b === active) { marker.style.display = 'none'; arrow.style.display = 'none'; return null; }
     const cw = canvas.width, ch = canvas.height;
     const owp = bodySkyMarkerPos(b.id, jd);
     const d = sub(owp, cam.pos);
@@ -865,7 +871,7 @@ async function main() {
     if (raySphere(cam.pos, normalize(d), occR)) { // behind the current body
       marker.style.display = 'none';
       arrow.style.display = 'none';
-      return;
+      return null;
     }
     const sp = (sf > 0) ? projectToScreen(owp, cam.mvp, cw, ch) : null;
     const onScreen = sp && sp[0] >= 0 && sp[0] <= cw && sp[1] >= 0 && sp[1] <= ch;
@@ -875,7 +881,7 @@ async function main() {
       marker.style.left = sp[0] + 'px';
       marker.style.top = sp[1] + 'px';
       arrow.style.display = 'none';
-      return;
+      return { b, kind: 'dot', x: sp[0], y: sp[1], labelEl: lbl };
     }
     albl.textContent = b.name;
     marker.style.display = 'none';
@@ -887,10 +893,57 @@ async function main() {
       Math.abs(dx) > 1e-4 ? (cw/2 - m) / Math.abs(dx) : Infinity,
       Math.abs(dy) > 1e-4 ? (ch/2 - m) / Math.abs(dy) : Infinity,
     );
+    const arrowX = cw/2 + dx*t, arrowY = ch/2 + dy*t;
     arrow.style.display = 'block';
-    arrow.style.left = (cw/2 + dx*t) + 'px';
-    arrow.style.top = (ch/2 + dy*t) + 'px';
+    arrow.style.left = arrowX + 'px';
+    arrow.style.top = arrowY + 'px';
     chev.style.transform = `rotate(${ang*180/Math.PI}deg)`;
+    return { b, kind: 'arrow', x: arrowX, y: arrowY, labelEl: albl };
+  }
+
+  // De-overlap text labels for markers that share nearly the same screen position.
+  // Dot/arrow widget positions are untouched — only the label element's transform is
+  // adjusted. Groups placements transitively within 48 px of each other (union-find over
+  // ≤ ~11 items), sorts each group deterministically by body name, then stacks labels
+  // 13 px apart vertically using CSS transform (no layout thrash).
+  function resolveLabelCollisions(placements) {
+    const CLUSTER_D = 48;  // px threshold to consider two markers co-located
+    const STEP_Y = 13;     // px between stacked labels within a cluster
+
+    const n = placements.length;
+    // Union-find: find + union by rank.
+    const parent = Array.from({ length: n }, (_, i) => i);
+    const rank = new Array(n).fill(0);
+    function find(i) { return parent[i] === i ? i : (parent[i] = find(parent[i])); }
+    function union(i, j) {
+      i = find(i); j = find(j);
+      if (i === j) return;
+      if (rank[i] < rank[j]) { parent[i] = j; }
+      else if (rank[i] > rank[j]) { parent[j] = i; }
+      else { parent[j] = i; rank[i]++; }
+    }
+
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const dx = placements[j].x - placements[i].x;
+        const dy = placements[j].y - placements[i].y;
+        if (Math.sqrt(dx*dx + dy*dy) < CLUSTER_D) union(i, j);
+      }
+    }
+
+    // Group by cluster root, sort each group by body name, assign vertical offsets.
+    const groups = new Map();
+    for (let i = 0; i < n; i++) {
+      const root = find(i);
+      if (!groups.has(root)) groups.set(root, []);
+      groups.get(root).push(i);
+    }
+    for (const members of groups.values()) {
+      members.sort((a, b) => placements[a].b.name < placements[b].b.name ? -1 : 1);
+      members.forEach((idx, rank) => {
+        placements[idx].labelEl.style.transform = rank === 0 ? '' : `translateY(${rank * STEP_Y}px)`;
+      });
+    }
   }
 
   requestAnimationFrame(frame);
