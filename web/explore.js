@@ -907,42 +907,27 @@ async function main() {
   // ≤ ~11 items), sorts each group deterministically by body name, then stacks labels
   // 13 px apart vertically using CSS transform (no layout thrash).
   function resolveLabelCollisions(placements) {
-    const CLUSTER_D = 48;  // px threshold to consider two markers co-located
-    const STEP_Y = 13;     // px between stacked labels within a cluster
+    // Deliberately NARROW: only near-EXACT coincidences stack (Charon sits on Pluto's
+    // direction — literally the same pixels). Slightly-offset neighbours stay put:
+    // their labels are naturally readable, and wide clustering smeared labels far
+    // from their dots (tried, rejected). No transitive chaining for the same reason.
+    const COINCIDE_D = 12; // px — visually "the same spot"
+    const STEP_Y = 13;     // px between stacked labels
 
     const n = placements.length;
-    // Union-find: find + union by rank.
-    const parent = Array.from({ length: n }, (_, i) => i);
-    const rank = new Array(n).fill(0);
-    function find(i) { return parent[i] === i ? i : (parent[i] = find(parent[i])); }
-    function union(i, j) {
-      i = find(i); j = find(j);
-      if (i === j) return;
-      if (rank[i] < rank[j]) { parent[i] = j; }
-      else if (rank[i] > rank[j]) { parent[j] = i; }
-      else { parent[j] = i; rank[i]++; }
-    }
-
+    const offset = new Array(n).fill(0);
     for (let i = 0; i < n; i++) {
       for (let j = i + 1; j < n; j++) {
         const dx = placements[j].x - placements[i].x;
         const dy = placements[j].y - placements[i].y;
-        if (Math.sqrt(dx*dx + dy*dy) < CLUSTER_D) union(i, j);
+        if (dx*dx + dy*dy < COINCIDE_D * COINCIDE_D) {
+          // stack the later one below whatever the earlier one already occupies
+          offset[j] = Math.max(offset[j], offset[i] + STEP_Y);
+        }
       }
     }
-
-    // Group by cluster root, sort each group by body name, assign vertical offsets.
-    const groups = new Map();
     for (let i = 0; i < n; i++) {
-      const root = find(i);
-      if (!groups.has(root)) groups.set(root, []);
-      groups.get(root).push(i);
-    }
-    for (const members of groups.values()) {
-      members.sort((a, b) => placements[a].b.name < placements[b].b.name ? -1 : 1);
-      members.forEach((idx, rank) => {
-        placements[idx].labelEl.style.transform = rank === 0 ? '' : `translateY(${rank * STEP_Y}px)`;
-      });
+      placements[i].labelEl.style.transform = offset[i] ? `translateY(${offset[i]}px)` : '';
     }
   }
 
