@@ -229,7 +229,8 @@ const ENCELADUS = new Body({
   trueShape: true, veFactor: 3.3, color: '#dfe9ec', hasOcean: false,
   cacheBust: 'r2', // data changed: wrap-seam fix (drop duplicate col/row, roll to lon=-180)
   modes: [[50, 'SURFACE'], [1500, 'LOW'], [12000, 'ORBIT'], [Infinity, 'DEEP SPACE']],
-  view: { lat: -60, lon: 0, altitude: ALT_START, tilt: TILT_START, heading: 0 }, // south-polar tiger-stripe terrain
+  // spawn equatorial (stacked-ridge profile); the south-polar tiger stripes are one drag south
+  view: { lat: 0, lon: 0, altitude: ALT_START, tilt: TILT_START, heading: 0 }, // south-polar tiger-stripe terrain
   orbit: { aroundId: 'saturn', periodSec: 1.370218 * DAY_SEC },
 });
 // Note: ~54% of the far side is unimaged (New Horizons July 2015 flyby); that hemisphere fills
