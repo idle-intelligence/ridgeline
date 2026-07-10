@@ -1107,7 +1107,24 @@ export class WebGPURenderer {
     // occluder DOME — only in the disc/from-afar regime; at low altitude the dome's near
     // surface becomes visible from outside and creates a dark band across the terrain.
     if (!emitFills) {
-      this._occUScratch.set(mvp, 0); this._occUScratch.set(PALETTE.fill, 16);
+      // Scale the occluder to sit just below the lowest rendered terrain of the active body.
+      // The mesh is baked at OCCLUDER_R; we apply a scalar (occR / OCCLUDER_R) by pre-scaling
+      // the first three columns of the MVP (equivalent to MVP * diag(k, k, k, 1)).
+      // elevMinWu = meta.elev_min * vertScale (no ve factor; ve is applied here per frame).
+      // For Earth (elev_min=0) elevMinWu=0 → occR unchanged ≈ R_WORLD*0.985.
+      const occR = R_WORLD + Math.min(0, this.elevMinWu * (ve / VERT_EXAGGERATION)) - 2.0;
+      const occScale = occR / OCCLUDER_R;
+      const occMvp = this._occUScratch; // reuse preallocated scratch
+      occMvp.set(mvp, 0);
+      // Scale columns 0..2 (x,y,z) by occScale; column 3 (w/translation) unchanged.
+      for (let c = 0; c < 3; c++) {
+        const base = c * 4;
+        occMvp[base]     *= occScale;
+        occMvp[base + 1] *= occScale;
+        occMvp[base + 2] *= occScale;
+        occMvp[base + 3] *= occScale;
+      }
+      occMvp.set(PALETTE.fill, 16);
       device.queue.writeBuffer(this.occVP, 0, this._occUScratch);
       rp.setPipeline(this.occPipe);
       rp.setBindGroup(0, this.occBind);

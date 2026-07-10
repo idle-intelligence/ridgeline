@@ -228,20 +228,51 @@ test('Pluto heliocentric distance 29..50 AU across a decade sweep', () => {
   }
 });
 
-test('alias: eclDirection earth→enceladus ≈ earth→saturn (dot > 0.999)', () => {
+// ── Satellite mini-orbits ──────────────────────────────────────────────────────
+
+// From Earth the orbital offset is tiny (≤ 1.6×10⁻³ AU vs ~30–40 AU to the parent),
+// so the direction toward a satellite and its parent must still agree to > 0.999 dot.
+
+test('satellite: eclDirection earth→enceladus ≈ earth→saturn (dot > 0.999)', () => {
   const jd = jdOf(2020, 6, 15);
   const dEnceladus = eclDirection('earth', 'enceladus', jd);
   const dSaturn    = eclDirection('earth', 'saturn',    jd);
   const d = dot3(dEnceladus, dSaturn);
-  assert.ok(d > 0.999, `dot(enceladus, saturn)=${d.toFixed(6)} — alias not routing`);
+  assert.ok(d > 0.999, `dot(enceladus, saturn)=${d.toFixed(6)} — satellite not near parent from Earth`);
 });
 
-test('alias: eclDirection earth→charon ≈ earth→pluto (dot > 0.999)', () => {
+test('satellite: eclDirection earth→charon ≈ earth→pluto (dot > 0.999)', () => {
   const jd = jdOf(2015, 7, 14); // New Horizons flyby date
   const dCharon = eclDirection('earth', 'charon', jd);
   const dPluto  = eclDirection('earth', 'pluto',  jd);
   const d = dot3(dCharon, dPluto);
-  assert.ok(d > 0.999, `dot(charon, pluto)=${d.toFixed(6)} — alias not routing`);
+  assert.ok(d > 0.999, `dot(charon, pluto)=${d.toFixed(6)} — satellite not near parent from Earth`);
+});
+
+test('satellite: eclDirection charon→pluto is a unit vector with no NaNs (30-day sweep)', () => {
+  const jd0 = jdOf(2020, 1, 1);
+  for (let day = 0; day < 30; day++) {
+    const d = eclDirection('charon', 'pluto', jd0 + day);
+    assert.ok(!d.some(isNaN), `NaN on day ${day}`);
+    const len = dist3(d);
+    assert.ok(Math.abs(len - 1) < 1e-9, `length ${len} on day ${day}`);
+  }
+});
+
+test('satellite: pluto-from-charon rotates ~360°/6.39 d (day-0 vs day-3.19 ≈ 180° ± 15°)', () => {
+  const jd0 = jdOf(2020, 1, 1);
+  const d0 = eclDirection('charon', 'pluto', jd0);
+  const d1 = eclDirection('charon', 'pluto', jd0 + 3.19); // half period
+  const ang = angBetween(d0, d1);
+  assert.ok(ang >= 165 && ang <= 195, `half-period angle = ${ang.toFixed(1)}° (expected ~180°±15°)`);
+});
+
+test('satellite: enceladus-from-saturn half-period rotation (1.37 d / 2 ≈ 0.685 d → ~180° ± 15°)', () => {
+  const jd0 = jdOf(2020, 1, 1);
+  const d0 = eclDirection('saturn', 'enceladus', jd0);
+  const d1 = eclDirection('saturn', 'enceladus', jd0 + 0.685); // half period
+  const ang = angBetween(d0, d1);
+  assert.ok(ang >= 165 && ang <= 195, `half-period angle = ${ang.toFixed(1)}° (expected ~180°±15°)`);
 });
 
 test('Pluto sky direction is a unit vector', () => {

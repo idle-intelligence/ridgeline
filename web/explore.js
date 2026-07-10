@@ -98,7 +98,9 @@ function _applyTier(b, f, buf, meta, Engine, renderer, isActive) {
   const newEngine = new Engine(w, h, new Uint8Array(buf),
     meta.elev_max, bbox.lat_min, bbox.lat_max, bbox.lon_min, bbox.lon_max);
   const newHandle = renderer.addBody(newEngine, wasmMem);
-  newHandle.elevMinWu = meta.elev_min * newHandle.vertScale;
+  // Occluder depth uses RAW int16 units (the shader's bulge units) — for scaled bodies
+  // (Vesta: 2 m/unit) elev_min is real metres and would over-deepen the dome.
+  newHandle.elevMinWu = (meta.elev_i16_min ?? meta.elev_min) * newHandle.vertScale;
   newHandle.hasOcean = b.hasOcean;
   if (b.tint) newHandle.tint = b.tint; // per-body line/fill tint (e.g. the Sun's warm glow)
 
@@ -211,7 +213,7 @@ const VESTA = new Body({
   radiusM: 262700, rotationPeriodSec: 5.342 * 3600,
   trueShape: true, color: '#cfc3aa', hasOcean: false,
   modes: [[50, 'SURFACE'], [1500, 'LOW'], [12000, 'ORBIT'], [Infinity, 'DEEP SPACE']],
-  view: { lat: -75, lon: -60, altitude: ALT_START, tilt: TILT_START, heading: 0 }, // Rheasilvia basin
+  view: { lat: 0, lon: -60, altitude: ALT_START, tilt: TILT_START, heading: 0 }, // equatorial: spin axis vertical, potato profile visible (old -75° stared into Rheasilvia basin where occluder dominated)
   orbit: { aroundId: 'sun', periodSec: 1325 * DAY_SEC },
 });
 const ENCELADUS = new Body({
@@ -498,7 +500,7 @@ async function main() {
 
     renderer = await WebGPURenderer.create(canvas, earthD16Engine, wasmMem);
     const earthD16Handle = renderer.activeBody;
-    earthD16Handle.elevMinWu = earthMeta.elev_min * earthD16Handle.vertScale;
+    earthD16Handle.elevMinWu = (earthMeta.elev_i16_min ?? earthMeta.elev_min) * earthD16Handle.vertScale;
     earthD16Handle.hasOcean = EARTH.hasOcean;
 
     EARTH.engine = earthD16Engine;

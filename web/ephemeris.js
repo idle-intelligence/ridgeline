@@ -269,21 +269,54 @@ export function moonGeoEcl(jd) {
 
 // ── Direction helpers ─────────────────────────────────────────────────────────
 
-// Bodies whose heliocentric position is indistinguishable from their parent for
-// marker-direction purposes (the offset is tiny vs interplanetary distances).
-// eclDirection() routes both observer and target through these aliases so that,
-// e.g., looking at Enceladus from Earth gives the same direction as Saturn.
-const ALIASES = {
-  enceladus: 'saturn',
-  charon:    'pluto',
+/**
+ * Satellite mini-orbit table.  Each entry defines a body that orbits a parent
+ * planet with a circular orbit in the ecliptic plane (an approximation — the
+ * real inclination is small for Charon and Enceladus, and the true orbital
+ * plane/phase differ from this simplified model).
+ *
+ * Key properties:
+ *   parent     — heliocentric body the satellite orbits
+ *   radiusAU   — orbit radius in AU
+ *   periodDays — sidereal orbital period in days
+ *   phase0     — arbitrary phase offset (radians) so bodies start at distinct
+ *                positions; chosen to avoid degenerate zero-vector at J2000
+ *
+ * Why this instead of ALIASES: the old alias approach returned the SAME
+ * heliocentric position for satellite and parent, so eclDirection('charon','pluto')
+ * normalized a zero vector → NaN.  The satellite table adds a non-zero circular
+ * offset so every direction is well-defined.
+ *
+ * From any OTHER body the offset (≤ 2×10⁻⁶ AU for Charon, ≤ 2×10⁻⁶ AU for
+ * Enceladus) is invisible — directions toward the satellite and parent agree to
+ * > 0.999 dot product, matching the old alias behavior from Earth.
+ *
+ * Charon:    19,600 km / 149,597,870.7 km·AU⁻¹ ≈ 1.31×10⁻⁴ AU, P = 6.38723 d
+ * Enceladus: 238,000 km / 149,597,870.7 km·AU⁻¹ ≈ 1.59×10⁻³ AU, P = 1.370218 d
+ */
+const SATELLITES = {
+  charon:    { parent: 'pluto',  radiusAU: 19600   / 149597870.7, periodDays: 6.38723,   phase0: 0.0 },
+  enceladus: { parent: 'saturn', radiusAU: 238000  / 149597870.7, periodDays: 1.370218,  phase0: 1.0 },
 };
 
-/** Heliocentric ecliptic J2000 position of a body (handles 'sun', 'moon', and aliases). */
+/** Heliocentric ecliptic J2000 position of a body (handles 'sun', 'moon', and satellites). */
 function helioPos(id, jd) {
-  const resolved = ALIASES[id] ?? id;
-  if (resolved === 'sun')  return [0, 0, 0];
-  if (resolved === 'moon') return add3(helioEcl('earth', jd), moonGeoEcl(jd));
-  return helioEcl(resolved, jd);
+  if (id === 'sun')  return [0, 0, 0];
+  if (id === 'moon') return add3(helioEcl('earth', jd), moonGeoEcl(jd));
+
+  const sat = SATELLITES[id];
+  if (sat) {
+    // Parent heliocentric position + circular offset in the ecliptic plane.
+    const parentPos = helioPos(sat.parent, jd);
+    const angle = 2 * Math.PI * (jd - J2000) / sat.periodDays + sat.phase0;
+    return [
+      parentPos[0] + sat.radiusAU * Math.cos(angle),
+      parentPos[1] + sat.radiusAU * Math.sin(angle),
+      parentPos[2], // orbit in the ecliptic plane (z offset = 0)
+    ];
+  }
+
+  return helioEcl(id, jd);
 }
 
 function add3(a, b)  { return [a[0]+b[0], a[1]+b[1], a[2]+b[2]]; }
