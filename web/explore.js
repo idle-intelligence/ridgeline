@@ -71,17 +71,21 @@ const DAY_SEC = 86400;
 // ── System (orrery) view thresholds ──────────────────────────────────────────
 // Transition is driven by ALTITUDE (wu), not by a boolean systemMode toggle.
 // sysT = smoothstep((alt - SYS_FADE_START) / (SYS_FADE_END - SYS_FADE_START))
-// sysT=0 → full globe; sysT=1 → full system view.
-// Cross-fade: globe (#c) opacity = 1-sysT, system canvas opacity = sysT.
-// Both render while 0 < sysT < 1 (globe shrinking into its dot in the system scene).
+// sysT=0 → at the globe; sysT=1 → whole system framed.
 //
-// Reversibility: wheel-out increases altitude → sysT rises → system fades in.
-//   Wheel-in decreases altitude → sysT falls → globe fades back.
-//   When fully system (sysT≈1) wheel-in drives altitude back below SYS_FADE_START.
-const SYS_FADE_START    = 120_000; // wu — begin cross-fade (globe ~15% of screen)
-const SYS_FADE_END      = 320_000; // wu — fully system (globe a small dot)
-const ALT_CAP_SYSTEM    = 400_000; // wu — allow altitude to grow well past SYS_FADE_END
-const SYS_TRANSITION    = 0.6;     // seconds for sysT easing (used only for click-enter)
+// This is a ZOOM OUT, not a cross-fade. Both canvases stay fully opaque: the globe
+// genuinely shrinks (real perspective — SYS_FADE_END is far enough out that it ends
+// up dot-sized, ~1% of screen height) while the orrery camera pulls back from right
+// beside the body to the distance that frames the outermost orbit. The globe canvas
+// only fades over the last sliver of the pull-back, where it and the orrery's dot for
+// the same body are the same handful of pixels in the same place.
+//
+// Reversibility: wheel-out increases altitude → we keep pulling back.
+//   Wheel-in decreases altitude → the camera flies back in and the globe grows again.
+const SYS_FADE_START    = 120_000;   // wu — globe ~12% of screen height; orrery starts pulling back
+const SYS_FADE_END      = 1_500_000; // wu — globe ~1% of screen height (dot-sized); system framed
+const ALT_CAP_SYSTEM    = SYS_FADE_END; // fully zoomed out = the end of the wheel's travel
+const SYS_HANDOFF_START = 0.9;       // sysT at which the (now dot-sized) globe hands off to the orrery dot
 
 // System mode state (module-level so frame loop + handlers can share it).
 let systemMode = false;  // true = altitude-driven system view is active/entering
@@ -383,7 +387,15 @@ function sampleElevM(b, latDeg, lonDeg) {
 }
 
 // ── Camera ────────────────────────────────────────────────────────────────────
-function _buildCamMvp(pos, tiltR, headR, aspect) {
+// Depth range scales with altitude. A fixed 1 … 200 000 range clipped the globe away
+// entirely above ~194 000 wu, which is well inside the system-view pull-back — the globe
+// has to survive out to SYS_FADE_END (1.5 M wu) for the zoom-out to read as continuous.
+// Both ends scale together so the near/far ratio (and therefore depth precision) stays put.
+function depthRange(altitude, camR) {
+  return [Math.max(1, altitude * 0.02), Math.max(Z_FAR, camR * 2.5)];
+}
+
+function _buildCamMvp(pos, tiltR, headR, aspect, zNear = Z_NEAR, zFar = Z_FAR) {
   const radial = normalize(pos);
   const northRaw = [0, 1, 0];
   const northProj = sub(northRaw, scale(radial, dot(northRaw, radial)));
@@ -398,7 +410,7 @@ function _buildCamMvp(pos, tiltR, headR, aspect) {
   const up = Math.hypot(...upRaw) < 0.001 ? scale(headFwd,-1) : normalize(upRaw);
   const right = normalize(cross(lookDir, up));
   const view = mat4LookAt(pos, add(pos, scale(lookDir, 10000)), up);
-  const proj = mat4Perspective(FOV_Y, aspect, Z_NEAR, Z_FAR);
+  const proj = mat4Perspective(FOV_Y, aspect, zNear, zFar);
   return { lookDir, up, right, mvp: mat4Mul(proj, view) };
 }
 
@@ -442,9 +454,10 @@ function computeCamera(aspect) {
   const camR = R_WORLD + Math.max(0, terrainWu) * follow + altitude;
 
   const pos = scale(worldDir, camR);
-  const { lookDir, up, right, mvp } = _buildCamMvp(pos, tilt, heading, aspect);
+  const [zNear, zFar] = depthRange(altitude, camR);
+  const { lookDir, up, right, mvp } = _buildCamMvp(pos, tilt, heading, aspect, zNear, zFar);
   const fixedPos = scale(gpos, camR);
-  const { mvp: starMvp } = _buildCamMvp(fixedPos, tilt, heading, aspect);
+  const { mvp: starMvp } = _buildCamMvp(fixedPos, tilt, heading, aspect, zNear, zFar);
   return { pos, fwd: lookDir, up, right, mvp, starMvp, ve, altWu: altitude };
 }
 
