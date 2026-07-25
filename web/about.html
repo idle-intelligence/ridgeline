@@ -169,9 +169,9 @@
     </header>
 
     <p class="intro">
-      ridgeline is a toy for exploring real worlds — Earth, the Moon, Mars, Venus,
-      Mercury, Ceres, Vesta, Enceladus, Pluto, Charon, and the Sun — each drawn as a globe
-      of stacked Joy Division "Unknown Pleasures" ridgelines. Every ridge is real data.
+      ridgeline draws eleven real worlds and the Sun: Earth, the Moon, Mars, Venus,
+      Mercury, Ceres, Vesta, Enceladus, Pluto, Charon. Each one is a globe of stacked
+      Joy Division "Unknown Pleasures" ridgelines. Every ridge is real data.
       It runs entirely in your browser.
     </p>
 
@@ -183,7 +183,7 @@
         designed by Peter Saville. That cover is a real scientific plot: about a hundred
         stacked radio pulses from the pulsar
         <a href="https://en.wikipedia.org/wiki/PSR_B1919%2B21" target="_blank" rel="noopener">PSR B1919+21</a>
-        (now also known as CP 1919) — the first pulsar ever discovered, by Jocelyn Bell Burnell
+        (now also known as CP 1919), the first pulsar ever discovered, by Jocelyn Bell Burnell
         and Antony Hewish in 1967.
       </p>
       <p>
@@ -202,7 +202,7 @@
 
     <section>
       <h2>The terrain is real</h2>
-      <p>Every ridge is real elevation — or, for the Sun, real magnetic field. All sources are
+      <p>Every ridge is real elevation, or for the Sun real magnetic field. All sources are
       public-domain government data.</p>
       <ul>
         <li><span class="body-name">Earth</span><span class="source">NOAA ETOPO 2022</span></li>
@@ -226,7 +226,7 @@
         capped so active-region spikes read as mountains rather than needles).
       </p>
       <p>
-        Bright ridges are magnetic active regions — the sunspot belts. Because a synoptic map
+        Bright ridges are magnetic active regions: the sunspot belts. Because a synoptic map
         is stitched strip by strip as the Sun turns, longitude is also time: flying across the
         map crosses about 27 days of observation.
       </p>
@@ -235,8 +235,8 @@
     <section>
       <h2>Views &amp; units</h2>
       <p>
-        Every world is drawn at the same size. Whatever you are orbiting — the Sun or
-        Enceladus — its sea-level sphere has a radius of 6000 <em>world units</em>, the
+        Every world is drawn at the same size. Whatever you are orbiting, the Sun or
+        Enceladus, its sea-level sphere has a radius of 6000 <em>world units</em>, the
         internal unit everything is measured in. A body's true radius never changes how big
         it looks; it only sets the conversion the HUD uses to report your altitude in
         kilometres:
@@ -247,14 +247,14 @@
         same flight feels the same everywhere but reads very differently on the dial.
       </p>
       <p>
-        The altitude bands work the same way — the ceilings are fixed in world units, identical
+        The altitude bands work the same way. The ceilings are fixed in world units, identical
         for every body, so each band spans a wildly different real distance depending on where
         you are:
       </p>
       <ul>
-        <li><span class="body-name">SURFACE</span><span class="source">below 50 wu — 53 km at Earth, 2 km at Vesta</span></li>
-        <li><span class="body-name">ATMO / LOW / CORONA</span><span class="source">below 1500 wu — 1,593 km at Earth, 66 km at Vesta, 174,000 km at the Sun</span></li>
-        <li><span class="body-name">ORBIT</span><span class="source">below 12,000 wu — 12,742 km at Earth</span></li>
+        <li><span class="body-name">SURFACE</span><span class="source">below 50 wu · 53 km at Earth, 2 km at Vesta</span></li>
+        <li><span class="body-name">ATMO / LOW / CORONA</span><span class="source">below 1500 wu · 1,593 km at Earth, 66 km at Vesta, 174,000 km at the Sun</span></li>
+        <li><span class="body-name">ORBIT</span><span class="source">below 12,000 wu · 12,742 km at Earth</span></li>
         <li><span class="body-name">DEEP SPACE</span><span class="source">beyond that</span></li>
       </ul>
       <p>
@@ -270,21 +270,21 @@
       <h2>Why the mountains are too big</h2>
       <p>
         At true scale this would not be much of a picture: Everest is 8.8 km on a 6371 km
-        planet, about 8 world units of bulge on a 6000-unit sphere — invisible. So relief is
+        planet, about 8 world units of bulge on a 6000-unit sphere. Invisible. So relief is
         exaggerated, and by how much depends on how close you are. Near the ground the
         exaggeration is ×2.75; climbing away it eases up to ×14, which keeps continents
         readable from orbit without turning low passes into spikes.
       </p>
       <p>
         On top of that each body carries its own factor, tuned so its signature terrain reads
-        right. Mars is damped to 0.45 — Olympus Mons is the tallest thing in the solar system
+        right. Mars is damped to 0.45, because Olympus Mons is the tallest thing in the solar system
         and at full exaggeration it swallows the globe. Pluto is pushed to 1.4 because the
         New Horizons terrain is the whole point of visiting. The Sun sits at 1.5.
       </p>
       <p>
         Four bodies opt out entirely. Ceres, Vesta, Enceladus and Charon are small enough that
-        their real relief is already a visible fraction of their radius — ±1% for Enceladus,
-        ±2.3% for Charon — so they are rendered at a fixed exaggeration that preserves the true
+        their real relief is already a visible fraction of their radius (±1% for Enceladus,
+        ±2.3% for Charon), so they are rendered at a fixed exaggeration that preserves the true
         ratio. Vesta genuinely is that lumpy; its axes differ by 60 km.
       </p>
 
@@ -298,7 +298,7 @@
       </p>
       <span class="formula">display radius = log₁₀(1 + AU) ÷ log₁₀(1 + 40)</span>
       <p>
-        Zero at the Sun, 1.0 at 40 AU — roughly Pluto's orbit. Everything else is real. Each
+        Zero at the Sun, 1.0 at 40 AU, roughly Pluto's orbit. Everything else is real. Each
         body's direction is its true heliocentric position from a Kepler ephemeris, so the
         ecliptic longitudes, the spacing order, and the tilt of Pluto's 17°-inclined orbit are
         all correct. Only the ruler is bent.
@@ -308,19 +308,19 @@
     <section>
       <h2>How it's built</h2>
       <ul class="prose-list">
-        <li>Everything runs in your browser. No server, no build step, no framework — vanilla
+        <li>Everything runs in your browser. No server, no build step, no framework. Vanilla
           JavaScript static files.</li>
         <li>The terrain is baked offline in Python into compact <code>int16</code> heightfields.
           They live in a Hugging Face dataset, are fetched once and kept in your browser's Cache
-          API, and stream coarse-to-fine — the globe appears in about a second, then sharpens.
+          API, and stream coarse-to-fine, so the globe appears in about a second and then sharpens.
           A small WebAssembly module holds the heightfield in memory for the GPU to read.</li>
         <li>Every frame, WebGPU compute shaders map the grid onto the sphere, cull it against the
-          horizon, pick the level of detail and emit the ridgelines — on the GPU. The lines you
+          horizon, pick the level of detail and emit the ridgelines on the GPU. The lines you
           see are computed, never stored.</li>
         <li>The camera, the Kepler ephemeris and the orrery are plain JavaScript. The ephemeris
           is approximate in absolute terms, but the relative geometry and motion are real.</li>
-        <li>This needs a WebGPU-capable browser — Chrome/Edge 113+ or Safari 18+. There is no
-          fallback renderer; without WebGPU the page will tell you so and stop.</li>
+        <li>This needs a browser with WebGPU. There is no fallback renderer; without it the page
+          says so and stops.</li>
       </ul>
     </section>
 
@@ -330,7 +330,7 @@
         <li>Inspired by the original ridgeline-map project —
           <span class="placeholder">[ link to the original ridge repo — TODO ]</span></li>
         <li>Cover art: Unknown Pleasures, Joy Division, 1979 (design: Peter Saville).</li>
-        <li>Data courtesy of NASA, USGS, NOAA, DLR and ESA — public domain. HMI data courtesy
+        <li>Data courtesy of NASA, USGS, NOAA, DLR and ESA, all public domain. HMI data courtesy
           NASA/SDO and the HMI science team.</li>
         <li>Code: MIT.</li>
       </ul>
