@@ -25,5 +25,4 @@ export const PALETTE = {
   sky:      [0.04, 0.04, 0.08, 1.0],      // near-black deep blue
   fill:     [0.07, 0.07, 0.12, 1.0],      // dark blue-grey fill body
   line:     [0.88, 0.86, 0.82, 1.0],      // warm off-white ridge line
-  aircraft: [0.97, 0.96, 0.93, 1.0],      // near-pure warm white — ship reads distinct
 };

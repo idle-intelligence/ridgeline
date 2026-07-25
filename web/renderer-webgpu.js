@@ -1,6 +1,6 @@
 // WebGPU renderer for ridgeline — DEFAULT renderer when WebGPU is available (main.js selects
 // it automatically; WebGL2 `Renderer` is the fallback). Same interface as the WebGL2 renderer:
-// `resize(w,h)`, `uploadAircraft(json, scale)`, `draw(eng, wasmMemory)`.
+// `resize(w,h)`, `draw(eng, wasmMemory)`.
 //
 // THE WIN: the CPU per-frame geometry generation (`generate_into`, 70–200 ms in the traces,
 // 83–98% of the frame, unbounded at low altitude) is REPLACED by a WGSL compute pass. main.js
@@ -20,8 +20,7 @@
 //      and writes drawIndexedIndirect args.
 //   3. Render passes: starfield (fullscreen, ported from WebGL2), gated dark occluder DOME +
 //      compute-generated per-ring FILL strips (depth), then the bright LINE strips with the WebGL2
-//      elevation→brightness + strength shading, then the aircraft wireframe (model_matrix). All
-//      channels match the WebGL2 renderer.
+//      elevation→brightness + strength shading. All channels match the WebGL2 renderer.
 
 import {
   PALETTE, WORLD_RADIUS, EARTH_RADIUS_M, VERT_EXAGGERATION,
@@ -568,34 +567,7 @@ fn fs(i: VSOut) -> @location(0) vec4<f32> {
 }
 `;
 
-// ── WGSL: aircraft wireframe ─────────────────────────────────────────────────
-const AIRCRAFT_WGSL = /* wgsl */`
-struct U { mvp : mat4x4<f32>, color : vec4<f32> };
-@group(0) @binding(0) var<uniform> u : U;
-@vertex
-fn vs(@location(0) p: vec3<f32>) -> @builtin(position) vec4<f32> {
-  return u.mvp * vec4<f32>(p, 1.0);
-}
-@fragment
-fn fs() -> @location(0) vec4<f32> { return u.color; }
-`;
-
-function mat4Mul(a, b) {
-  const out = new Float32Array(16);
-  for (let col = 0; col < 4; col++)
-    for (let row = 0; row < 4; row++) {
-      let v = 0;
-      for (let k = 0; k < 4; k++) v += a[k * 4 + row] * b[col * 4 + k];
-      out[col * 4 + row] = v;
-    }
-  return out;
-}
-
 // Invert a column-major 4x4 (for the starfield world-ray reconstruction). Returns Float32Array(16) or null.
-function mat4Invert(m) {
-  const inv = new Float32Array(16);
-  return mat4InvertInto(m, inv) ? inv : null;
-}
 // In-place variant: writes into `out` (Float32Array(16)), returns true on success.
 function mat4InvertInto(m, out) {
   const a00=m[0],a01=m[1],a02=m[2],a03=m[3], a10=m[4],a11=m[5],a12=m[6],a13=m[7];
@@ -987,19 +959,6 @@ export class WebGPURenderer {
     });
     this.starBind = device.createBindGroup({ layout: this.starPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.starU } }] });
 
-    // ── Aircraft (wireframe) ──
-    const acMod = device.createShaderModule({ code: AIRCRAFT_WGSL });
-    this.acVP = device.createBuffer({ size: 16 * 4 + 4 * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.acPipe = device.createRenderPipeline({
-      layout: 'auto',
-      vertex: { module: acMod, entryPoint: 'vs', buffers: [{ arrayStride: 12, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }] }] },
-      fragment: { module: acMod, entryPoint: 'fs', targets: [{ format: this.format }] },
-      primitive: { topology: 'line-list' },
-      depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less-equal' },
-    });
-    this.acBind = device.createBindGroup({ layout: this.acPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.acVP } }] });
-    this.acCount = 0;
-
     this._camScratch = new ArrayBuffer(96);
     this._ringScratch = new ArrayBuffer(MAX_RINGS * 16);
     this._fillRowScratch = new ArrayBuffer(MAX_FILL_ROWS * 32);
@@ -1018,21 +977,6 @@ export class WebGPURenderer {
     this.depthTex = this.device.createTexture({
       size: [w, h], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT,
     });
-  }
-
-  uploadAircraft(aircraftJson, scale) {
-    const pos = aircraftJson.positions, segs = aircraftJson.lines;
-    const verts = new Float32Array(pos.length * 3);
-    for (let i = 0; i < pos.length; i++) {
-      verts[i * 3] = pos[i][0] * scale; verts[i * 3 + 1] = pos[i][1] * scale; verts[i * 3 + 2] = pos[i][2] * scale;
-    }
-    const indices = new Uint32Array(segs.length * 2);
-    for (let i = 0; i < segs.length; i++) { indices[i * 2] = segs[i][0]; indices[i * 2 + 1] = segs[i][1]; }
-    this.acCount = indices.length;
-    this.acVBO = this.device.createBuffer({ size: verts.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
-    this.device.queue.writeBuffer(this.acVBO, 0, verts);
-    this.acIBO = this.device.createBuffer({ size: indices.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
-    this.device.queue.writeBuffer(this.acIBO, 0, indices);
   }
 
   // Build the per-frame LINE ring + FILL strip schedules (CHEAP — O(rows), ports geometry.rs's
@@ -1300,7 +1244,7 @@ export class WebGPURenderer {
     dv.setFloat32(88, this._lonPad ?? 70.0, true);
   }
 
-  draw(eng, wasmMemory) {
+  draw(eng) {
     const device = this.device;
     // Explore mode: uniform LOD override — bypass distance-based stride tables.
     this._exploreLodAlt = eng.explore_alt ? eng.explore_alt() : null;
@@ -1431,61 +1375,11 @@ export class WebGPURenderer {
     rp.setIndexBuffer(this.idxBuf, 'uint32');
     rp.drawIndexedIndirect(this.indirectBuf, 0); // line args block
 
-    // aircraft
-    const _acModel = eng.model_matrix ? eng.model_matrix() : null;
-    if (this.acCount > 0 && _acModel) {
-      const model = _acModel;
-      const acMvp = mat4Mul(mvp, model);
-      const acU = new Float32Array(20);
-      acU.set(acMvp, 0); acU.set(PALETTE.aircraft, 16);
-      device.queue.writeBuffer(this.acVP, 0, acU);
-      rp.setPipeline(this.acPipe);
-      rp.setBindGroup(0, this.acBind);
-      rp.setVertexBuffer(0, this.acVBO);
-      rp.setIndexBuffer(this.acIBO, 'uint32');
-      rp.drawIndexed(this.acCount);
-    }
-
     rp.end();
     device.queue.submit([enc.finish()]);
   }
 
   cpuGenMs() { return this._lastCpuGenMs; }
-
-  // Render the current frame into an OWNED RGBA texture and read it back (for headless tests,
-  // where the canvas swapchain texture is not reliably readable). Returns
-  // { width, height, pixels: Uint8Array(RGBA) }. Pixels are row-major top-to-bottom (Y down).
-  async readbackPixels(eng, wasmMemory) {
-    const device = this.device;
-    const w = this.canvas.width, h = this.canvas.height;
-    const tex = device.createTexture({
-      size: [w, h], format: this.format,
-      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
-    });
-    this._offscreenView = tex.createView();
-    this.draw(eng, wasmMemory);
-    this._offscreenView = null;
-
-    const bytesPerRow = Math.ceil((w * 4) / 256) * 256; // 256-byte row alignment
-    const rb = device.createBuffer({ size: bytesPerRow * h, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-    const enc = device.createCommandEncoder();
-    enc.copyTextureToBuffer({ texture: tex }, { buffer: rb, bytesPerRow }, [w, h, 1]);
-    device.queue.submit([enc.finish()]);
-    await rb.mapAsync(GPUMapMode.READ);
-    const src = new Uint8Array(rb.getMappedRange());
-    const pixels = new Uint8Array(w * h * 4);
-    const bgra = this.format.startsWith('bgra');
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        const s = y * bytesPerRow + x * 4;
-        const d = (y * w + x) * 4;
-        if (bgra) { pixels[d] = src[s + 2]; pixels[d + 1] = src[s + 1]; pixels[d + 2] = src[s]; pixels[d + 3] = src[s + 3]; }
-        else { pixels[d] = src[s]; pixels[d + 1] = src[s + 1]; pixels[d + 2] = src[s + 2]; pixels[d + 3] = src[s + 3]; }
-      }
-    }
-    rb.unmap();
-    return { width: w, height: h, pixels };
-  }
 
   async debugReadback() {
     const dev = this.device;

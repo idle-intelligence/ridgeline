@@ -472,7 +472,6 @@ function makeProxy(cam) {
     camera_position: () => new Float32Array(cam.pos),
     cam_forward:     () => new Float32Array(cam.fwd),
     current_ve:      () => cam.ve,
-    model_matrix:    () => null,
     star_view_proj:  () => cam.starMvp,  // inertially-fixed: stars don't rotate with the body
     explore_alt:     () => cam.altWu,    // triggers uniform LOD in the renderer
   };
@@ -975,7 +974,7 @@ async function main() {
     // ── Globe render (skipped once it has handed off to the orrery dot) ───
     const cam = computeCamera(getAspect());
     if (globeOpacity > 0) {
-      renderer.draw(makeProxy(cam), null);
+      renderer.draw(makeProxy(cam));
     }
     if (!loadingDone) { document.getElementById('loading').style.display = 'none'; loadingDone = true; }
 
