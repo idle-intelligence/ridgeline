@@ -12,20 +12,27 @@
  *   Direction (ecliptic longitude + latitude/inclination) is PRESERVED exactly —
  *   only the radial distance is compressed. Pluto's 17° tilt, etc., are real.
  *
- * Orbit paths: for each body, sample helioEcl(id, jd + k*period/N) for N=96
- * samples over one orbital period, apply same compression → real elliptical,
- * inclined paths in scene space. Cached; recomputed when jd drifts by >1 day.
+ * Orbit paths: for each body, sample helioEcl(id, jd + k*period/N) for N samples
+ * over exactly one orbital period, apply the same compression → real elliptical,
+ * inclined paths in scene space. The period comes from ephemeris.orbitPeriodDays()
+ * — DERIVED from the same elements the position solver uses, so the sample set
+ * closes on itself. Cached; recomputed when jd drifts by > 1 day.
  *
- * Camera: perspective, default ~25° above ecliptic plane. Sun placed off-centre
- * by offsetting the camera target. Drag = orbit (azimuth + elevation). Wheel =
- * dolly within scene (NOT alt — caller drives fade via altitude). The canvas
- * is pointer-events:none when hidden; caller enables it via show().
+ * Camera: perspective, looking down on the ecliptic from a high inclination.
+ * The transition from the globe is a continuous ZOOM OUT, not a cross-fade: the
+ * caller passes sysT (0 = at the body, 1 = whole system framed) and the camera
+ * dollies back exponentially from right beside the active body to the distance
+ * that fits the outermost orbit, while the look-at target slides from the body
+ * toward the Sun — ending on a deliberately off-centre composition biased toward
+ * the body you left. Drag = orbit (azimuth + elevation), click = enter a body.
  *
  * API:
  *   createSystemView({ registry, helioPos, helioEcl, getJd, onEnterBody })
- *   → { canvas, setActive, show, hide, draw(jd), onWheel, onPointerDown,
+ *   → { canvas, setActive, show, hide, draw(jd, sysT), onPointerDown,
  *        onPointerMove, onPointerUp, hitTest(x,y) }
  */
+
+import { orbitPeriodDays } from './ephemeris.js';
 
 // ── Log-radial compression ────────────────────────────────────────────────────
 // Single formula, all bodies. 40 AU upper bound covers Pluto's orbit.
@@ -43,24 +50,6 @@ function compressAU(au) {
 // PLOT_R: scene outer radius in scene units. All compressed positions live within this sphere.
 // 1.0 = unit scene; all display code multiplies by this to get scene coords.
 const PLOT_R = 1.0;
-
-// ── Orbit period table (days) ────────────────────────────────────────────────
-// Used to trace orbit paths. Source: ELEMENTS.a0^1.5 × 365.25 (Kepler 3rd law),
-// or well-known periods for moons/dwarfs.
-const ORBIT_PERIOD_DAYS = {
-  mercury:   88,
-  venus:    225,
-  earth:    365.25,
-  mars:     687,
-  ceres:   1682,
-  vesta:   1325,
-  jupiter: 4333,
-  saturn: 10759,
-  pluto:  90560,
-  moon:      27.32,
-  charon:     6.387,
-  enceladus:  1.370,
-};
 
 // ── Stable starfield ─────────────────────────────────────────────────────────
 const STAR_COUNT = 360;
@@ -96,10 +85,14 @@ const MOON_SCENE_OFFSETS = {
   enceladus: [0.010, 0.004, 0],
 };
 
+// Moons orbit too close to their parent to be visible at solar-system scale, so we
+// draw the PARENT's heliocentric orbit under them instead of a mini-orbit.
+const MOON_PARENT = { moon: 'earth', charon: 'pluto', enceladus: 'saturn' };
+
 // ── 3D perspective projection ─────────────────────────────────────────────────
 // Camera defined by: eye position, target, up vector.
-// We orbit the camera around a target (near the barycentre, offset from Sun for
-// off-centre framing). Azimuth (yaw around ecliptic Z), elevation (pitch above plane).
+// We orbit the camera around a target. Azimuth (yaw around ecliptic Z), elevation
+// (pitch above the ecliptic plane).
 
 function makePerspCamera(azimuth, elevation, dolly, targetX, targetY, targetZ) {
   // Camera eye orbits around the target:
@@ -144,17 +137,14 @@ function makePerspCamera(azimuth, elevation, dolly, targetX, targetY, targetZ) {
     fwd: [fx, fy, fz],
     up:  [ux, uy, uz],
     right: [rx, ry, rz],
-    // Project a scene [x,y,z] → NDC [cx,cy,depth] or null if behind camera.
-    project(x, y, z, aspect, fovY) {
+    // Scene [x,y,z] → view space [right, up, depth]. Depth ≤ 0 means behind the camera.
+    view(x, y, z) {
       const dx = x - eyeX, dy = y - eyeY, dz = z - eyeZ;
-      const projX = dx*rx + dy*ry + dz*rz;   // screen right
-      const projY = dx*ux + dy*uy + dz*uz;   // screen up
-      const projZ = dx*fx + dy*fy + dz*fz;   // into screen (depth)
-      if (projZ <= 0.001) return null;
-      const tanHalfFov = Math.tan(fovY / 2);
-      const ndcX =  projX / (projZ * tanHalfFov * aspect);
-      const ndcY =  projY / (projZ * tanHalfFov);
-      return [ndcX, ndcY, projZ];
+      return [
+        dx*rx + dy*ry + dz*rz,
+        dx*ux + dy*uy + dz*uz,
+        dx*fx + dy*fy + dz*fz,
+      ];
     },
   };
 }
@@ -167,10 +157,21 @@ function jdToDateStr(jd) {
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
 }
 
+const clamp01 = t => Math.max(0, Math.min(1, t));
+const smoothstep = t => t * t * (3 - 2 * t);
+
 // ── Orbit path cache ──────────────────────────────────────────────────────────
 const PATH_CACHE = new Map();
 const PATH_RECOMPUTE_INTERVAL = 1.0; // days
-const PATH_N = 96;                   // samples per orbit
+const PATH_N = 192;                  // samples per orbit (time-uniform → sparser near perihelion)
+
+// ── Camera framing constants ──────────────────────────────────────────────────
+const FOV_Y = 45 * Math.PI / 180;
+const CAM_ELEVATION = 62 * Math.PI / 180;  // high, looking down on the ecliptic — but not flat
+const CAM_COMPOSE_ANGLE = 135 * Math.PI / 180; // active body sits down-right of frame centre
+const TARGET_BIAS = 0.55;   // settled look-at = TARGET_BIAS × (active body's scene position)
+const FIT_MARGIN = 1.14;    // slack around the outermost orbit
+const DOLLY_NEAR = 0.006;   // scene units — camera sits right beside the body at sysT = 0
 
 // ── createSystemView ──────────────────────────────────────────────────────────
 
@@ -199,20 +200,11 @@ export function createSystemView({ registry, helioPos, helioEcl, getJd, onEnterB
   resize();
 
   // ── Camera state ─────────────────────────────────────────────────────────────
-  // Azimuth around ecliptic Z (yaw), elevation above the plane (pitch).
-  // Default: ~25° above ecliptic, slight azimuth for visual interest.
-  let azimuth   = -0.4;                      // rad
-  let elevation = 25 * Math.PI / 180;        // rad — ~25° above ecliptic
-  let dolly     = 1.6;                       // camera distance from target (scene units)
-
-  // Off-centre target: shift camera target in ecliptic X so the Sun appears at ~35%
-  // from left. In scene units (PLOT_R=1.0): shift target by +0.20 in X so eye is
-  // pushed right relative to the Sun, placing the Sun toward the left.
-  const CAM_TARGET_X = 0.20;
-  const CAM_TARGET_Y = 0.0;
-  const CAM_TARGET_Z = 0.0;
-
-  const FOV_Y = 45 * Math.PI / 180;
+  // The base azimuth/elevation are re-composed from the active body every time we
+  // leave the globe (sysT ≈ 0); dragging accumulates a delta on top.
+  let baseAzimuth = 0;
+  let azimuthUser = 0;
+  let elevation   = CAM_ELEVATION;
 
   // ── Active body tracking ──────────────────────────────────────────────────────
   let activeId = 'earth';
@@ -229,168 +221,260 @@ export function createSystemView({ registry, helioPos, helioEcl, getJd, onEnterB
     canvas.style.pointerEvents = 'none';
   }
 
-  // ── NDC → pixel ──────────────────────────────────────────────────────────────
-  function ndcToPixel(ndcX, ndcY, W, H) {
-    return [
-      (ndcX * 0.5 + 0.5) * W,
-      (1 - (ndcY * 0.5 + 0.5)) * H,
-    ];
-  }
-
-  // Project a scene-space [x,y,z] (already compressed) to canvas pixel + depth, or null.
-  function projectScene(sx, sy, sz, cam, W, H) {
-    const aspect = W / H;
-    const r = cam.project(sx, sy, sz, aspect, FOV_Y);
-    if (!r) return null;
-    const [px, py] = ndcToPixel(r[0], r[1], W, H);
-    return [px, py, r[2]]; // z = depth
-  }
-
   // ── Hit testing ──────────────────────────────────────────────────────────────
-  const bodyPositions = new Map(); // id → [px, py]
+  // Both the dot AND its text label are hit-testable — the dots alone are far too
+  // small to aim at. Rectangles are recorded during draw().
+  const hitTargets = new Map(); // id → { px, py, dotR, x1, y1, x2, y2 }
+  const LABEL_PAD = 7;
+  let hoverId = null;
 
   function hitTest(px, py) {
-    let bestId = null, bestDist = 20;
-    for (const [id, [bx, by]] of bodyPositions) {
-      const d = Math.hypot(px - bx, py - by);
-      if (d < bestDist) { bestDist = d; bestId = id; }
+    let bestId = null, bestScore = Infinity;
+    for (const [id, t] of hitTargets) {
+      const inLabel = px >= t.x1 - LABEL_PAD && px <= t.x2 + LABEL_PAD
+                   && py >= t.y1 - LABEL_PAD && py <= t.y2 + LABEL_PAD;
+      const dDot = Math.hypot(px - t.px, py - t.py);
+      const dotHit = dDot <= Math.max(14, t.dotR + 9);
+      if (!inLabel && !dotHit) continue;
+      const score = inLabel ? 0 : dDot;
+      if (score < bestScore) { bestScore = score; bestId = id; }
     }
     return bestId;
   }
 
-  // ── Drag (camera orbit) ───────────────────────────────────────────────────────
-  let _ptrDown = false, _ptrX = 0, _ptrY = 0;
+  // ── Pointer: drag-vs-click discrimination ─────────────────────────────────────
+  // A press that moves more than DRAG_SLOP px, or is held longer than CLICK_MS, is a
+  // camera rotate and never enters a body. Anything shorter and stiller is a click.
+  const DRAG_SLOP = 5;   // px
+  const CLICK_MS  = 450;
+  let _ptrDown = false, _dragging = false;
+  let _downX = 0, _downY = 0, _downT = 0, _ptrX = 0, _ptrY = 0;
 
   function onPointerDown(e) {
     _ptrDown = true;
-    _ptrX = e.clientX ?? e.touches?.[0]?.clientX ?? 0;
-    _ptrY = e.clientY ?? e.touches?.[0]?.clientY ?? 0;
+    _dragging = false;
+    _downX = _ptrX = e.clientX ?? e.touches?.[0]?.clientX ?? 0;
+    _downY = _ptrY = e.clientY ?? e.touches?.[0]?.clientY ?? 0;
+    _downT = performance.now();
   }
   function onPointerMove(e) {
-    if (!_ptrDown) return;
     const x = e.clientX ?? e.touches?.[0]?.clientX ?? 0;
     const y = e.clientY ?? e.touches?.[0]?.clientY ?? 0;
-    const dx = x - _ptrX, dy = y - _ptrY;
+    if (!_ptrDown) { hoverId = hitTest(x, y); return; }
+    if (!_dragging && Math.hypot(x - _downX, y - _downY) > DRAG_SLOP) _dragging = true;
+    if (_dragging) {
+      azimuthUser += (x - _ptrX) * 0.007;
+      elevation = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05,
+                    elevation - (y - _ptrY) * 0.005));
+      hoverId = null;
+    }
     _ptrX = x; _ptrY = y;
-    azimuth   += dx * 0.007;
-    elevation  = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05,
-                   elevation - dy * 0.005));
   }
-  function onPointerUp() { _ptrDown = false; }
-
-  function onWheel(e) {
-    // Dolly camera in/out within the scene. Returns current dolly (caller does NOT use
-    // this to control altitude — that's driven by explore.js wheel handler directly).
-    const factor = Math.pow(0.92, e.deltaY / 100);
-    dolly = Math.max(0.5, Math.min(5.0, dolly * factor));
-    return dolly;
+  function onPointerUp(e) {
+    if (!_ptrDown) return;
+    const wasDrag = _dragging;
+    const held = performance.now() - _downT;
+    _ptrDown = false; _dragging = false;
+    if (wasDrag || held > CLICK_MS) return;
+    const x = e?.clientX ?? _ptrX, y = e?.clientY ?? _ptrY;
+    const hit = hitTest(x, y);
+    if (hit && hit !== activeId) onEnterBody(hit);
   }
 
   // ── Orbit path building ───────────────────────────────────────────────────────
-  // Moons orbit too close to their parent to be visible at solar-system scale; skip.
-  const MOON_IDS = new Set(['moon', 'charon', 'enceladus']);
-
   function buildOrbitPath(bodyId, jd) {
-    if (MOON_IDS.has(bodyId)) return null;
-    const period = ORBIT_PERIOD_DAYS[bodyId];
+    const period = orbitPeriodDays(bodyId);
     if (!period) return null;
-
-    // Test that helioEcl works for this body (only defined for planets in ELEMENTS).
     try { helioEcl(bodyId, jd); } catch (_) { return null; }
 
     const points = [];
+    let maxR = 0;
     for (let k = 0; k < PATH_N; k++) {
       const t = jd + (k / PATH_N) * period;
-      try {
-        const [x, y, z] = helioEcl(bodyId, t);
-        const rAU = Math.hypot(x, y, z);
-        if (rAU < 1e-12) { points.push([0, 0, 0]); continue; }
-        const dr = compressAU(rAU) * PLOT_R;
-        points.push([(x/rAU)*dr, (y/rAU)*dr, (z/rAU)*dr]);
-      } catch (_) { break; }
+      const [x, y, z] = helioEcl(bodyId, t);
+      const rAU = Math.hypot(x, y, z);
+      if (rAU < 1e-12) { points.push([0, 0, 0]); continue; }
+      const dr = compressAU(rAU) * PLOT_R;
+      points.push([(x/rAU)*dr, (y/rAU)*dr, (z/rAU)*dr]);
+      if (dr > maxR) maxR = dr;
     }
-    return points.length >= 3 ? points : null;
+    return points.length >= 3 ? { points, maxR } : null;
   }
 
   function getOrbitPath(bodyId, jd) {
     const cached = PATH_CACHE.get(bodyId);
-    if (cached && Math.abs(jd - cached.jdBase) < PATH_RECOMPUTE_INTERVAL) {
-      return cached.points3D;
+    if (cached && Math.abs(jd - cached.jdBase) < PATH_RECOMPUTE_INTERVAL) return cached.path;
+    const path = buildOrbitPath(bodyId, jd);
+    PATH_CACHE.set(bodyId, { jdBase: jd, path });
+    return path;
+  }
+
+  // Ids whose heliocentric orbit we trace: every registry body except the Sun, with
+  // satellites replaced by their parent (a moon's own orbit is sub-pixel here).
+  const PATH_IDS = (() => {
+    const seen = new Map();
+    for (const b of registry) {
+      if (b.id === 'sun') continue;
+      const id = MOON_PARENT[b.id] ?? b.id;
+      if (!seen.has(id)) seen.set(id, b.color ?? '#888');
     }
-    const pts = buildOrbitPath(bodyId, jd);
-    if (pts) PATH_CACHE.set(bodyId, { jdBase: jd, points3D: pts });
-    return pts;
+    return [...seen];
+  })();
+
+  // ── Scene → pixel ─────────────────────────────────────────────────────────────
+  const NEAR_EPS = 1e-5;
+
+  function makeProjector(cam, W, H) {
+    const tanY = Math.tan(FOV_Y / 2);
+    const tanX = tanY * (W / H);
+    return (v) => [
+      ((v[0] / (v[2] * tanX)) * 0.5 + 0.5) * W,
+      (1 - ((v[1] / (v[2] * tanY)) * 0.5 + 0.5)) * H,
+    ];
   }
 
   // ── Draw ──────────────────────────────────────────────────────────────────────
-  function draw(jd) {
+  /**
+   * @param {number} jd   — Julian date
+   * @param {number} sysT — 0 = at the active body (globe fills the screen), 1 = whole system framed
+   */
+  function draw(jd, sysT = 1) {
     const W = canvas.width, H = canvas.height;
+    const aspect = W / H;
+    const tanY = Math.tan(FOV_Y / 2);
+    const tanX = tanY * aspect;
     ctx.clearRect(0, 0, W, H);
 
-    const cam = makePerspCamera(azimuth, elevation, dolly, CAM_TARGET_X, CAM_TARGET_Y, CAM_TARGET_Z);
-
-    // ── 1. Starfield ─────────────────────────────────────────────────────────
-    for (const st of _stars) {
-      ctx.beginPath();
-      ctx.arc(st.nx * W, st.ny * H, st.r, 0, Math.PI * 2);
-      ctx.fillStyle = `rgba(255,255,255,${st.a})`;
-      ctx.fill();
-    }
-
-    // ── 2. Orbit paths ────────────────────────────────────────────────────────
-    for (const b of registry) {
-      if (b.id === 'sun' || MOON_IDS.has(b.id)) continue;
-      const pts = getOrbitPath(b.id, jd);
-      if (!pts || pts.length < 3) continue;
-
-      ctx.beginPath();
-      let started = false;
-      for (let k = 0; k <= pts.length; k++) {
-        const [sx, sy, sz] = pts[k % pts.length];
-        const p = projectScene(sx, sy, sz, cam, W, H);
-        if (!p) { started = false; continue; }
-        if (!started) { ctx.moveTo(p[0], p[1]); started = true; }
-        else ctx.lineTo(p[0], p[1]);
-      }
-      // Don't closePath if some points were behind camera (avoids stray lines).
-      ctx.strokeStyle = `${b.color}28`;
-      ctx.lineWidth = 0.7;
-      ctx.stroke();
-    }
-
-    // ── 3. Compute body scene positions ───────────────────────────────────────
-    bodyPositions.clear();
-    // Map body id → scene [sx, sy, sz] for dot rendering.
+    // ── 1. Body scene positions + scene extent ────────────────────────────────
     const bodyScenePos = new Map();
-
+    let sceneMaxR = 0;
     for (const b of registry) {
       let auPos;
       try { auPos = helioPos(b.id, jd); } catch (_) { continue; }
-
       const rAU = Math.hypot(auPos[0], auPos[1], auPos[2]);
-      let sx, sy, sz;
-      if (rAU < 1e-12) {
-        sx = 0; sy = 0; sz = 0; // Sun at origin
-      } else {
+      let sx = 0, sy = 0, sz = 0;
+      if (rAU >= 1e-12) {
         const dr = compressAU(rAU) * PLOT_R;
         sx = (auPos[0] / rAU) * dr;
         sy = (auPos[1] / rAU) * dr;
         sz = (auPos[2] / rAU) * dr;
       }
-
-      // Moon small 3D offset so they don't perfectly coincide with parent.
       const off = MOON_SCENE_OFFSETS[b.id];
       if (off) { sx += off[0]; sy += off[1]; sz += off[2]; }
-
       bodyScenePos.set(b.id, [sx, sy, sz]);
-      const p = projectScene(sx, sy, sz, cam, W, H);
-      if (p) bodyPositions.set(b.id, [p[0], p[1]]);
+      sceneMaxR = Math.max(sceneMaxR, Math.hypot(sx, sy, sz));
     }
 
-    // ── 4. Sun glow (before other bodies so dots overdraw it) ─────────────────
+    const paths = [];
+    for (const [id, color] of PATH_IDS) {
+      const p = getOrbitPath(id, jd);
+      if (!p) continue;
+      paths.push({ color, points: p.points });
+      sceneMaxR = Math.max(sceneMaxR, p.maxR);
+    }
+
+    // ── 2. Camera: continuous zoom-out from the active body ───────────────────
+    // Recompose the framing whenever we're back at the globe, so each departure
+    // starts from a clean, deliberate composition.
+    const actPos = bodyScenePos.get(activeId) ?? [0, 0, 0];
+    if (sysT < 0.02) {
+      baseAzimuth = Math.atan2(actPos[1], actPos[0]) - CAM_COMPOSE_ANGLE;
+      azimuthUser = 0;
+      elevation = CAM_ELEVATION;
+    }
+    const azimuth = baseAzimuth + azimuthUser;
+
+    // Settled target: biased toward the body we left, so the Sun sits off-centre and
+    // you keep your sense of place. The fit distance is computed for THAT target so
+    // the outermost orbit still clears the frame edges.
+    const fitTarget = [actPos[0] * TARGET_BIAS, actPos[1] * TARGET_BIAS, actPos[2] * TARGET_BIAS];
+    const axes = makePerspCamera(azimuth, elevation, 1, 0, 0, 0);
+    const offR = fitTarget[0]*axes.right[0] + fitTarget[1]*axes.right[1] + fitTarget[2]*axes.right[2];
+    const offU = fitTarget[0]*axes.up[0]    + fitTarget[1]*axes.up[1]    + fitTarget[2]*axes.up[2];
+    const fitDolly = sceneMaxR + FIT_MARGIN * Math.max(
+      (Math.abs(offR) + sceneMaxR) / tanX,
+      (Math.abs(offU) + sceneMaxR) / tanY,
+    );
+
+    // Dolly interpolates in LOG space (perceptually uniform zoom) with an ease-in
+    // curve → the pull-back visibly accelerates. Target slides late so the body stays
+    // centred while the globe is still the thing you're looking at.
+    const zoom = sysT * sysT * (3 - 2 * sysT) * 0.35 + sysT * sysT * sysT * 0.65;
+    const dolly = DOLLY_NEAR * Math.pow(fitDolly / DOLLY_NEAR, zoom);
+    const tLate = smoothstep(clamp01((sysT - 0.45) / 0.55));
+    const tx = actPos[0] + (fitTarget[0] - actPos[0]) * tLate;
+    const ty = actPos[1] + (fitTarget[1] - actPos[1]) * tLate;
+    const tz = actPos[2] + (fitTarget[2] - actPos[2]) * tLate;
+
+    const cam = makePerspCamera(azimuth, elevation, dolly, tx, ty, tz);
+    const toPixel = makeProjector(cam, W, H);
+
+    // ── 3. Starfield ──────────────────────────────────────────────────────────
+    // Fades in only at the very end of the pull-back — until then the globe canvas
+    // underneath is still supplying the stars.
+    const starA = smoothstep(clamp01((sysT - 0.75) / 0.25));
+    if (starA > 0.01) {
+      for (const st of _stars) {
+        ctx.beginPath();
+        ctx.arc(st.nx * W, st.ny * H, st.r, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255,255,255,${st.a * starA})`;
+        ctx.fill();
+      }
+    }
+
+    // ── 4. Orbit paths ────────────────────────────────────────────────────────
+    // Walked as a CLOSED loop (k wraps to 0) with near-plane clipping per segment,
+    // so a path is never left open and never sprays a chord across the frame when
+    // part of it passes behind the camera.
+    for (const path of paths) {
+      const pts = path.points;
+      const n = pts.length;
+      ctx.beginPath();
+      let prevV = cam.view(pts[n-1][0], pts[n-1][1], pts[n-1][2]);
+      let open = false;
+      for (let k = 0; k < n; k++) {
+        const v = cam.view(pts[k][0], pts[k][1], pts[k][2]);
+        const aIn = prevV[2] > NEAR_EPS, bIn = v[2] > NEAR_EPS;
+        if (aIn && bIn) {
+          if (!open) { const p = toPixel(prevV); ctx.moveTo(p[0], p[1]); open = true; }
+          const p = toPixel(v); ctx.lineTo(p[0], p[1]);
+        } else if (aIn !== bIn) {
+          const t = (NEAR_EPS - prevV[2]) / (v[2] - prevV[2]);
+          const cut = [prevV[0] + (v[0]-prevV[0])*t, prevV[1] + (v[1]-prevV[1])*t, NEAR_EPS];
+          if (aIn) {
+            if (!open) { const p = toPixel(prevV); ctx.moveTo(p[0], p[1]); open = true; }
+            const p = toPixel(cut); ctx.lineTo(p[0], p[1]);
+            open = false;
+          } else {
+            const p = toPixel(cut); ctx.moveTo(p[0], p[1]); open = true;
+            const q = toPixel(v); ctx.lineTo(q[0], q[1]);
+          }
+        } else {
+          open = false;
+        }
+        prevV = v;
+      }
+      ctx.strokeStyle = `${path.color}28`;
+      ctx.lineWidth = 0.7;
+      ctx.stroke();
+    }
+
+    // ── 5. Project bodies ─────────────────────────────────────────────────────
+    const bodyPositions = new Map();
+    for (const [id, s] of bodyScenePos) {
+      const v = cam.view(s[0], s[1], s[2]);
+      if (v[2] <= NEAR_EPS) continue;
+      bodyPositions.set(id, toPixel(v));
+    }
+
+    // The globe canvas is still drawing the active body underneath until the very end
+    // of the pull-back; suppress its dot so there is only ever one of it on screen.
+    const globeStillUp = sysT < 0.9;
+
+    // ── 6. Sun glow (before other bodies so dots overdraw it) ─────────────────
     {
       const sunP = bodyPositions.get('sun');
-      if (sunP) {
+      if (sunP && !(globeStillUp && activeId === 'sun')) {
         const [px, py] = sunP;
         const grd = ctx.createRadialGradient(px, py, 0, px, py, 28);
         grd.addColorStop(0,   'rgba(255,207,106,0.9)');
@@ -407,28 +491,23 @@ export function createSystemView({ registry, helioPos, helioEcl, getJd, onEnterB
       }
     }
 
-    // ── 5. Body dots + labels ─────────────────────────────────────────────────
+    // ── 7. Body dots + labels ─────────────────────────────────────────────────
     const labelInfos = [];
-
-    // Sun label entry
-    const sunP = bodyPositions.get('sun');
-    if (sunP) labelInfos.push({ id:'sun', px:sunP[0], py:sunP[1], dotR:10, color:'#ffcf6a', name:'SUN' });
-
     for (const b of registry) {
-      if (b.id === 'sun') continue;
       const pos = bodyPositions.get(b.id);
       if (!pos) continue;
       const [px, py] = pos;
-      const meta = BODY_META[b.id] ?? { dotR: 3.5 };
-      const dotR = meta.dotR;
+      const dotR = (BODY_META[b.id] ?? { dotR: 3.5 }).dotR;
       const color = b.color ?? '#888';
+      const hidden = globeStillUp && b.id === activeId;
 
-      ctx.beginPath();
-      ctx.arc(px, py, dotR, 0, Math.PI * 2);
-      ctx.fillStyle = color;
-      ctx.fill();
+      if (b.id !== 'sun' && !hidden) {
+        ctx.beginPath();
+        ctx.arc(px, py, dotR, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+      }
 
-      // Active body ring
       if (b.id === activeId) {
         ctx.beginPath();
         ctx.arc(px, py, dotR + 5, 0, Math.PI * 2);
@@ -439,16 +518,28 @@ export function createSystemView({ registry, helioPos, helioEcl, getJd, onEnterB
         ctx.globalAlpha = 1.0;
       }
 
+      if (b.id === hoverId) {
+        ctx.beginPath();
+        ctx.arc(px, py, dotR + 8, 0, Math.PI * 2);
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1;
+        ctx.globalAlpha = 0.5;
+        ctx.stroke();
+        ctx.globalAlpha = 1.0;
+      }
+
       labelInfos.push({ id: b.id, px, py, dotR, color, name: b.name });
     }
 
-    // Labels with simple de-collision
+    // Labels with simple de-collision. The placed rectangle doubles as the click target.
+    hitTargets.clear();
     ctx.font = '10px monospace';
     ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
     const placed = [];
 
     for (const info of labelInfos) {
-      const textW = info.name.length * 6 + 4;
+      const textW = ctx.measureText(info.name).width;
       const labelX = info.px + info.dotR + 5;
       let labelY = info.py + 4;
 
@@ -459,12 +550,19 @@ export function createSystemView({ registry, helioPos, helioEcl, getJd, onEnterB
           if (yOverlap) labelY = p.y2 + 13;
         }
       }
-      placed.push({ x1: labelX, y1: labelY - 10, x2: labelX + textW, y2: labelY });
-      ctx.fillStyle = info.color + 'cc';
+      const rect = { x1: labelX, y1: labelY - 10, x2: labelX + textW, y2: labelY };
+      placed.push(rect);
+      const hovered = info.id === hoverId;
+      if (hovered) {
+        ctx.fillStyle = 'rgba(255,255,255,0.10)';
+        ctx.fillRect(rect.x1 - 4, rect.y1 - 3, textW + 8, 16);
+      }
+      ctx.fillStyle = info.color + (hovered ? 'ff' : 'cc');
       ctx.fillText(info.name, labelX, labelY);
+      hitTargets.set(info.id, { px: info.px, py: info.py, dotR: info.dotR, ...rect });
     }
 
-    // ── 6. Active body crosshair ──────────────────────────────────────────────
+    // ── 8. Active body crosshair ──────────────────────────────────────────────
     const activePt = bodyPositions.get(activeId);
     if (activePt) {
       const [ax, ay] = activePt;
@@ -476,7 +574,7 @@ export function createSystemView({ registry, helioPos, helioEcl, getJd, onEnterB
       ctx.setLineDash([]);
     }
 
-    // ── 7. Caption ────────────────────────────────────────────────────────────
+    // ── 9. Caption ────────────────────────────────────────────────────────────
     ctx.textAlign = 'left';
     ctx.font = '10px monospace';
     ctx.fillStyle = 'rgba(255,255,255,0.18)';
@@ -492,10 +590,10 @@ export function createSystemView({ registry, helioPos, helioEcl, getJd, onEnterB
     show,
     hide,
     draw,
-    onWheel,
     onPointerDown,
     onPointerMove,
     onPointerUp,
     hitTest,
+    isHovering: () => hoverId !== null,
   };
 }
