@@ -498,8 +498,9 @@ fn fs() -> @location(0) vec4<f32> {
 // Vertex layout: @location(0) vec2<f32> latLon (degrees), @location(1) f32 minElevRaw (int16 units).
 // Uniform: mvp, color, vertScale (wu per int16 unit), ve8 (ve / VERT_EXAGGERATION), margin.
 // Radius = R_WORLD + minElevRaw * vertScale * ve8 − margin.
-// For bodies with flat terrain (Earth: minElevRaw ≈ 0), radius ≈ R_WORLD − margin ≈ OCCLUDER_R.
-// For Vesta craters, minElevRaw < 0 → shell dips with the terrain → no poke-through ever.
+// minElevRaw is the smooth occluder ENVELOPE (see computeOccluderField): a heavily averaged
+// surface that is provably at or below the terrain minimum, so the shell can never poke
+// through the ridges while still reading as one broad body rather than a trace of the waves.
 const OCCLUDER_WGSL = /* wgsl */`
 struct U { mvp : mat4x4<f32>, color : vec4<f32>, vertScale : f32, ve8 : f32, margin : f32, _pad : f32 };
 @group(0) @binding(0) var<uniform> u : U;
@@ -637,9 +638,10 @@ function buildOccluderMeshBase() {
 // Each occluder mesh vertex covers lat±halfCellLat × lon±halfCellLon degrees.
 // We sample ALL heightfield cells whose centre falls within that region and take the MIN.
 // A generous region (err larger) ensures concave corners can never poke above the mesh.
-function computeMinElevPerVertex(hf, gridW, gridH, stacks, slices) {
+export function computeMinElevPerVertex(hf, gridW, gridH, stacks, slices) {
   const vertCount = (stacks + 1) * (slices + 1);
   const minElev = new Float32Array(vertCount);
+  let rawMin = 32767, rawMax = -32768;
   // Cell sizes for the occluder mesh in degrees
   const cellLat = 180 / stacks;   // degrees per mesh row
   const cellLon = 360 / slices;   // degrees per mesh column
@@ -667,21 +669,84 @@ function computeMinElevPerVertex(hf, gridW, gridH, stacks, slices) {
         for (let c = cMin; c <= cMax; c++) {
           const v = hf[rowBase + c];
           if (v < mn) mn = v;
+          if (v > rawMax) rawMax = v;
         }
       }
-      minElev[i * (slices + 1) + j] = mn === 32767 ? 0 : mn;
+      const m = mn === 32767 ? 0 : mn;
+      if (m < rawMin) rawMin = m;
+      minElev[i * (slices + 1) + j] = m;
     }
   }
-  // The two pole rows are slices+1 COINCIDENT vertices; per-column minima would give them
+  return { minElev, rawMin, rawMax };
+}
+
+// ── Occluder envelope ────────────────────────────────────────────────────────
+// The per-cell MIN field above is a safe lower bound, but it traces every ridge: the
+// dark shell then reads as a faceted, piecewise copy of the terrain rising into the gaps
+// between the bright rings. We want a broad, heavily averaged envelope that is still
+// provably below the terrain everywhere.
+//
+// ERODE (min-filter) by OCC_ERODE cells, THEN blur with a total reach of OCC_ERODE cells.
+// Every value averaged at vertex v is a minimum taken over a window that contains v, so the
+// average is ≤ min(v): the no-poke-through guarantee survives the smoothing exactly, with no
+// global overshoot correction and no per-wave detail left. Both filters are separable
+// rectangles in mesh-index space, which keeps the containment symmetric.
+const OCC_BLUR_RADIUS = 2;  // mesh cells per box pass
+const OCC_BLUR_PASSES = 3;  // 3 boxes ≈ gaussian; total reach = RADIUS × PASSES
+const OCC_ERODE = OCC_BLUR_RADIUS * OCC_BLUR_PASSES;
+// Extra downward clearance so the ridge feet stand clear of the shell, as a fraction of the
+// body's raw elevation range. Raise it if the fill still reaches into the bumps; lower it if
+// the shell sinks so far that far-side terrain shows around the limb.
+const OCC_RELIEF_BIAS = 0.10;
+
+// Separable filter over the occluder grid: rows = stacks+1 (lat, clamped at the poles),
+// cols = slices+1 where the last column duplicates the first (lon, wraps with period cols-1).
+function occFilter(src, rows, cols, radius, reduce) {
+  const P = cols - 1;
+  const tmp = new Float32Array(src.length);
+  for (let i = 0; i < rows; i++) {
+    const base = i * cols;
+    for (let j = 0; j < P; j++) {
+      let acc = reduce.init;
+      for (let k = -radius; k <= radius; k++) acc = reduce.step(acc, src[base + (((j + k) % P) + P) % P]);
+      tmp[base + j] = reduce.done(acc, radius);
+    }
+    tmp[base + P] = tmp[base];
+  }
+  const out = new Float32Array(src.length);
+  for (let j = 0; j < cols; j++) {
+    for (let i = 0; i < rows; i++) {
+      let acc = reduce.init;
+      for (let k = -radius; k <= radius; k++) {
+        const r = Math.max(0, Math.min(rows - 1, i + k));
+        acc = reduce.step(acc, tmp[r * cols + j]);
+      }
+      out[i * cols + j] = reduce.done(acc, radius);
+    }
+  }
+  return out;
+}
+const OCC_MIN_REDUCE = { init: Infinity, step: (a, v) => (v < a ? v : a), done: (a) => a };
+const OCC_AVG_REDUCE = { init: 0, step: (a, v) => a + v, done: (a, r) => a / (2 * r + 1) };
+
+// Build the per-vertex occluder displacement (raw int16 units) for a body's heightfield.
+export function computeOccluderField(hf, gridW, gridH, stacks, slices) {
+  const { minElev, rawMin, rawMax } = computeMinElevPerVertex(hf, gridW, gridH, stacks, slices);
+  const rows = stacks + 1, cols = slices + 1;
+  let field = occFilter(minElev, rows, cols, OCC_ERODE, OCC_MIN_REDUCE);
+  for (let p = 0; p < OCC_BLUR_PASSES; p++) field = occFilter(field, rows, cols, OCC_BLUR_RADIUS, OCC_AVG_REDUCE);
+  const bias = OCC_RELIEF_BIAS * (rawMax - rawMin);
+  for (let i = 0; i < field.length; i++) field[i] -= bias;
+  // The two pole rows are slices+1 COINCIDENT vertices; per-column values would give them
   // slices+1 different radii, i.e. self-intersecting slivers that z-fight the ridge lines.
   // Share one minimum across each pole row so those triangles collapse to zero area.
   for (const i of [0, stacks]) {
-    const base = i * (slices + 1);
-    let mn = minElev[base];
-    for (let j = 1; j <= slices; j++) mn = Math.min(mn, minElev[base + j]);
-    minElev.fill(mn, base, base + slices + 1);
+    const base = i * cols;
+    let mn = field[base];
+    for (let j = 1; j <= slices; j++) mn = Math.min(mn, field[base + j]);
+    field.fill(mn, base, base + cols);
   }
-  return minElev;
+  return field;
 }
 
 export class WebGPURenderer {
@@ -1104,8 +1169,8 @@ export class WebGPURenderer {
   }
 
   // Build a renderable BODY (planet/moon): upload its int16 heightfield to a GPU storage
-  // buffer and create the compute bind group referencing it. Also computes the per-vertex
-  // minElevRaw for the displaced occluder mesh (one-off O(grid) CPU pass). Returns a body handle.
+  // buffer and create the compute bind group referencing it. Also computes the occluder
+  // envelope for the displaced occluder mesh (one-off O(grid) CPU pass). Returns a body handle.
   _makeBody(eng, wasmMemory) {
     const device = this.device;
     const hfPtr = eng.heightfield_i16_ptr();
@@ -1131,11 +1196,11 @@ export class WebGPURenderer {
       ],
     });
 
-    // Compute per-vertex minElevRaw for the displaced occluder mesh (CPU, one-off).
-    // Each mesh vertex gets the minimum int16 value over its Voronoi cell in the heightfield.
+    // Compute the per-vertex occluder displacement for the displaced mesh (CPU, one-off):
+    // per-cell minimum, eroded and blurred into a smooth envelope, then biased down.
     const gridW = eng.grid_width(), gridH = eng.grid_height();
     const hf = new Int16Array(wasmMemory.buffer, hfPtr, hfLen);
-    const minElevF32 = computeMinElevPerVertex(hf, gridW, gridH, OCC_STACKS, OCC_SLICES);
+    const minElevF32 = computeOccluderField(hf, gridW, gridH, OCC_STACKS, OCC_SLICES);
     const minElevBuf = device.createBuffer({ size: minElevF32.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(minElevBuf, 0, minElevF32);
 
@@ -1277,9 +1342,8 @@ export class WebGPURenderer {
 
     // Displaced occluder mesh — always drawn (at ALL altitudes, for every body).
     // Vertex shader computes per-vertex radius = R_WORLD + minElevRaw*vertScale*(ve/8) − MARGIN,
-    // so the shell follows the terrain's minimum and can never poke above the ring surface.
-    // For Earth (minElevRaw ≈ 0 everywhere) radius ≈ R_WORLD − MARGIN, visually identical
-    // to the old fixed sphere. For Vesta the mesh dips into craters, eliminating black speckles.
+    // where minElevRaw is the smooth envelope built in computeOccluderField: below the terrain
+    // minimum everywhere (no poke-through) but low-frequency, so it never traces the waves.
     if (this._activeMinElevBuf) {
       const OCC_MARGIN = 8.0;
       const u = this._occUScratch;
