@@ -1,99 +1,67 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ridgeline</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+  <title>ridgeline — explore</title>
   <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-    html, body {
-      width: 100%; height: 100%;
-      background: #0a0a14;
-      overflow: hidden;
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { background:#000; overflow:hidden; }
+    canvas { display:block; width:100vw; height:100vh; }
+    #info {
+      position:fixed; top:16px; left:16px;
+      font:12px/1.7 monospace; color:#555; pointer-events:none;
+      white-space: pre;
     }
-
-    #c {
-      display: block;
-      width: 100%; height: 100%;
-      touch-action: none;          /* stop scroll/pinch/zoom gestures over the canvas */
-      -webkit-user-select: none;
-      user-select: none;
+    #timectl {
+      position:fixed; bottom:20px; left:50%; transform:translateX(-50%);
+      display:flex; gap:6px; align-items:center;
     }
-
-    /* Loading / error overlay */
-    #overlay {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      gap: 10px;
-      position: fixed;
-      inset: 0;
-      background: rgba(4, 4, 10, 0.92);
-      color: #e0ddd8;
-      font-family: 'Courier New', Courier, monospace;
-      font-size: 14px;
+    .tb {
+      background:#0a0a0a; border:1px solid #2a2a2a; color:#666;
+      padding:5px 11px; cursor:pointer; font:11px monospace; border-radius:2px;
     }
-
-    #overlay p.err  { color: #c0624a; }
-    #overlay p.hint { color: #7a7870; font-size: 12px; max-width: 420px; text-align: center; }
-
-    /* HUD — bottom-left, readable at a glance */
-    #hud {
-      position: fixed;
-      bottom: 16px;
-      left: 18px;
-      font-family: 'Courier New', Courier, monospace;
-      font-size: 16px;
-      font-weight: bold;
-      color: rgba(220, 216, 208, 0.85);
-      letter-spacing: 0.08em;
-      pointer-events: none;
-      user-select: none;
+    .tb:hover { border-color:#555; color:#ccc; }
+    .tb.on { border-color:#777; color:#ddd; }
+    #nowgpu {
+      display:none; position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+      color:#666; font:14px monospace; text-align:center; line-height:2;
     }
-
-    /* Controls hint — top-right, fades after interaction */
-    #controls {
-      position: fixed;
-      top: 14px;
-      right: 16px;
-      font-family: 'Courier New', Courier, monospace;
-      font-size: 11px;
-      color: rgba(200, 196, 188, 0.35);
-      line-height: 1.7;
-      pointer-events: none;
-      user-select: none;
-      text-align: right;
-      transition: opacity 1s;
+    #loading {
+      position:fixed; inset:0; display:flex; flex-direction:column;
+      align-items:center; justify-content:center; gap:14px;
+      background:#000; color:#888; font:13px monospace; z-index:10;
     }
+    #loading .title { color:#ccc; letter-spacing:2px; }
+    #loadbar { width:220px; height:2px; background:#1a1a1a; overflow:hidden; }
+    #loadfill { height:100%; width:0%; background:#6aa3ff; transition:width .15s ease; }
+    #loadpct { color:#555; font-size:11px; }
+    #about-link {
+      position:fixed; top:16px; right:16px;
+      font:11px/1 monospace; color:#333;
+      text-decoration:none; letter-spacing:1px;
+      pointer-events:auto; z-index:20;
+    }
+    #about-link:hover { color:#555; }
   </style>
 </head>
 <body>
   <canvas id="c"></canvas>
-
-  <div id="overlay"><p>Initializing…</p></div>
-
-  <div id="hud"></div>
-
-  <div id="controls">
-    W / ↑ &nbsp;pitch down &nbsp;S / ↓ &nbsp;pitch up<br>
-    A / ← &nbsp;roll left &nbsp;&nbsp;D / → &nbsp;roll right<br>
-    Q / E &nbsp;&nbsp;yaw left / right (rudder)<br>
-    Shift &nbsp;throttle up &nbsp;Ctrl &nbsp;throttle down<br>
-    Space &nbsp;afterburner<br>
-    Mouse &nbsp;freelook (view only)<br>
-    Touch &nbsp;drag to look (view only)<br>
-    click to capture mouse
+  <div id="loading">
+    <div class="title">RIDGELINE · EXPLORE</div>
+    <div id="loadbar"><div id="loadfill"></div></div>
+    <div id="loadpct">loading terrain…</div>
   </div>
-
-  <script type="module" src="./main.js"></script>
-
-  <script>
-    // Fade controls hint after first keydown
-    window.addEventListener('keydown', () => {
-      document.getElementById('controls').style.opacity = '0';
-    }, { once: true });
-  </script>
+  <div id="info"></div>
+  <div id="timectl">
+    <button class="tb" data-s="0">⏸</button>
+    <button class="tb" data-s="1">1×</button>
+    <button class="tb" data-s="100">100×</button>
+    <button class="tb on" data-s="1000">1k×</button>
+    <button class="tb" data-s="10000">10k×</button>
+  </div>
+  <div id="nowgpu">WebGPU required for explore mode.<br>Try Chrome 113+ or Safari 18+.</div>
+  <a id="about-link" href="about.html">about</a>
+  <script type="module" src="explore.js"></script>
 </body>
 </html>
