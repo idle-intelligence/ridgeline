@@ -13,7 +13,13 @@ A **WebGPU** compute renderer, so a WebGPU-capable browser is required
 (Chrome/Edge 113+, Safari 18+; Firefox Android has no WebGPU yet).
 
 ## Run locally
-Prerequisites:
+You need:
+- a **WebGPU-capable browser** (see Requirements above)
+- a **Rust toolchain** ([rustup](https://rustup.rs)) and
+  [**wasm-pack**](https://rustwasm.github.io/wasm-pack/installer/) — `web/pkg/` is a build
+  artifact and is not committed, so the WASM core must be built before the app will load
+- **Python 3** — only if you want to serve with `http.server` or re-bake the terrain yourself
+
 ```
 # 1. Fetch the binary heightfields (hosted as a Hugging Face dataset) — ~1.2 GB for everything
 hf download idle-intelligence/ridgeline-terrain --repo-type dataset --include "*.bin" --local-dir data
@@ -67,10 +73,26 @@ elements rather than hardcoded. Distances and body sizes are compressed for legi
 ## Layout
 ```
 data/        meta.json per body + bake pipelines; *.bin heightfields fetched from HF (gitignored)
-data/bake/   Python pipelines: bake_earth.py / bake_moon.py / bake_mars.py
+data/bake/   Python pipelines: one bake_<body>.py per body, plus make_pyramid.py
 core/        Rust/WASM crate
 web/         JS shell — index.html (the explorer), about.html, renderer, static assets
 ```
+
+## Re-baking the terrain
+Each body has its own script in `data/bake/` (`bake_earth.py`, `bake_moon.py`, `bake_mars.py`,
+`bake_venus.py`, `bake_mercury.py`, `bake_sun.py`, `bake_ceres.py`, `bake_vesta.py`,
+`bake_enceladus.py`, `bake_pluto.py`, `bake_charon.py`). Each one downloads its upstream DEM into
+`data/bake/cache/` (gitignored, and large) and writes
+`data/<body>_heightfield.bin` + `data/<body>_meta.json`.
+
+```
+cd data/bake
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/python bake_earth.py      # ...and any other bodies you want
+.venv/bin/python make_pyramid.py    # REQUIRED — builds the _d4 / _d16 tiers
+```
+`make_pyramid.py` is not optional: the app fetches the `_d16` tier **first** for every body, so a
+bake without it produces an app that never paints.
 
 ## Data & license
 Elevation data is public-domain government work (NASA / USGS / NOAA) — see
