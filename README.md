@@ -3,9 +3,10 @@
 3D explorer of the solar system's solid worlds, each drawn as a globe of stacked Joy Division
 "Unknown Pleasures" latitude rings from real elevation data.
 
-[**Try the demo →**](https://idle-intelligence.github.io/ridgeline/web/)
+[**Try the demo →**](https://idle-intelligence.github.io/ridgeline/web/) ·
+[About](https://idle-intelligence.github.io/ridgeline/web/about.html)
 
-![Earth in orbit view — the globe drawn as stacked latitude ridgelines, Africa and the Indian subcontinent picked out in relief](https://huggingface.co/datasets/idle-intelligence/ridgeline-terrain/resolve/main/preview.png)
+![Earth in orbit view: the globe drawn as stacked latitude ridgelines, Africa and the Indian subcontinent picked out in relief](https://huggingface.co/datasets/idle-intelligence/ridgeline-terrain/resolve/main/preview.png)
 
 Eleven bodies: Earth, Moon, Mars, Venus, Mercury, Ceres, Vesta, Enceladus, Pluto, Charon, and the
 Sun (a magnetogram, not elevation). Orbit a body, dive to the surface, jump between bodies, or pull
@@ -15,7 +16,7 @@ out to a SYSTEM view of the whole orrery. Static site: no bundler, no server, al
 
 WebGPU, so a WebGPU-capable browser is required. Chrome and Edge have shipped it since 113; Safari
 and desktop Firefox are recent enough at time of writing. Firefox on Android exposes no
-`navigator.gpu` — the page will say so and stop. There is no fallback renderer.
+`navigator.gpu`, so the page says so and stops. There is no fallback renderer.
 
 ## Run locally
 
@@ -28,7 +29,7 @@ wasm-pack build core --target web --out-dir ../web/pkg
 python3 -m http.server 8080
 ```
 
-Then open http://localhost:8080/web/ — identical to the published demo, terrain included. No
+Then open http://localhost:8080/web/, which is identical to the published demo, terrain included. No
 terrain download is needed: tiers stream from the Hugging Face dataset and the browser caches
 each one after first fetch.
 
@@ -40,12 +41,12 @@ For offline work, or to test a re-bake before uploading it:
 hf download idle-intelligence/ridgeline-terrain --repo-type dataset --include "*.bin" --local-dir data
 ```
 
-Then open http://localhost:8080/web/?data=local — serve from the **repo root** (not `web/`) so the
+Then open http://localhost:8080/web/?data=local. Serve from the **repo root** (not `web/`) so the
 app's `../data/*` fetches resolve.
 
 `--include "*_d16.bin"` is only ~4 MB and paints every body, but it is a 16× decimation and that is
 all you will ever see: the app refines to `_d4` (64 MB) and full resolution (1.1 GB) as you descend,
-and any tier missing from disk 404s and leaves that world flat. The Sun degrades worst at `_d16` —
+and any tier missing from disk 404s and leaves that world flat. The Sun degrades worst at `_d16`:
 it is a signed magnetogram, so area-mean downsampling cancels opposite polarities and washes it out.
 
 ## Controls
@@ -64,7 +65,7 @@ a sky marker to jump to that body · time buttons speed up the clock.
 ## Ephemeris
 
 Body positions come from the JPL/Standish "Keplerian Elements for Approximate Positions of the
-Major Planets" (1800–2050, J2000 epoch), solved per frame — so the SYSTEM view shows the planets
+Major Planets" (1800–2050, J2000 epoch), solved per frame, so the SYSTEM view shows the planets
 where they actually are, and each body's spin and orbital period are derived from the same elements
 rather than hardcoded. Distances and body sizes are compressed for legibility.
 
@@ -72,7 +73,7 @@ rather than hardcoded. Distances and body sizes are compressed for legibility.
 
 - **Rust → WASM** core (`core/`): a thin heightfield holder. It decodes and owns the int16 elevation
   buffer and exposes it, its dimensions, and its vertical scale to JS.
-- **Vanilla JS + WGSL** shell (`web/`): all of the actual work — spherical world mapping, per-frame
+- **Vanilla JS + WGSL** shell (`web/`): all of the actual work: spherical world mapping, per-frame
   cull/LOD, ridgeline geometry in a WebGPU compute pass, camera, ephemeris, render loop, input.
 - **Python** offline bakes (`data/bake/`): published government DEMs → compact binary heightfields
   and meta.
@@ -83,7 +84,7 @@ rather than hardcoded. Distances and body sizes are compressed for legibility.
 data/        meta.json per body + bake pipelines; *.bin heightfields fetched from HF (gitignored)
 data/bake/   Python pipelines: one bake_<body>.py per body, plus make_pyramid.py
 core/        Rust/WASM crate
-web/         JS shell — index.html (the explorer), about.html, renderer, static assets
+web/         JS shell: index.html (the explorer), about.html, renderer, static assets
 ```
 
 ## Re-baking the terrain
@@ -98,7 +99,7 @@ Each body has its own script in `data/bake/` (`bake_earth.py`, `bake_moon.py`, `
 cd data/bake
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python bake_earth.py      # ...and any other bodies you want
-.venv/bin/python make_pyramid.py    # REQUIRED — builds the _d4 / _d16 tiers
+.venv/bin/python make_pyramid.py    # REQUIRED: builds the _d4 / _d16 tiers
 ```
 
 `make_pyramid.py` is not optional: the app fetches the `_d16` tier **first** for every body, so a
@@ -108,7 +109,7 @@ after a re-bake, or the change will be invisible at altitude.
 ## Deploying
 
 `./deploy-gh-pages.sh` builds the WASM and publishes `web/` to the `gh-pages` branch. Terrain is
-never deployed — every build streams it from the HF dataset.
+never deployed; every build streams it from the HF dataset.
 
 ## Branches
 
@@ -116,13 +117,13 @@ never deployed — every build streams it from the HF dataset.
 the Earth globe), parked but working. Nothing on `flight` feeds into `main`.
 
 `docs/` is a research log from along the way (WebGPU feasibility, perf traces, flight physics). It
-is dated and describes the earlier architecture in places — a record, not maintained documentation.
+is dated and describes the earlier architecture in places. A record, not maintained documentation.
 
 ## Data & license
 
 Elevation data comes from NASA / USGS / NOAA / DLR / ESA sources, public domain or freely
-redistributable — every source and its terms are listed in
-[`data/ATTRIBUTION.md`](data/ATTRIBUTION.md). Code is MIT — see [`LICENSE`](LICENSE). The large
+redistributable. Every source and its terms are listed in
+[`data/ATTRIBUTION.md`](data/ATTRIBUTION.md). Code is MIT, see [`LICENSE`](LICENSE). The large
 `data/*.bin` blobs live in a
 [Hugging Face dataset](https://huggingface.co/datasets/idle-intelligence/ridgeline-terrain), not in
 this repo; the app caches them in-browser via the Cache API after first download.
