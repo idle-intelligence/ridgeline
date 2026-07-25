@@ -43,15 +43,18 @@ click a sky marker to jump to that body · time buttons speed up the clock.
   altitude-based LOD keeps the whole globe cheap from orbit yet detailed up close.
 - Vertical relief is exaggerated (tuned per body) so mountains read on a globe.
 
-## Heads up
-Sky markers and the bodies' motion are **illustrative** — they show that other worlds exist and
-roughly how fast each one spins/orbits, but they are **not a real ephemeris**: the planets are not
-in their true positions relative to each other.
+## Ephemeris
+Body positions come from the JPL/Standish "Keplerian Elements for Approximate Positions of the
+Major Planets" (1800–2050, J2000 epoch), solved per frame — so the SYSTEM view shows the planets
+where they actually are, and each body's spin and orbital period are derived from the same
+elements rather than hardcoded. Distances and body sizes are compressed for legibility.
 
 ## Stack
-- **Rust → WASM** core (`core/`): spherical world mapping, heightfield ownership, per-frame
-  cull/LOD. `wasm-pack build --target web`.
-- **Vanilla JS** shell (`web/`): WebGPU compute renderer (ridgeline geometry generated in WGSL),
+- **Rust → WASM** core (`core/`): a thin heightfield holder — it decodes and owns the int16
+  elevation buffer and exposes it (plus its dimensions and vertical scale) to JS.
+  `wasm-pack build --target web`.
+- **Vanilla JS + WGSL** shell (`web/`): all of the actual work — spherical world mapping,
+  per-frame cull/LOD, ridgeline geometry generation in a WebGPU compute pass, camera, ephemeris,
   render loop, input. No bundler, static assets only.
 - **Python** offline bakes (`data/bake/`): public-domain government DEMs → compact binary
   heightfields + meta.
