@@ -945,11 +945,13 @@ async function main() {
     if (systemView) {
       systemView.setActive(active.id);
       if (orreryOpacity > 0) {
-        // Always make the canvas visible for rendering, but only enable pointer events
-        // once we're >50% system so globe drag still works during the fade.
+        // The overlay must stay pointer-events:none — it has NO listeners of its own; all
+        // input (drag/wheel/click) is handled by the globe-canvas + window/document
+        // listeners, which route to the system view by sysT. If the overlay captured
+        // pointers it swallowed those events and the orrery froze (no rotate, no zoom-back).
         canvas.style.display = 'block';
         systemView.canvas.style.display = 'block';
-        systemView.canvas.style.pointerEvents = sysT > 0.5 ? 'auto' : 'none';
+        systemView.canvas.style.pointerEvents = 'none';
         systemView.canvas.style.opacity = String(orreryOpacity);
         systemView.draw(jd);
       } else {
