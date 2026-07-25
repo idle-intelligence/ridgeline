@@ -1004,6 +1004,9 @@ export class WebGPURenderer {
   resize(w, h, cssH = h) {
     if (w === 0 || h === 0) return;
     this.cssHeight = cssH;
+    // Mobile browsers fire resize repeatedly during address-bar collapse and
+    // orientation change; without this each one orphaned a full-canvas depth texture.
+    this.depthTex?.destroy();
     this.depthTex = this.device.createTexture({
       size: [w, h], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT,
     });

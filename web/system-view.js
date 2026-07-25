@@ -189,7 +189,7 @@ export function createSystemView({ registry, helioPos, helioEcl, onEnterBody }) 
   const canvas = document.createElement('canvas');
   canvas.id = 'sys';
   canvas.style.cssText = 'position:fixed;inset:0;display:none;opacity:0;z-index:8;'
-    + 'width:100vw;height:100vh;pointer-events:none;';
+    + 'width:100vw;height:100vh;height:100dvh;pointer-events:none;';
   document.body.appendChild(canvas);
   const ctx = canvas.getContext('2d');
 
