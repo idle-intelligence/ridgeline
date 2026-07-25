@@ -1,0 +1,31 @@
+{
+  "name": "ridgeline-core",
+  "type": "module",
+  "collaborators": [
+    "ilnmtlbnm"
+  ],
+  "description": "Heightfield container for ridgeline, a solar-system globe explorer: decodes and owns the int16 elevation buffer for the JS/WGSL shell (Rust → WASM).",
+  "version": "0.1.0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/idle-intelligence/ridgeline"
+  },
+  "files": [
+    "ridgeline_core_bg.wasm",
+    "ridgeline_core.js",
+    "ridgeline_core.d.ts"
+  ],
+  "main": "ridgeline_core.js",
+  "types": "ridgeline_core.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ],
+  "keywords": [
+    "wasm",
+    "webgpu",
+    "heightfield",
+    "terrain",
+    "globe"
+  ]
+}
