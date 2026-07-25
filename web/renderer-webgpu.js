@@ -26,7 +26,7 @@ import {
 } from './constants.js';
 
 const R_WORLD = WORLD_RADIUS;
-const FILL_COARSEN = 3;          // per-ring fill coarsen vs lines — matches geometry.rs
+const FILL_COARSEN = 3;          // per-ring fill coarsen vs lines
 
 // ── The FLOOR field ──────────────────────────────────────────────────────────
 // ONE smooth surface per body, precomputed on tier load (see computeOccluderField), shared by
@@ -1012,7 +1012,7 @@ export class WebGPURenderer {
     });
   }
 
-  // Build the per-frame LINE ring + FILL strip schedules (CHEAP — O(rows), ports geometry.rs's
+  // Build the per-frame LINE ring + FILL strip schedules (CHEAP — O(rows), ports the old core's
   // outer loops incl. lod_boost + sub-ring factor + the near-regime fill gate). Returns
   // { ringCount, fillCount, discHalfAngle, emitFills }.
   _buildSchedule(camPos) {
@@ -1057,7 +1057,7 @@ export class WebGPURenderer {
     //   minRowStepScreen = ceil(H / max(8, maxRingsOnScreen))
     //
     // Note: the renderer has the mvp but not the FOV directly, so FOV_Y is hardcoded
-    // here to match main.js's Math.PI/4.  If the FOV ever changes, update this constant.
+    // here to match explore.js's Math.PI/4.  If the FOV ever changes, update this constant.
     const FOV_Y = Math.PI / 4;
     const MIN_PX_PER_RING = 2.0;
     const canvasH = this.cssHeight || 800;

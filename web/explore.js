@@ -12,7 +12,7 @@ import { createSystemView } from './system-view.js';
 import { createDragTap } from './dragtap.js';
 
 const R_WORLD = WORLD_RADIUS;
-const FOV_Y = Math.PI / 4;    // 45° — matches core
+const FOV_Y = Math.PI / 4;    // 45° — must match the FOV_Y in renderer-webgpu.js
 // Camera pitch off nadir: TILT_MIN (~3°) = straight down at the planet, π/2 = horizon, higher =
 // looking up into the sky. How far above the horizon you may crane is capped PER altitude mode:
 // on the SURFACE you can look up to space; in ATMO you stop at the horizon; ORBIT a bit past it.

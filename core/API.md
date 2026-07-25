@@ -1,6 +1,6 @@
 # ridgeline core ↔ web contract
 
-`core/` is a thin Rust/WASM heightfield loader. The rest of the game (physics, geometry,
+`core/` is a thin Rust/WASM heightfield loader. The rest of the explorer (camera, geometry,
 rendering, ephemeris) lives in `web/`.
 
 ## Build

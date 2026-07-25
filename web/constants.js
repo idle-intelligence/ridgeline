@@ -11,12 +11,12 @@ export const EARTH_RADIUS_M = 6_371_000.0;
 // Vertical exaggeration applied to elevation when mapping to world units.
 export const VERT_EXAGGERATION = 8.0;
 
-// LOD/cull constants — MUST match core/src/geometry.rs.
+// LOD/cull constants — consumed by the WebGPU geometry compute pass in renderer-webgpu.js.
 export const HORIZON_MARGIN = 0.04;
 export const FADE_BAND = 0.12;
 export const SIGHT_HALF_ANGLE = 1.483;
-export const POLE_GUARD_LAT = 88.0;     // polar-cap convergence guard — matches geometry.rs
-export const OCCLUDER_FOV_GATE = 0.55; // dome gate (disc regime) — matches geometry.rs
+export const POLE_GUARD_LAT = 88.0;     // polar-cap convergence guard
+export const OCCLUDER_FOV_GATE = 0.55; // dome gate (disc regime)
 
 // Palette — restrained, not neon.
 // Sky: very deep blue-black. Fill: slightly lighter, warm-tinted dark grey-blue.
