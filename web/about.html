@@ -308,17 +308,19 @@
     <section>
       <h2>How it's built</h2>
       <ul class="prose-list">
-        <li>A Rust core compiled to WebAssembly does the heavy math — mapping each grid cell
-          onto the sphere, camera and motion physics, per-frame culling and level-of-detail, and the
-          ephemeris.</li>
-        <li>The ridgeline geometry is generated every frame by WebGPU compute shaders (with a
-          WebGL2 fallback). The lines you see are built on the GPU, not stored.</li>
-        <li>No build step, no framework, no server — vanilla JavaScript static files.</li>
-        <li>The elevation data lives in a Hugging Face dataset and is fetched at runtime, then
-          cached in your browser (download-once) via the Cache API. Each body streams
-          coarse-to-fine, so the globe appears within about a second and then sharpens.</li>
-        <li>Where the other worlds sit in the sky comes from a lightweight Kepler ephemeris —
-          approximate in absolute terms, but the relative geometry and motion are real.</li>
+        <li>Everything runs in your browser. No server, no build step, no framework — vanilla
+          JavaScript static files.</li>
+        <li>The terrain is baked offline in Python into compact <code>int16</code> heightfields.
+          They live in a Hugging Face dataset, are fetched once and kept in your browser's Cache
+          API, and stream coarse-to-fine — the globe appears in about a second, then sharpens.
+          A small WebAssembly module holds the heightfield in memory for the GPU to read.</li>
+        <li>Every frame, WebGPU compute shaders map the grid onto the sphere, cull it against the
+          horizon, pick the level of detail and emit the ridgelines — on the GPU. The lines you
+          see are computed, never stored.</li>
+        <li>The camera, the Kepler ephemeris and the orrery are plain JavaScript. The ephemeris
+          is approximate in absolute terms, but the relative geometry and motion are real.</li>
+        <li>This needs a WebGPU-capable browser — Chrome/Edge 113+ or Safari 18+. There is no
+          fallback renderer; without WebGPU the page will tell you so and stop.</li>
       </ul>
     </section>
 
