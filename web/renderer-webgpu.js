@@ -1181,6 +1181,18 @@ export class WebGPURenderer {
         prev = [frow, lat, fillColStride];
         frow += fillRowStep;
       }
+      // The stepped walk stops at the last multiple of fillRowStep below H, so unless the
+      // step divides the grid exactly there is a tail band down to the south pole with no
+      // strip over it — a hole, whenever the pole is in frame. Close it.
+      if (prev && prev[0] < H - 1 && fn < MAX_FILL_ROWS) {
+        const o = fn * 32;
+        fdv.setUint32(o, prev[0], true);
+        fdv.setUint32(o + 4, H - 1, true);
+        fdv.setFloat32(o + 8, prev[1], true);
+        fdv.setFloat32(o + 12, this.latMin, true);
+        fdv.setUint32(o + 16, prev[2], true);
+        fn++;
+      }
     }
 
     this._lastRingCount = n;
