@@ -33,6 +33,7 @@ const VERT_EXAGGERATION = 8.0;
 const HORIZON_MARGIN = 0.04;
 const FADE_BAND = 0.12;
 const SIGHT_HALF_ANGLE = 1.483;
+const POLE_GUARD_LAT = 88.0;     // polar-cap convergence guard — matches geometry.rs
 const OCCLUDER_FOV_GATE = 0.55; // dome gate (disc regime) — matches geometry.rs
 const OCCLUDER_R = R_WORLD * 0.985; // dome radius — matches geometry.rs
 const FILL_COARSEN = 3;          // per-ring fill coarsen vs lines — matches geometry.rs
@@ -231,6 +232,35 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   let vh = visible_lon_half_deg(lat);
   if (vh < 0.0) { return; }
 
+  // Polar-cap guard. Near |lat| = 90 the ring's circumference collapses toward a point, so
+  // any longitude variation in the row turns into a radial sawtooth crown instead of a cap
+  // (Vesta's unconstrained north-polar DTM rows were the offender). Once the row's radial
+  // amplitude reaches the ring's own radius the ring is no longer a ring, so draw it at the
+  // row mean and let the cap converge. Bounded scan (≤512 samples), polar rings only.
+  var pole_h : f32 = 0.0;
+  var pole_flat : bool = false;
+  if (abs(lat) >= ${POLE_GUARD_LAT}) {
+    var scan = max(cam.width / 512u, stride);
+    var sum : f32 = 0.0;
+    var hmin : f32 = 1e30;
+    var hmax : f32 = -1e30;
+    var n : f32 = 0.0;
+    var sc : u32 = 0u;
+    loop {
+      if (sc >= cam.width) { break; }
+      let hs = sample_row_frac(ring.r0, ring.frac, sc);
+      sum = sum + hs;
+      hmin = min(hmin, hs);
+      hmax = max(hmax, hs);
+      n = n + 1.0;
+      sc = sc + scan;
+    }
+    if (0.5 * (hmax - hmin) * cam.ve_ratio >= ${R_WORLD} * cos(deg2rad(lat))) {
+      pole_flat = true;
+      pole_h = sum / n;
+    }
+  }
+
   let lon_span = cam.lon_max - cam.lon_min;
   let window_half = vh + cam.lon_pad;
   // From far away (whole hemisphere visible) emit FULL rings — the longitude window's
@@ -277,7 +307,8 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     let c : u32 = u32(m);
 
     let lon = col_lon(c);
-    let h = sample_row_frac(ring.r0, ring.frac, c);
+    var h = sample_row_frac(ring.r0, ring.frac, c);
+    if (pole_flat) { h = pole_h; }
     let p = sphere_point_scaled(lat, lon, h);
     let s = point_strength(p);
     let vis = (s > 0.0) && in_sight(p);
@@ -641,6 +672,15 @@ function computeMinElevPerVertex(hf, gridW, gridH, stacks, slices) {
       }
       minElev[i * (slices + 1) + j] = mn === 32767 ? 0 : mn;
     }
+  }
+  // The two pole rows are slices+1 COINCIDENT vertices; per-column minima would give them
+  // slices+1 different radii, i.e. self-intersecting slivers that z-fight the ridge lines.
+  // Share one minimum across each pole row so those triangles collapse to zero area.
+  for (const i of [0, stacks]) {
+    const base = i * (slices + 1);
+    let mn = minElev[base];
+    for (let j = 1; j <= slices; j++) mn = Math.min(mn, minElev[base + j]);
+    minElev.fill(mn, base, base + slices + 1);
   }
   return minElev;
 }

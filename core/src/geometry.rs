@@ -78,6 +78,9 @@ const FADE_BAND: f32 = 0.12;
 /// ~85° half-angle (≈170° total cone) — very forgiving; the per-distance LOD is the real win.
 const SIGHT_HALF_ANGLE: f32 = 1.483; // ~85°
 
+/// Latitude beyond which `emit_ring` checks whether a ring has collapsed toward the pole.
+const POLE_GUARD_LAT: f32 = 88.0;
+
 #[derive(Default)]
 pub struct GeometryBuffers {
     pub fill_verts: Vec<f32>,
@@ -717,6 +720,29 @@ fn emit_ring(
             (((lon - hf.lon_min) / lon_span) * (hf.width - 1) as f32).round() as i64
         };
 
+        // Polar-cap guard (ported to WGSL in web/renderer-webgpu.js). Near |lat| = 90 the ring's
+        // circumference collapses toward a point, so any longitude variation in the row becomes a
+        // radial sawtooth crown instead of a cap. Once the row's radial amplitude reaches the
+        // ring's own radius the ring is no longer a ring — draw it at the row mean and let the cap
+        // converge. Bounded scan (≤512 samples), polar rings only.
+        let mut pole_h: Option<f32> = None;
+        if lat.abs() >= POLE_GUARD_LAT {
+            let scan = (hf.width / 512).max(ring_col_stride).max(1);
+            let (mut sum, mut hmin, mut hmax, mut n) = (0.0f32, f32::MAX, f32::MIN, 0.0f32);
+            let mut c = 0u32;
+            while c < hf.width {
+                let h = hf.sample_row_frac(r0, frac, c);
+                sum += h;
+                hmin = hmin.min(h);
+                hmax = hmax.max(h);
+                n += 1.0;
+                c += scan;
+            }
+            if 0.5 * (hmax - hmin) * ve >= R_WORLD * lat.to_radians().cos() {
+                pole_h = Some(sum / n);
+            }
+        }
+
         let mut run_start: Option<u32> = None;
         // Emit a single column index (already validated as within range). Returns nothing;
         // mutates the run/buffers.
@@ -727,7 +753,7 @@ fn emit_ring(
                         line_draws: &mut Vec<u32>,
                         run_start: &mut Option<u32>| {
             let lon = hf.col_lon(c);
-            let h = hf.sample_row_frac(r0, frac, c);
+            let h = pole_h.unwrap_or_else(|| hf.sample_row_frac(r0, frac, c));
             let p = Heightfield::sphere_point_scaled(lat, lon, h, ve);
             let s = point_strength(p, cam_dir, horizon_dot);
             let visible = s > 0.0 && in_sight(cam_pos, cam_fwd, p, cos_half);
