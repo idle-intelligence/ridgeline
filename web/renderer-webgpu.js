@@ -997,8 +997,13 @@ export class WebGPURenderer {
     this.resize(canvas.width, canvas.height);
   }
 
-  resize(w, h) {
+  // w/h are DEVICE pixels (must match the swapchain, i.e. canvas.width/height).
+  // cssH is the canvas height in CSS px — the ring-density cap below is a
+  // perceptual threshold and stays anchored to CSS px so ring counts (and cost)
+  // do not scale with devicePixelRatio.
+  resize(w, h, cssH = h) {
     if (w === 0 || h === 0) return;
+    this.cssHeight = cssH;
     this.depthTex = this.device.createTexture({
       size: [w, h], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT,
     });
@@ -1052,7 +1057,7 @@ export class WebGPURenderer {
     // here to match main.js's Math.PI/4.  If the FOV ever changes, update this constant.
     const FOV_Y = Math.PI / 4;
     const MIN_PX_PER_RING = 2.0;
-    const canvasH = (this.canvas && this.canvas.height) ? this.canvas.height : 800;
+    const canvasH = this.cssHeight || 800;
     const discHeightPx = (Math.tan(discHalfAngle) / Math.tan(FOV_Y / 2)) * canvasH;
     const maxRingsOnScreen = discHeightPx / MIN_PX_PER_RING;
     const minRowStepScreen = Math.ceil(H / Math.max(8, maxRingsOnScreen));

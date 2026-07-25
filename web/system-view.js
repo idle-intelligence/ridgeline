@@ -193,9 +193,18 @@ export function createSystemView({ registry, helioPos, helioEcl, onEnterBody }) 
   document.body.appendChild(canvas);
   const ctx = canvas.getContext('2d');
 
+  // Backing store in DEVICE px (capped at 2), with a matching context transform so
+  // the whole draw path below — dot radii, fonts, label rects, hit targets — stays
+  // in CSS px and lines up with the clientX/clientY the pointer handlers receive.
+  const DPR_MAX = 2;
+  let cssW = window.innerWidth, cssH = window.innerHeight;
   function resize() {
-    canvas.width  = window.innerWidth;
-    canvas.height = window.innerHeight;
+    cssW = window.innerWidth;
+    cssH = window.innerHeight;
+    const dpr = Math.min(DPR_MAX, window.devicePixelRatio || 1);
+    canvas.width  = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
   window.addEventListener('resize', resize);
   resize();
@@ -346,7 +355,7 @@ export function createSystemView({ registry, helioPos, helioEcl, onEnterBody }) 
    * @param {number} sysT — 0 = at the active body (globe fills the screen), 1 = whole system framed
    */
   function draw(jd, sysT = 1) {
-    const W = canvas.width, H = canvas.height;
+    const W = cssW, H = cssH;
     const aspect = W / H;
     const tanY = Math.tan(FOV_Y / 2);
     const tanX = tanY * aspect;

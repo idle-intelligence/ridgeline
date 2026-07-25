@@ -660,10 +660,19 @@ async function main() {
   // Metas for Moon/Mars are fetched lazily on first jumpTo.
   refineBody(EARTH).catch(e => console.warn('[explore] EARTH refine:', e));
 
+  // The backing store is sized in DEVICE pixels, the canvas itself stays 100vw/100vh
+  // CSS px. Everything that talks to the pointer or to the DOM (rays, marker
+  // placement, aspect) uses cssW/cssH; only the renderer sees the device-pixel size.
+  // Capped at 2 — an uncapped 2.625 costs ~1.7× the fill rate for no visible gain.
+  const DPR_MAX = 2;
+  let cssW = window.innerWidth, cssH = window.innerHeight;
   function resize() {
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
-    renderer.resize(canvas.width, canvas.height);
+    cssW = window.innerWidth;
+    cssH = window.innerHeight;
+    const dpr = Math.min(DPR_MAX, window.devicePixelRatio || 1);
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+    renderer.resize(canvas.width, canvas.height, cssH);
   }
   window.addEventListener('resize', resize);
   resize();
@@ -756,7 +765,7 @@ async function main() {
     }
   }
 
-  const getAspect = () => canvas.width / canvas.height;
+  const getAspect = () => cssW / cssH;
   const getCam = () => computeCamera(getAspect());
 
   // ── System view ─────────────────────────────────────────────────────────────
@@ -796,7 +805,7 @@ async function main() {
     const cam = getCam();
     dragCam = cam;
     dragPlanetRot = active.view.planetRot;
-    const ray = pixelRay(x, y, canvas.width, canvas.height, getAspect(), cam.fwd, cam.up);
+    const ray = pixelRay(x, y, cssW, cssH, getAspect(), cam.fwd, cam.up);
     const hit = raySphere(cam.pos, ray, R_WORLD);
     dragActive = true;
     dragTurn = !hit;
@@ -809,7 +818,7 @@ async function main() {
     const cam = dragCam; // frozen at mousedown (no live-gpos feedback)
     const v = active.view;
     if (!dragTurn) {
-      const ray = pixelRay(x, y, canvas.width, canvas.height, getAspect(), cam.fwd, cam.up);
+      const ray = pixelRay(x, y, cssW, cssH, getAspect(), cam.fwd, cam.up);
       const hit = raySphere(cam.pos, ray, R_WORLD);
       if (hit) {
         const newDir = normalize(hit);
@@ -1050,7 +1059,7 @@ async function main() {
   function updateBodyMarker(cam, b, jd) {
     const { marker, arrow, chev, lbl, albl } = widgets.get(b.id);
     if (b === active) { marker.style.display = 'none'; arrow.style.display = 'none'; return null; }
-    const cw = canvas.width, ch = canvas.height;
+    const cw = cssW, ch = cssH;
     const owp = bodySkyMarkerPos(b.id, jd);
     const d = sub(owp, cam.pos);
     const sf = dot(d, cam.fwd), sx = dot(d, cam.right), sy = dot(d, cam.up);
