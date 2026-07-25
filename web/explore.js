@@ -90,6 +90,9 @@ const SYS_HANDOFF_START = 0.9;       // sysT at which the (now dot-sized) globe 
 // System mode state (module-level so frame loop + handlers can share it).
 const SYS_INPUT_T = 0.35; // sysT past which pointer input drives the orrery, not the globe
 let sysT = 0.0;          // 0 = globe, 1 = system; computed from altitude each frame
+// Entering a body from the orrery: glide its altitude down from system range so the
+// arrival is the zoom-out played backwards, not a cut. Cancelled by any wheel input.
+let altGlide = null;     // { body, dest } | null
 let systemView = null;   // set after main() creates it
 
 let wasmMem = null; // set in main(); backs the per-body heightfield sampling below
@@ -763,11 +766,13 @@ async function main() {
     getJd: () => toJD(simEpochMs + simTimeSec * 1000),
     onEnterBody: (bodyId) => {
       const targetBody = REGISTRY.find(b => b.id === bodyId);
-      if (targetBody) {
-        // Snap altitude just below SYS_FADE_START so we arrive at the globe.
-        active.view.altitude = SYS_FADE_START * 0.85;
-        jumpTo(targetBody).catch(e => console.warn('[explore] system onEnterBody:', e));
-      }
+      if (!targetBody) return;
+      jumpTo(targetBody).then(() => {
+        if (active !== targetBody) return;
+        const dest = targetBody.view.altitude;   // canonical framing set by resetView()
+        targetBody.view.altitude = SYS_FADE_END * 0.9;
+        altGlide = { body: targetBody, dest };
+      }).catch(e => console.warn('[explore] system onEnterBody:', e));
     },
   });
 
@@ -854,6 +859,7 @@ async function main() {
 
   canvas.addEventListener('wheel', e => {
     e.preventDefault();
+    altGlide = null; // manual zoom takes over
     const v = active.view;
     // Altitude is the single control for the whole zoom-out — it drives sysT, which drives
     // the orrery camera's pull-back. Past SYS_FADE_START the step is bigger so the retreat
@@ -920,11 +926,22 @@ async function main() {
     active._prevMode = mode;
     active.view.tilt = clampTilt(active.view.tilt, mode);
 
+    // Arrival glide: exponential ease down to the body's canonical framing (~1 s).
+    if (altGlide) {
+      if (altGlide.body !== active) altGlide = null;
+      else {
+        const v = active.view;
+        v.altitude += (altGlide.dest - v.altitude) * Math.min(1, dt * 4.5);
+        if (v.altitude < altGlide.dest * 1.02) { v.altitude = altGlide.dest; altGlide = null; }
+      }
+    }
+
     const jd = toJD(simEpochMs + simTimeSec * 1000);
 
     // ── System mode transition ─────────────────────────────────────────────
     // sysT is driven continuously by altitude via smoothstep — no easing lag.
-    // This makes the fade directly reversible: wheel-in decreases alt → sysT falls.
+    // This makes the zoom directly reversible: wheel-in decreases alt → sysT falls
+    // → the orrery camera flies back in and the globe grows again.
     {
       const alt = active.view.altitude;
       const u = Math.max(0, Math.min(1, (alt - SYS_FADE_START) / (SYS_FADE_END - SYS_FADE_START)));
