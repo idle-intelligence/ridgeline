@@ -4,7 +4,7 @@
   "description": "",
   "type": "module",
   "scripts": {
-    "test": "node --test mathutil.test.js body.test.js occluder.test.js"
+    "test": "node --test mathutil.test.js body.test.js occluder.test.js bindings.test.js"
   },
   "keywords": [],
   "author": "",
