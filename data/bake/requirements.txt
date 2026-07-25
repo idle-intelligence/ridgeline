@@ -1,6 +1,10 @@
 numpy
-srtm.py
 Pillow
+netCDF4      # bake_earth.py — reads the ETOPO NetCDF grid
+tifffile     # GeoTIFF sources: Venus, Mercury, Ceres, Vesta, Enceladus, Pluto, Charon
+astropy      # bake_sun.py — reads the HMI synoptic magnetogram FITS
 # scipy is optional: enables fast EDT nearest-valid void fill; a numpy
 # dilation fallback is used if it's absent.
 scipy
+# test-only
+pytest
