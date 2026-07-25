@@ -23,8 +23,7 @@
 //      elevation→brightness + strength shading, then the aircraft wireframe (model_matrix). All
 //      channels match the WebGL2 renderer.
 
-import { PALETTE } from './renderer.js';
-import { WORLD_RADIUS } from './constants.js';
+import { PALETTE, WORLD_RADIUS } from './constants.js';
 
 const R_WORLD = WORLD_RADIUS;
 const VERT_EXAGGERATION = 8.0;
