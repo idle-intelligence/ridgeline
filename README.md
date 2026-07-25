@@ -3,8 +3,6 @@
 3D explorer of the solar system's solid worlds, each drawn as a globe of stacked Joy Division
 "Unknown Pleasures" latitude rings from real elevation data.
 
-Part of [Idle Intelligence](https://idleintelligence.org/).
-
 [**Try the demo →**](https://idle-intelligence.github.io/ridgeline/web/)
 
 ![Earth in orbit view — the globe drawn as stacked latitude ridgelines, Africa and the Indian subcontinent picked out in relief](https://huggingface.co/datasets/idle-intelligence/ridgeline-terrain/resolve/main/preview.png)

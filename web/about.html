@@ -165,14 +165,14 @@
     </header>
 
     <p class="intro">
-      ridgeline draws ten real worlds and the Sun: Earth, the Moon, Mars, Venus,
-      Mercury, Ceres, Vesta, Enceladus, Pluto, Charon. Each one is a globe of stacked
-      Joy Division "Unknown Pleasures" ridgelines. Every ridge is real data.
-      It runs entirely in your browser.
+      ridgeline draws the solar system as ridgeline graphs. Ten solid bodies for which we
+      have real elevation data: Earth, the Moon, Mars, Venus, Mercury, Ceres, Vesta,
+      Enceladus, Pluto, Charon. For the Sun, we render magnetic field measurements.
+      Each one is a globe of stacked Joy Division "Unknown Pleasures" ridgelines.
     </p>
 
     <section>
-      <h2>The image behind it</h2>
+      <h2>Unknown Pleasures</h2>
       <p>
         The stacked-ridgeline look is the cover of Joy Division's 1979 album
         <a href="https://en.wikipedia.org/wiki/Unknown_Pleasures" target="_blank" rel="noopener">Unknown Pleasures</a>,
@@ -197,10 +197,13 @@
     </section>
 
     <section>
-      <h2>The terrain is real</h2>
-      <p>Every ridge is real elevation, or for the Sun real magnetic field. All sources are
-      public domain or freely redistributable, credited in
-      <code>data/ATTRIBUTION.md</code>.</p>
+      <h2>Data sources</h2>
+      <p>
+        Every ridge is measured elevation, or for the Sun measured magnetic field. All sources
+        are public domain or freely redistributable, credited in
+        <code>data/ATTRIBUTION.md</code>. Grids run from 2880×1440 (Sun) to 12288×6144 (Earth),
+        stored as raw <code>int16</code>.
+      </p>
       <ul>
         <li><span class="body-name">Earth</span><span class="source">NOAA ETOPO 2022</span></li>
         <li><span class="body-name">Moon</span><span class="source">NASA LRO / LOLA</span></li>
@@ -215,38 +218,43 @@
     </section>
 
     <section>
-      <h2>The Sun's height isn't height</h2>
+      <h2>The Sun is a magnetogram</h2>
       <p>
-        The Sun has no surface to measure. Its ridges are its magnetic field: a HMI synoptic
-        magnetogram covering one full solar rotation (Carrington rotation 2300), where the
-        signed field strength in gauss is mapped to elevation (a signed square-root curve,
-        capped so active-region spikes read as mountains rather than needles).
+        The Sun has no solid surface to measure. Its ridges are magnetic field strength: an
+        SDO/HMI synoptic magnetogram covering one full solar rotation (Carrington rotation
+        2300, 19 July – 15 August 2025). Signed field strength in gauss is mapped to elevation
+        through a signed square-root curve:
+      </p>
+      <span class="formula">elev = sign(B) × √(|B| ÷ 1500) × 30000, clipped to ±32000</span>
+      <p>
+        The square root spreads the quiet Sun (|B| ≈ 5 G) into visible texture while active
+        regions (|B| ≈ 1000 G) still reach near the ceiling, which is hit at about 1638 G.
       </p>
       <p>
-        Bright ridges are magnetic active regions: the sunspot belts. Because a synoptic map
-        is stitched strip by strip as the Sun turns, longitude is also time: flying across the
-        map crosses about 27 days of observation.
+        Bright ridges are magnetic active regions. Because a synoptic map is stitched strip by
+        strip from a fixed observation point (the Earth!), as the Sun turns, longitude is also
+        time: flying across the map crosses about 27 days of observation.
+      </p>
+      <p>
+        The representation doesn't necessarily mean much scientifically, but it looks cool :p
       </p>
     </section>
 
     <section>
-      <h2>Views &amp; units</h2>
+      <h2>World units and altitude bands</h2>
       <p>
-        Every world is drawn at the same size. Whatever you are orbiting, the Sun or
-        Enceladus, its sea-level sphere has a radius of 6000 <em>world units</em>, the
-        internal unit everything is measured in. A body's true radius never changes how big
-        it looks; it only sets the conversion the HUD uses to report your altitude in
-        kilometres:
+        Every body is drawn at the same size: its reference sphere has a radius of 6000
+        <em>world units</em>, the internal unit everything is measured in. A body's true
+        radius does not change how big it looks; it only sets the conversion the HUD uses to
+        report altitude in kilometres:
       </p>
       <span class="formula">altitude&nbsp;km = altitude&nbsp;wu × (body&nbsp;radius&nbsp;km ÷ 6000)</span>
       <p>
-        So one world unit is 1.06 km at Earth, 0.04 km at Vesta, and 116 km at the Sun. The
-        same move feels the same everywhere but reads very differently on the dial.
+        One world unit is 1.06 km at Earth, 0.04 km at Vesta, and 116 km at the Sun.
       </p>
       <p>
-        The altitude bands work the same way. The ceilings are fixed in world units, identical
-        for every body, so each band spans a wildly different real distance depending on where
-        you are:
+        Band ceilings are fixed in world units and identical for every body, so the same band
+        spans a different real distance depending on where you are:
       </p>
       <ul>
         <li><span class="body-name">SURFACE</span><span class="source">below 50 wu · 53 km at Earth, 2 km at Vesta</span></li>
@@ -255,83 +263,88 @@
         <li><span class="body-name">DEEP SPACE</span><span class="source">beyond that</span></li>
       </ul>
       <p>
-        The second band is named for what you are actually in: <em>ATMO</em> on the three
-        worlds with an atmosphere (Earth, Mars, Venus), <em>LOW</em> on the airless and icy
-        ones, <em>CORONA</em> at the Sun. Past deep space the view keeps zooming out into the
-        solar-system view: starting at 120,000 wu the globe shrinks in real perspective while
-        the orrery camera pulls back, until by 1,500,000 wu the body is a dot and the whole
-        system is framed. It is one continuous zoom, not a cross-fade — wheel back in and the
-        globe grows again.
+        The second band is named for what surrounds you: <em>ATMO</em> on the three bodies
+        with an atmosphere (Earth, Mars, Venus), <em>LOW</em> on the airless and icy ones,
+        <em>CORONA</em> at the Sun.
+      </p>
+      <p>
+        Past deep space the view keeps zooming out into the system view. From 120,000 wu the
+        globe shrinks in perspective while the orrery camera pulls back; by 1,500,000 wu the
+        body is a dot and the whole system is framed. This is one continuous zoom rather than
+        a cross-fade — zooming back in grows the globe again.
       </p>
 
     </section>
 
     <section>
-      <h2>Why the mountains are too big</h2>
+      <h2>Vertical exaggeration</h2>
       <p>
-        At true scale this would not be much of a picture: Everest is 8.8 km on a 6371 km
-        planet, about 8 world units of bulge on a 6000-unit sphere. Invisible. So relief is
-        exaggerated, and by how much depends on how close you are. Near the ground the
-        exaggeration is ×2.75; climbing away it eases up to ×14, which keeps continents
-        readable from orbit without turning low passes into spikes.
+        At true scale there would be nothing to see: Everest is 8.8 km on a 6371 km planet,
+        about 8 world units of bulge on a 6000-unit sphere. Relief is therefore exaggerated,
+        by an amount that depends on altitude — ×2.75 near the ground, easing to ×14 at
+        distance, which keeps continents readable from orbit without turning low passes into
+        spikes.
       </p>
       <p>
-        On top of that each body carries its own factor, tuned so its signature terrain reads
-        right. Mars is damped to 0.45, because Olympus Mons is the tallest thing in the solar system
-        and at full exaggeration it swallows the globe. Pluto is pushed to 1.4 because the
-        New Horizons terrain is the whole point of visiting. The Sun sits at 1.5.
+        Each body then applies its own factor. Mars is damped to 0.45: Olympus Mons rises
+        21 km, the tallest relief in the system, and at full exaggeration it swallows the
+        globe. Mercury sits at 0.9, Pluto at 1.4, the Sun at 1.5; the rest are 1.0.
       </p>
       <p>
-        Four bodies opt out entirely. Ceres, Vesta, Enceladus and Charon are small enough that
-        their real relief is already a visible fraction of their radius (±1% for Enceladus,
-        ±2.3% for Charon), so they are rendered at a fixed exaggeration that preserves the true
-        ratio. Vesta genuinely is that lumpy; its axes differ by 60 km.
+        Ceres, Vesta, Enceladus and Charon opt out. They are small enough that their real
+        relief is already a visible fraction of their radius — ±1.1% for Enceladus, ±2.3% for
+        Charon — so they are drawn at a fixed exaggeration preserving the true ratio. Vesta is
+        that lumpy: its semi-axes differ by about 60 km.
       </p>
 
     </section>
 
     <section>
-      <h2>The solar system is squeezed</h2>
+      <h2>Orrery scale</h2>
       <p>
-        Drawn honestly, an orrery is mostly empty: put Pluto on screen and the inner planets
-        collapse into the Sun. So only the radial distance is compressed, logarithmically:
+        Drawn to scale an orrery is mostly empty: fit Pluto on screen and the inner planets
+        collapse into the Sun. Only radial distance is compressed, logarithmically:
       </p>
       <span class="formula">display radius = log₁₀(1 + AU) ÷ log₁₀(1 + 40)</span>
       <p>
-        Zero at the Sun, 1.0 at 40 AU, roughly Pluto's orbit. Everything else is real. Each
-        body's direction is its true heliocentric position from a Kepler ephemeris, so the
-        ecliptic longitudes, the spacing order, and the tilt of Pluto's 17°-inclined orbit are
-        all correct. Only the ruler is bent.
+        Zero at the Sun, 1.0 at 40 AU, roughly Pluto's orbit. Everything else is unmodified.
+        Each body's direction is its true heliocentric position from a Kepler ephemeris
+        (JPL/Standish approximate elements, 1800–2050, J2000 epoch), so ecliptic longitudes,
+        spacing order, and the tilt of Pluto's 17°-inclined orbit are all correct. Spin and
+        orbital periods come from the same elements. Only the radial ruler is bent.
       </p>
     </section>
 
     <section>
-      <h2>How it's built</h2>
+      <h2>Architecture</h2>
       <ul class="prose-list">
-        <li>Everything runs in your browser. No server, no build step, no framework. Vanilla
+        <li>Everything runs client-side. No server, no build step, no framework — vanilla
           JavaScript static files.</li>
-        <li>The terrain is baked offline in Python into compact <code>int16</code> heightfields.
-          They live in a Hugging Face dataset, are fetched once and kept in your browser's Cache
-          API, and stream coarse-to-fine, so the globe appears in about a second and then sharpens.
-          A small WebAssembly module holds the heightfield in memory for the GPU to read.</li>
-        <li>Every frame, WebGPU compute shaders map the grid onto the sphere, cull it against the
-          horizon, pick the level of detail and emit the ridgelines on the GPU. The lines you
-          see are computed, never stored.</li>
-        <li>The camera, the Kepler ephemeris and the orrery are plain JavaScript. The ephemeris
-          is approximate in absolute terms, but the relative geometry and motion are real.</li>
-        <li>This needs a browser with WebGPU. There is no fallback renderer; without it the page
-          says so and stops.</li>
+        <li>Terrain is baked offline in Python into raw <code>int16</code> heightfields and
+          hosted as a Hugging Face dataset. Each body ships three tiers — full resolution,
+          ÷4 and ÷16 — and loads coarse-to-fine, so the globe paints from the ÷16 tier and
+          sharpens as you descend. Files are fetched once and kept in the browser's Cache API.</li>
+        <li>A small WebAssembly module (Rust) decodes and owns the heightfield in memory for
+          the GPU to read. It holds no geometry logic.</li>
+        <li>Every frame, WebGPU compute shaders map the grid onto the sphere, cull it against
+          the horizon, select level of detail, and emit the ridgelines. The lines are computed
+          per frame, never stored.</li>
+        <li>Camera, Kepler ephemeris and orrery are plain JavaScript. The ephemeris is
+          approximate in absolute terms; relative geometry and motion are correct.</li>
+        <li>WebGPU is required. There is no fallback renderer — without it the page says so
+          and stops.</li>
       </ul>
     </section>
 
     <section>
-      <h2>Credits &amp; inspiration</h2>
+      <h2>Credits</h2>
       <ul class="prose-list">
         <li>Cover art: Unknown Pleasures, Joy Division, 1979 (design: Peter Saville).</li>
         <li>Data courtesy of NASA, USGS, NOAA, DLR and ESA — public domain or freely
           redistributable, each source credited in <code>data/ATTRIBUTION.md</code>. HMI data
           courtesy NASA/SDO and the HMI science team.</li>
-        <li>Code: MIT.</li>
+        <li>Code: MIT. Source at
+          <a href="https://github.com/idle-intelligence/ridgeline" target="_blank" rel="noopener">github.com/idle-intelligence/ridgeline</a>.</li>
       </ul>
     </section>
 
