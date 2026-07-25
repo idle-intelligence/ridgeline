@@ -1,8 +1,11 @@
 # Data sources & attribution
 
-The baked elevation blobs in this directory are derived from public-domain
-government datasets. Both sources are in the **public domain**; this project
-redistributes derived (resampled, reformatted) versions of them.
+The baked elevation blobs in this directory are derived from published
+government and agency datasets. Each source is listed below with its own terms:
+the US-government products (NASA, NOAA, USGS) are public domain, and the
+DLR-produced Dawn DTMs for Ceres and Vesta are freely available for reuse with
+credit. This project redistributes derived (resampled, reformatted) versions of
+all of them.
 
 ## Earth — `heightfield.bin` / `water_mask.bin`
 
@@ -84,7 +87,8 @@ redistributes derived (resampled, reformatted) versions of them.
 - **Instrument:** Framing Camera (FC), High Altitude Mapping Orbit (HAMO).
 - **Provider:** DLR (German Aerospace Center) / USGS Astrogeology Science Center.
 - **URL:** https://planetarymaps.usgs.gov/mosaic/Ceres_Dawn_FC_HAMO_DTM_DLR_Global_60ppd_Oct2016.tif
-- **License:** Public domain (NASA / U.S. Government work; DLR data freely available).
+- **License:** Dawn mission data are NASA / U.S. Government work (public domain); this DTM
+  was produced by DLR and is freely available for reuse with credit to DLR and the Dawn team.
 - **Processing:** uint16 radius-encoded values decoded to metres above the 470000 m
   reference sphere (DN values = local radius in metres; subtract 470000); longitude
   re-centered to −180..180 (roll by half-width if source is 0..360E); resampled from
@@ -98,7 +102,8 @@ redistributes derived (resampled, reformatted) versions of them.
 - **Instrument:** Framing Camera (FC), High Altitude Mapping Orbit (HAMO).
 - **Provider:** DLR (German Aerospace Center) / USGS Astrogeology Science Center.
 - **URL:** https://planetarymaps.usgs.gov/mosaic/Vesta_Dawn_HAMO_DTM_DLR_Global_48ppd.tif
-- **License:** Public domain (NASA / U.S. Government work; DLR data freely available).
+- **License:** Dawn mission data are NASA / U.S. Government work (public domain); this DTM
+  was produced by DLR and is freely available for reuse with credit to DLR and the Dawn team.
 - **Processing:** float32 values are local radii in metres; subtract 255000 m reference
   to obtain topographic heights; longitude origin determined from GeoTIFF tiepoint
   (see `lon_convention_note` in `vesta_meta.json` — a ~150° eastward shift relative to
@@ -157,6 +162,6 @@ redistributes derived (resampled, reformatted) versions of them.
   Chasma (equatorial canyon belt) and Kubrick Mons ("mountain in a moat") are
   prominent features in the imaged hemisphere; global range ≈ −6..+5 km.
 
-To re-bake from the original sources, see `bake/README` notes in the bake
-scripts (they download the upstream files into `bake/cache/`, which is
-gitignored).
+To re-bake from the original sources, run the per-body script in `bake/` (see the
+re-baking section of the repo README). Each script downloads its upstream file
+into `bake/cache/`, which is gitignored.
