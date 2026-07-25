@@ -745,15 +745,17 @@ const OCC_MIN_REDUCE = { init: Infinity, step: (a, v) => (v < a ? v : a), done: 
 const OCC_AVG_REDUCE = { init: 0, step: (a, v) => a + v, done: (a, r) => a / (2 * r + 1) };
 
 // Build the shared floor field (raw int16 units) for a body's heightfield.
-// `smooth` skips the envelope and returns a plain sphere at the global minimum — for bodies
-// whose "elevation" is not relief (the Sun's magnetogram), where a shell shaped by the data
-// is meaningless.
+// `smooth` widens the reach by OCC_SMOOTH_MULT — for bodies whose "elevation" is not relief
+// (the Sun's magnetogram), where a shell that follows the data is meaningless. The result is
+// near-spherical but still tracks the data, so it sits far closer than a sphere pinned to the
+// global minimum, which the field's extremes drag hopelessly deep.
+const OCC_SMOOTH_MULT = 3;
 export function computeOccluderField(hf, gridW, gridH, stacks, slices, smooth = false) {
-  const { minElev, rawMin } = computeMinElevPerVertex(hf, gridW, gridH, stacks, slices);
+  const { minElev } = computeMinElevPerVertex(hf, gridW, gridH, stacks, slices);
   const rows = stacks + 1, cols = slices + 1;
-  if (smooth) return new Float32Array(minElev.length).fill(rawMin);
-  let field = occFilter(minElev, rows, cols, OCC_BLUR_RADIUS * OCC_BLUR_PASSES, OCC_MIN_REDUCE);
-  for (let p = 0; p < OCC_BLUR_PASSES; p++) field = occFilter(field, rows, cols, OCC_BLUR_RADIUS, OCC_AVG_REDUCE);
+  const blurRadius = OCC_BLUR_RADIUS * (smooth ? OCC_SMOOTH_MULT : 1);
+  let field = occFilter(minElev, rows, cols, blurRadius * OCC_BLUR_PASSES, OCC_MIN_REDUCE);
+  for (let p = 0; p < OCC_BLUR_PASSES; p++) field = occFilter(field, rows, cols, blurRadius, OCC_AVG_REDUCE);
   // The two pole rows are slices+1 COINCIDENT vertices; per-column values would give them
   // slices+1 different radii, i.e. self-intersecting slivers that z-fight the ridge lines.
   // Share one minimum across each pole row so those triangles collapse to zero area.

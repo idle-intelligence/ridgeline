@@ -44,13 +44,31 @@ test('envelope stays at or below the per-cell terrain minimum (isolated spikes)'
   assertBelowMin(hf, w, h, 'spikes');
 });
 
-test('smooth occluder is a constant sphere below every sample', () => {
+// The `smooth` variant (the Sun) is near-spherical but must still clear every ridge foot,
+// and must sit far closer than the global minimum a plain sphere would be pinned to.
+test('smooth occluder is near-spherical, below the minimum, and above the global minimum', () => {
   const w = 360, h = 180;
-  const hf = randomTerrain(w, h, 20000, 999);
+  // Large-scale structure (what the reach has to average away) plus fine noise.
+  const hf = new Int16Array(w * h);
+  for (let r = 0; r < h; r++) {
+    for (let c = 0; c < w; c++) {
+      const lat = (90 - r / (h - 1) * 180) * Math.PI / 180;
+      const lon = (-180 + c / (w - 1) * 360) * Math.PI / 180;
+      hf[r * w + c] = Math.round(15000 * Math.sin(3 * lon) * Math.cos(2 * lat));
+    }
+  }
+  const { minElev } = computeMinElevPerVertex(hf, w, h, STACKS, SLICES);
+  const rough = computeOccluderField(hf, w, h, STACKS, SLICES, false);
   const env = computeOccluderField(hf, w, h, STACKS, SLICES, true);
-  const r = env[0];
-  for (const v of env) assert.equal(v, r);
-  for (const v of hf) assert.ok(r <= v, `sphere at ${r} is above a sample at ${v}`);
+  const spread = (a) => { let lo = Infinity, hi = -Infinity; for (const v of a) { if (v < lo) lo = v; if (v > hi) hi = v; } return hi - lo; };
+  let globalMin = Infinity, sum = 0;
+  for (let i = 0; i < env.length; i++) {
+    assert.ok(env[i] <= minElev[i], `smooth field rises ${env[i] - minElev[i]} above the terrain minimum`);
+    if (minElev[i] < globalMin) globalMin = minElev[i];
+    sum += env[i];
+  }
+  assert.ok(spread(env) < 0.5 * spread(rough), `smooth field varies ${spread(env)} vs ${spread(rough)} — not flatter`);
+  assert.ok(sum / env.length > globalMin, 'smooth field should sit above the global minimum a plain sphere needs');
 });
 
 // Real bakes, when the blobs are present (they live in the HF dataset, not in git).
