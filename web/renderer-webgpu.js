@@ -512,7 +512,7 @@ fn fs() -> @location(0) vec4<f32> {
 // surface that is provably at or below the terrain minimum, so the shell can never poke
 // through the ridges while still reading as one broad body rather than a trace of the waves.
 const OCCLUDER_WGSL = /* wgsl */`
-struct U { mvp : mat4x4<f32>, color : vec4<f32>, vertScale : f32, ve8 : f32, margin : f32, _pad : f32 };
+struct U { mvp : mat4x4<f32>, color : vec4<f32>, vertScale : f32, ve8 : f32, margin : f32, _pad : f32, tint : vec4<f32> };
 @group(0) @binding(0) var<uniform> u : U;
 const PI : f32 = 3.14159265359;
 @vertex
@@ -525,7 +525,7 @@ fn vs(@location(0) latLon: vec2<f32>, @location(1) minElevRaw: f32) -> @builtin(
   return u.mvp * vec4<f32>(p, 1.0);
 }
 @fragment
-fn fs() -> @location(0) vec4<f32> { return vec4<f32>(u.color.rgb, 1.0); }
+fn fs() -> @location(0) vec4<f32> { return vec4<f32>(u.tint.rgb * u.color.rgb, 1.0); }
 `;
 
 // ── WGSL: starfield (ports STAR_VERT_SRC / STAR_FRAG_SRC) ────────────────────
@@ -957,9 +957,9 @@ export class WebGPURenderer {
     device.queue.writeBuffer(this.occLatLonBuf, 0, occBase.latLon);
     this.occIBO = device.createBuffer({ size: occBase.idx.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(this.occIBO, 0, occBase.idx);
-    // Uniform: mvp(16f) + color(4f) + vertScale(1f) + ve8(1f) + margin(1f) + pad(1f) = 24 floats
-    this.occVP = device.createBuffer({ size: 24 * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this._occUScratch = new Float32Array(24);
+    // Uniform: mvp(16f) + color(4f) + vertScale/ve8/margin/pad(4f) + tint(4f) = 28 floats
+    this.occVP = device.createBuffer({ size: 28 * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this._occUScratch = new Float32Array(28);
     this.occPipe = device.createRenderPipeline({
       layout: 'auto',
       vertex: {
@@ -1007,7 +1007,7 @@ export class WebGPURenderer {
     // Preallocated uniform scratch arrays — avoids per-frame GC pressure from small typed arrays.
     this._lineUScratch = new Float32Array(24); // mvp(16)+color(4)+flags(4) — written every frame
     this._fillUScratch = new Float32Array(24); // mvp(16)+color(4)+tint(4) — written when fills active
-    // _occUScratch (24 floats: mvp+color+vertScale+ve8+margin+pad) already created above with the occluder pipeline
+    // _occUScratch (28 floats: mvp+color+vertScale+ve8+margin+pad+tint) already created above with the occluder pipeline
     this._invVPScratch = new Float32Array(16); // star invVP — written every frame
     this._lastCpuGenMs = 0;
     this.resize(canvas.width, canvas.height);
@@ -1381,10 +1381,14 @@ export class WebGPURenderer {
       rp.draw(3);
     }
 
-    // Displaced occluder mesh — always drawn (at ALL altitudes, for every body).
-    // Vertex shader computes per-vertex radius = R_WORLD + minElevRaw*vertScale*(ve/8) − MARGIN,
-    // where minElevRaw is the smooth envelope built in computeOccluderField: below the terrain
-    // minimum everywhere (no poke-through) but low-frequency, so it never traces the waves.
+    // per-body line/fill tint — read from the CURRENT handle every frame (declared before
+    // the occluder block: occluder, fill and line uniforms all consume it).
+    const tint = this.activeBody?.tint ?? [1, 1, 1];
+
+    // Displaced occluder mesh — always drawn (at ALL altitudes, for every body). It is the
+    // CLOSED backstop: the fill strips draw the same floor field more finely on top of it,
+    // so wherever a fill strip is culled or coarsened the shell is still solid underneath.
+    // Vertex shader computes per-vertex radius = R_WORLD + minElevRaw*vertScale*(ve/8) − clearance.
     if (this._activeMinElevBuf) {
       const u = this._occUScratch;
       u.set(mvp, 0);
@@ -1393,6 +1397,7 @@ export class WebGPURenderer {
       u[21] = ve / VERT_EXAGGERATION;
       u[22] = FLOOR_CLEARANCE_WU;
       u[23] = 0.0; // pad
+      u[24] = tint[0]; u[25] = tint[1]; u[26] = tint[2]; u[27] = 1.0;
       device.queue.writeBuffer(this.occVP, 0, u);
       rp.setPipeline(this.occPipe);
       rp.setBindGroup(0, this.occBind);
@@ -1401,10 +1406,6 @@ export class WebGPURenderer {
       rp.setIndexBuffer(this.occIBO, 'uint32');
       rp.drawIndexed(this.occCount);
     }
-
-    // per-body line/fill tint — read from the CURRENT handle every frame (declared
-    // before the fill block: both fill and line uniforms consume it).
-    const tint = this.activeBody?.tint ?? [1, 1, 1];
 
     // per-ring FILL strips (near/mid regime) — terrain-following dark depth occluder
     if (emitFills && fillCount > 0) {
