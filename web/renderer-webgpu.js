@@ -701,18 +701,18 @@ export function computeMinElevPerVertex(hf, gridW, gridH, stacks, slices) {
 // between the bright rings. We want a broad, heavily averaged envelope that is still
 // provably below the terrain everywhere.
 //
-// ERODE (min-filter) by OCC_ERODE cells, THEN blur with a total reach of OCC_ERODE cells.
+// ERODE (min-filter) by the blur's total reach, THEN blur with that same reach.
 // Every value averaged at vertex v is a minimum taken over a window that contains v, so the
 // average is ≤ min(v): the no-poke-through guarantee survives the smoothing exactly, with no
 // global overshoot correction and no per-wave detail left. Both filters are separable
 // rectangles in mesh-index space, which keeps the containment symmetric.
-const OCC_BLUR_RADIUS = 2;  // mesh cells per box pass
-const OCC_BLUR_PASSES = 3;  // 3 boxes ≈ gaussian; total reach = RADIUS × PASSES
-const OCC_ERODE = OCC_BLUR_RADIUS * OCC_BLUR_PASSES;
-// Extra downward clearance so the ridge feet stand clear of the shell, as a fraction of the
-// body's raw elevation range. Raise it if the fill still reaches into the bumps; lower it if
-// the shell sinks so far that far-side terrain shows around the limb.
-const OCC_RELIEF_BIAS = 0.10;
+// Reach = RADIUS × PASSES mesh cells = 11.3° at 64 stacks: still ~16× the ring spacing, so the
+// shell is broad and waveless, but a third of the drop of the 17° reach it replaces. The reach
+// IS the dominant term in how far the dark body sits below the ridge feet — a smooth surface
+// under every local minimum in an 11° window is necessarily below the ridge feet by about the
+// relief within that window. Widen it for a smoother/lower shell, tighten it for a closer one.
+const OCC_BLUR_RADIUS = 1;  // mesh cells per box pass
+const OCC_BLUR_PASSES = 4;  // 4 boxes ≈ gaussian
 
 // Separable filter over the occluder grid: rows = stacks+1 (lat, clamped at the poles),
 // cols = slices+1 where the last column duplicates the first (lon, wraps with period cols-1).
@@ -744,19 +744,16 @@ function occFilter(src, rows, cols, radius, reduce) {
 const OCC_MIN_REDUCE = { init: Infinity, step: (a, v) => (v < a ? v : a), done: (a) => a };
 const OCC_AVG_REDUCE = { init: 0, step: (a, v) => a + v, done: (a, r) => a / (2 * r + 1) };
 
-// Build the per-vertex occluder displacement (raw int16 units) for a body's heightfield.
+// Build the shared floor field (raw int16 units) for a body's heightfield.
 // `smooth` skips the envelope and returns a plain sphere at the global minimum — for bodies
 // whose "elevation" is not relief (the Sun's magnetogram), where a shell shaped by the data
-// is meaningless. A sphere at the global minimum already clears every ridge foot, so it takes
-// no relief bias.
+// is meaningless.
 export function computeOccluderField(hf, gridW, gridH, stacks, slices, smooth = false) {
-  const { minElev, rawMin, rawMax } = computeMinElevPerVertex(hf, gridW, gridH, stacks, slices);
+  const { minElev, rawMin } = computeMinElevPerVertex(hf, gridW, gridH, stacks, slices);
   const rows = stacks + 1, cols = slices + 1;
   if (smooth) return new Float32Array(minElev.length).fill(rawMin);
-  let field = occFilter(minElev, rows, cols, OCC_ERODE, OCC_MIN_REDUCE);
+  let field = occFilter(minElev, rows, cols, OCC_BLUR_RADIUS * OCC_BLUR_PASSES, OCC_MIN_REDUCE);
   for (let p = 0; p < OCC_BLUR_PASSES; p++) field = occFilter(field, rows, cols, OCC_BLUR_RADIUS, OCC_AVG_REDUCE);
-  const bias = OCC_RELIEF_BIAS * (rawMax - rawMin);
-  for (let i = 0; i < field.length; i++) field[i] -= bias;
   // The two pole rows are slices+1 COINCIDENT vertices; per-column values would give them
   // slices+1 different radii, i.e. self-intersecting slivers that z-fight the ridge lines.
   // Share one minimum across each pole row so those triangles collapse to zero area.
