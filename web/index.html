@@ -2,19 +2,22 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+  <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
   <title>ridgeline — explore</title>
   <style>
     * { margin:0; padding:0; box-sizing:border-box; }
     body { background:#000; overflow:hidden; }
     canvas { display:block; width:100vw; height:100vh; }
     #info {
-      position:fixed; top:16px; left:16px;
+      position:fixed;
+      top:calc(16px + env(safe-area-inset-top));
+      left:calc(16px + env(safe-area-inset-left));
       font:12px/1.7 monospace; color:#555; pointer-events:none;
       white-space: pre;
     }
     #timectl {
-      position:fixed; bottom:20px; left:50%; transform:translateX(-50%);
+      position:fixed; bottom:calc(20px + env(safe-area-inset-bottom));
+      left:50%; transform:translateX(-50%);
       display:flex; gap:6px; align-items:center;
     }
     .tb {
@@ -37,7 +40,9 @@
     #loadfill { height:100%; width:0%; background:#6aa3ff; transition:width .15s ease; }
     #loadpct { color:#555; font-size:11px; }
     #about-link {
-      position:fixed; top:16px; right:16px;
+      position:fixed;
+      top:calc(16px + env(safe-area-inset-top));
+      right:calc(16px + env(safe-area-inset-right));
       font:11px/1 monospace; color:#333;
       text-decoration:none; letter-spacing:1px;
       pointer-events:auto; z-index:20;
