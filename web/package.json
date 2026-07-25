@@ -3,7 +3,6 @@
   "version": "1.0.0",
   "description": "",
   "type": "module",
-  "main": "main.js",
   "scripts": {
     "test": "node --test mathutil.test.js body.test.js"
   },
