@@ -67,7 +67,7 @@ elements rather than hardcoded. Distances and body sizes are compressed for legi
 - **Vanilla JS + WGSL** shell (`web/`): all of the actual work — spherical world mapping,
   per-frame cull/LOD, ridgeline geometry generation in a WebGPU compute pass, camera, ephemeris,
   render loop, input. No bundler, static assets only.
-- **Python** offline bakes (`data/bake/`): public-domain government DEMs → compact binary
+- **Python** offline bakes (`data/bake/`): published government DEMs → compact binary
   heightfields + meta.
 
 ## Layout
@@ -95,7 +95,8 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 bake without it produces an app that never paints.
 
 ## Data & license
-Elevation data is public-domain government work (NASA / USGS / NOAA) — see
+Elevation data comes from NASA / USGS / NOAA / DLR / ESA sources, public domain or freely
+redistributable — every source and its terms are listed in
 [`data/ATTRIBUTION.md`](data/ATTRIBUTION.md). Code is MIT — see [`LICENSE`](LICENSE).
 The large `data/*.bin` blobs live in a
 [Hugging Face dataset](https://huggingface.co/datasets/idle-intelligence/ridgeline-terrain)
