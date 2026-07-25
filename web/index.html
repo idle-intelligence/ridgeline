@@ -6,7 +6,12 @@
   <title>ridgeline — explore</title>
   <style>
     * { margin:0; padding:0; box-sizing:border-box; }
-    body { background:#000; overflow:hidden; }
+    body {
+      background:#000; overflow:hidden;
+      touch-action:none; user-select:none; -webkit-user-select:none;
+      -webkit-tap-highlight-color:transparent;
+      overscroll-behavior:none;
+    }
     canvas { display:block; width:100vw; height:100vh; }
     #info {
       position:fixed;
@@ -23,7 +28,7 @@
     .tb {
       background:#0a0a0a; border:1px solid #2a2a2a; color:#666;
       padding:5px 11px; cursor:pointer; font:11px monospace; border-radius:2px;
-      position:relative;
+      position:relative; touch-action:none; -webkit-tap-highlight-color:transparent;
     }
     /* A centred invisible overlay lifts the tap target to >=44x44 CSS px while the
        button keeps its exact drawn size. The buttons have visible chrome, so the
@@ -33,7 +38,9 @@
       transform:translate(-50%,-50%);
       width:100%; height:100%; min-width:44px; min-height:44px;
     }
-    .tb:hover { border-color:#555; color:#ccc; }
+    /* Hover only on devices that really hover — a tapped button would otherwise keep
+       a sticky hover state sitting right next to the real .on class. */
+    @media (hover: hover) { .tb:hover { border-color:#555; color:#ccc; } }
     .tb.on { border-color:#777; color:#ddd; }
     #nowgpu {
       display:none; position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
@@ -57,7 +64,7 @@
       pointer-events:auto; z-index:20;
       padding:17px; margin:-17px; /* expand the tap target to >=44x44 CSS px without enlarging the visible text */
     }
-    #about-link:hover { color:#555; }
+    @media (hover: hover) { #about-link:hover { color:#555; } }
   </style>
 </head>
 <body>

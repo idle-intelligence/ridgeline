@@ -12,6 +12,8 @@
       color:#888;
       font:14px/1.8 monospace;
       padding:60px 24px 80px;
+      overscroll-behavior:none; /* no pull-to-refresh at the top of the page */
+      -webkit-tap-highlight-color:transparent;
     }
 
     .page {
@@ -31,7 +33,7 @@
       letter-spacing:1px;
       padding:12px 0; margin:-12px 0 12px; /* tap target to >=44px tall, text unmoved */
     }
-    header .back:hover { color:#888; }
+    @media (hover: hover) { header .back:hover { color:#888; } }
 
     h1 {
       font:13px/1 monospace;
@@ -106,7 +108,7 @@
       color:#6aa3ff;
       text-decoration:none;
     }
-    a:hover { color:#8cb8ff; text-decoration:underline; }
+    @media (hover: hover) { a:hover { color:#8cb8ff; text-decoration:underline; } }
 
     .placeholder {
       color:#444;
