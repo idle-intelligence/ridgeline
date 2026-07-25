@@ -319,7 +319,7 @@
       <ul class="prose-list">
         <li>Everything runs client-side. No server, no build step, no framework — vanilla
           JavaScript static files.</li>
-        <li>Terrain is baked offline in Python into raw <code>int16</code> heightfields and
+        <li>Terrain is processed offline in Python into raw <code>int16</code> heightfields and
           hosted as a Hugging Face dataset. Each body ships three tiers — full resolution,
           ÷4 and ÷16 — and loads coarse-to-fine, so the globe paints from the ÷16 tier and
           sharpens as you descend. Files are fetched once and kept in the browser's Cache API.</li>
