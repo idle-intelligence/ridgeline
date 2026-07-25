@@ -764,7 +764,6 @@ async function main() {
     registry: REGISTRY,
     helioPos,
     helioEcl,
-    getJd: () => toJD(simEpochMs + simTimeSec * 1000),
     onEnterBody: (bodyId) => {
       const targetBody = REGISTRY.find(b => b.id === bodyId);
       if (!targetBody) return;

@@ -27,7 +27,7 @@
  * the body you left. Drag = orbit (azimuth + elevation), click = enter a body.
  *
  * API:
- *   createSystemView({ registry, helioPos, helioEcl, getJd, onEnterBody })
+ *   createSystemView({ registry, helioPos, helioEcl, onEnterBody })
  *   → { canvas, setActive, show, hide, draw(jd, sysT), onPointerDown,
  *        onPointerMove, onPointerUp, hitTest(x,y) }
  */
@@ -180,10 +180,9 @@ const DOLLY_NEAR = 0.045;   // scene units — camera sits right beside the body
  * @param {Array}    opts.registry    — Body objects (id, name, color)
  * @param {function} opts.helioPos    — helioPos(id, jd) → [x,y,z] AU heliocentric ecliptic
  * @param {function} opts.helioEcl   — helioEcl(id, jd) → [x,y,z] AU (planets only, for orbit paths)
- * @param {function} opts.getJd      — () → current Julian date
  * @param {function} opts.onEnterBody — (bodyId: string) → void
  */
-export function createSystemView({ registry, helioPos, helioEcl, getJd, onEnterBody }) {
+export function createSystemView({ registry, helioPos, helioEcl, onEnterBody }) {
   // ── Canvas setup ─────────────────────────────────────────────────────────────
   const canvas = document.createElement('canvas');
   canvas.id = 'sys';
@@ -324,7 +323,7 @@ export function createSystemView({ registry, helioPos, helioEcl, getJd, onEnterB
   // ── Scene → pixel ─────────────────────────────────────────────────────────────
   const NEAR_EPS = 1e-5;
 
-  function makeProjector(cam, W, H) {
+  function makeProjector(W, H) {
     const tanY = Math.tan(FOV_Y / 2);
     const tanX = tanY * (W / H);
     return (v) => [
@@ -440,7 +439,7 @@ export function createSystemView({ registry, helioPos, helioEcl, getJd, onEnterB
     const tz = actPos[2] + (fitTarget[2] - actPos[2]) * tLate;
 
     const cam = makePerspCamera(azimuth, elevation, dolly, tx, ty, tz);
-    const toPixel = makeProjector(cam, W, H);
+    const toPixel = makeProjector(W, H);
 
     // ── 3. Starfield ──────────────────────────────────────────────────────────
     // Fades in only at the very end of the pull-back — until then the globe canvas
