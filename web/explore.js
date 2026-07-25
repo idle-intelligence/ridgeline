@@ -242,6 +242,7 @@ const VESTA = new Body({
   hfStem: 'vesta_heightfield',
   radiusM: 262700, rotationPeriodSec: 5.342 * 3600,
   trueShape: true, color: '#cfc3aa', hasOcean: false,
+  cacheBust: 'r2', // data changed: polar rows flattened + periodic lon resample
   modes: [[50, 'SURFACE'], [1500, 'LOW'], [12000, 'ORBIT'], [Infinity, 'DEEP SPACE']],
   // spawn 30% farther: the true-shape bulge (~+15% radius) needs framing headroom
   view: { lat: 0, lon: -60, altitude: ALT_START * 1.3, tilt: TILT_START, heading: 0 }, // equatorial: spin axis vertical, potato profile visible (old -75° stared into Rheasilvia basin where occluder dominated)
