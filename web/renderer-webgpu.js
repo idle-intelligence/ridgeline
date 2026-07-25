@@ -1,26 +1,24 @@
-// WebGPU renderer for ridgeline — DEFAULT renderer when WebGPU is available (main.js selects
-// it automatically; WebGL2 `Renderer` is the fallback). Same interface as the WebGL2 renderer:
-// `resize(w,h)`, `draw(eng, wasmMemory)`.
+// WebGPU renderer for ridgeline — the ONLY renderer. There is no fallback: explore.js hard-errors
+// when `navigator.gpu` is undefined. Interface: `resize(w,h)`, `draw(eng, ...)`.
 //
-// THE WIN: the CPU per-frame geometry generation (`generate_into`, 70–200 ms in the traces,
-// 83–98% of the frame, unbounded at low altitude) is REPLACED by a WGSL compute pass. main.js
-// drives the engine with `step_physics_only(dt)` (physics + camera only, microseconds) when this
-// renderer is active, so the CPU `step` cost collapses and detail is rich at all altitudes.
+// THE WIN: per-frame ridgeline geometry generation used to run on the CPU (70–200 ms in the
+// traces, 83–98% of the frame, unbounded at low altitude). It is now a WGSL compute pass, so the
+// CPU per-frame cost collapses and detail stays rich at all altitudes.
 //
 // ARCHITECTURE (compute → indirect draw):
 //   0. Heightfield uploaded ONCE as a RAW int16 storage buffer (`heightfield_i16_ptr/_len`,
 //      ~151 MB for 12288×6144 vs ~302 MB f32 — under maxStorageBufferBindingSize with the limit
 //      bumped at device request). WGSL unpacks the i16 from i32 words and multiplies by
-//      `vert_scale()` to get world units, matching `Heightfield::sample`.
-//   1. Per frame JS computes the cheap RING SCHEDULE (O(rows), microseconds — ports geometry.rs's
+//      `vert_scale()` to get world units.
+//   1. Per frame JS computes the cheap RING SCHEDULE (O(rows), microseconds — the LOD
 //      outer loop incl. lod_boost + sub-ring factor).
-//   2. A compute pass ports `emit_ring` (LINE channel) AND `emit_fill_strip` (near-regime FILL
-//      channel) to WGSL: one invocation per descriptor sweeps its visible longitude window, ports
-//      the sphere/cull math exactly, atomic-compacts surviving verts + restart-delimited indices,
-//      and writes drawIndexedIndirect args.
-//   3. Render passes: starfield (fullscreen, ported from WebGL2), gated dark occluder DOME +
-//      compute-generated per-ring FILL strips (depth), then the bright LINE strips with the WebGL2
-//      elevation→brightness + strength shading. All channels match the WebGL2 renderer.
+//   2. A compute pass emits both channels: ring LINEs and near-regime FILL strips. One invocation
+//      per descriptor sweeps its visible longitude window, does the sphere/cull math,
+//      atomic-compacts surviving verts + restart-delimited indices, and writes
+//      drawIndexedIndirect args.
+//   3. Render passes: starfield (fullscreen), gated dark occluder DOME + compute-generated
+//      per-ring FILL strips (depth), then the bright LINE strips with the elevation→brightness
+//      + strength shading.
 
 import {
   PALETTE, WORLD_RADIUS, EARTH_RADIUS_M, VERT_EXAGGERATION,
