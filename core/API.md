@@ -1,344 +1,45 @@
-# ridgeline core ↔ web contract (AUTHORITATIVE — v1)
+# ridgeline core ↔ web contract
 
-This is the frozen seam between the Rust/WASM `core/` and the JS/WebGL2 `web/`.
-Both sides build against THIS document. If you need to change it, change it here first.
+`core/` is a thin Rust/WASM heightfield loader. The rest of the game (physics, geometry,
+rendering, ephemeris) lives in `web/`.
 
-## Build & module
-- `core/` builds with `wasm-pack build --target web --out-dir ../web/pkg --out-name ridgeline_core`.
-- Web imports: `import init, { Engine } from "./pkg/ridgeline_core.js";`
-- `web/pkg/` is gitignore'd (build artifact). Core agent does NOT commit it.
+## Build
+```
+cd core && wasm-pack build --target web --out-dir ../web/pkg
+```
+Web imports: `import init, { Engine } from "./pkg/ridgeline_core.js";`
+`web/pkg/` is gitignore'd (build artifact) — this crate does not commit it.
 
-## Coordinate system — SPHERE model (core owns world-space mapping)
-The world is a **globe of stacked latitude rings** centered at the origin. Each heightfield
-cell (row → latitude φ, col → longitude λ, elev_m) maps to a 3D point on a sphere:
-
-- `R_WORLD` = planet radius = **6000.0** world units.
-- `VERT_EXAGGERATION` = **8.0** (the BASE multiple of true scale at which heightfield
-  elevations are stored). `VERT_SCALE = (R_WORLD / EARTH_RADIUS_M) * VERT_EXAGGERATION`. At
-  1× (realistic) Everest (8849 m) ≈ 8.3 wu — a tiny bump. (The old dramatic look was ≈ 117.)
-- **Altitude-coupled vertical exaggeration (rendered relief only).** The terrain ring radii
-  are scaled per-frame by `VE(altitude)` so the planet is dramatic from space and relaxes
-  toward realistic on approach (engineering apparent-size constancy: apparent height ∝
-  rendered_height/distance ∝ VE/altitude ≈ const through the ramp):
-  `VE(alt) = clamp(VE_K · altitude_wu, VE_NEAR, VE_FAR)` with **VE_NEAR = 2.75**,
-  **VE_FAR = 14.0**, **VE_K = 0.0007**, `altitude_wu = max(|cam_pos| − R_WORLD, 0)`. The ramp
-  leaves the near clamp at ~3929 wu and saturates at the 14× cap by 20000 wu. Low cruise sits
-  at the realistic floor (2.75×), mid altitudes ramp through ~3–10×, and from orbit/space the
-  relief pops hard at the 14× cap ("scale more when far"). VE_FAR was raised 8 → 14 so terrain
-  relief reads dramatically from orbit; only the FAR end moved, so the ATMO look is unchanged.
-  This is a single smooth global radial multiplier per frame, so nothing swims (lat/lon grid
-  indices and distance-based LOD strides are unchanged). Only the rendered TERRAIN relief
-  scales; the OCCLUDER sphere stays at R_WORLD, and camera/physics/floor and all HUD/altitude/
-  speed/lat-lon plus the normalized elevation→brightness stay on the real (fixed) scale.
-- `h_wu = elev_m * VERT_SCALE`, `r = R_WORLD + VE/VERT_EXAGGERATION · h_wu` (terrain;
-  occluder uses `r = OCCLUDER_R`).
-- Cartesian (north pole = **+Y**): `x = r·cosφ·cosλ`, `y = r·sinφ`, `z = -r·cosφ·sinλ`
-  (longitude handedness flipped so EAST renders to the RIGHT with north up),
-  φ in [-90,90]°, λ in [-180,180]°. row 0 = +90° N (lat_max), col 0 = -180° W (lon_min).
-- Each grid ROW (constant latitude) is a parallel ring around the globe; sweeping λ traces
-  the ring with elevation bumps. Land bulges out, ocean (h=0) is a smooth circle at R_WORLD.
-- Horizontal planet scale: `M_PER_WU = EARTH_RADIUS_M / R_WORLD = 6371000 / 6000 ≈ 1061.8` m/wu.
+## Constants (`core/src/heightfield.rs`)
+- `R_WORLD: f32 = 6000.0` — planet radius in world units.
+- `EARTH_RADIUS_M: f32 = 6_371_000.0` — Earth radius in meters (horizontal scale reference).
+- `VERT_EXAGGERATION: f32 = 8.0` — vertical exaggeration as a multiple of true (1:1) scale.
+- `VERT_SCALE: f32 = (R_WORLD / EARTH_RADIUS_M) * VERT_EXAGGERATION` — world units per meter
+  of elevation. At 1× (realistic) Everest (8849 m) ≈ 8.3 wu.
 
 ## Construction
+```rust
+Engine::new(
+    width: u32,
+    height: u32,
+    hf_bytes: &[u8],  // raw little-endian i16 meters, row-major, row 0 = north
+    elev_max: f32,    // meters
+    lat_min: f32,
+    lat_max: f32,
+    lon_min: f32,
+    lon_max: f32,
+) -> Engine
 ```
-await init();                       // wasm-pack default init
-const eng = new Engine(             // #[wasm_bindgen(constructor)] → JS `new`, not Engine.new
-  width, height,                    // u32, from meta.json
-  heightfieldBytes,                 // Uint8Array, raw int16 LE, len = width*height*2
-  elev_min, elev_max,               // f32 (meters)
-  lat_min, lat_max, lon_min, lon_max// f32 (degrees, from meta.bbox)
-);
-// The heightfield is kept in WASM as i16 (raw meters); `sample()` multiplies by VERT_SCALE on
-// read. No water mask is loaded (sea is hidden by elevation, not a mask) — drop water_mask.bin.
-// After construction the JS caller can null its raw heightfieldBytes reference (WASM holds the copy).
-```
+Parses `hf_bytes` into an `i16` elevation grid and stores the bbox. No physics, no geometry —
+just the heightfield.
 
-## Spawn + setters (call after construction, before the first `step`)
-```
-eng.set_spawn(lat_deg, lon_deg, alt_wu, heading_deg);
-// lat_deg, lon_deg : f32 degrees — geographic spawn point.
-// alt_wu           : f32 world units above the sea-level sphere (alt_m = alt_wu * M_PER_WU).
-// heading_deg      : f32 degrees compass — 0 = north, 90 = east.
-// Places the craft cruising LEVEL at (lat,lon,alt), nose tangent on the heading, with the
-// same seeded cruise velocity + throttle + altitude-hold as the default spawn. Resets
-// freelook (look_yaw/look_pitch = 0) and regenerates geometry so the first frame is correct.
-// new() calls this with the default spawn: lat 38°N, lon 8°E, CRUISE_ALT = 250 wu, heading north.
-
-eng.set_exaggeration_override(ve);   // force a FIXED terrain vertical exaggeration.
-eng.clear_exaggeration_override();   // back to the altitude-coupled ve_for_altitude ramp.
-// When an override is set, the per-frame terrain relief uses this constant `ve` INSTEAD of
-// VE(altitude), so the player can hold a constant relief at any altitude. When unset, the
-// altitude-coupled behavior is unchanged. Only terrain relief is affected (occluder/camera/
-// physics/HUD scales are untouched), same as the altitude-coupled path.
-
-eng.set_target_agl(agl_m);           // ATMO terrain-following clearance, in VE-EXAGGERATED METERS.
-// Clearance the AGL hold maintains above the terrain DIRECTLY BELOW, expressed in the SAME
-// vertical scale the terrain is DRAWN in (VE-exaggerated meters — NOT un-exaggerated meters / wu).
-// The core converts it to wu per-frame with the live render `ve`:
-// agl_wu = agl_m · VERT_SCALE · ve/VERT_EXAGGERATION (= agl_m · ve / M_PER_WU), so the held
-// clearance is exaggerated like the ground and skims just above the visible ridges (500 exag-m ≈
-// 1.3 wu at near-surface ve). Contour hug; the craft still climbs to clear upcoming walls. Clamped
-// to [TARGET_AGL_MIN = 80, TARGET_AGL_MAX = 60000] exag-m. Default = DEFAULT_TARGET_AGL = 500
-// exag-m. Preserved across set_spawn respawns. The web ?agl=<meters> URL param passes straight
-// through (no M_PER_WU conversion). Manual pitch still overrides.
-```
-
-## Per-frame input (call before `step`)
-```
-eng.set_look(d_yaw, d_pitch);
-// d_yaw:   f32 radians, positive = look right. Accumulated; clamped ±120°.
-// d_pitch: f32 radians, positive = look up.   Accumulated; clamped ±80°.
-// Call with pointer-lock mouse deltas converted to radians each frame.
-// Affects view matrix only — flight physics use flight_orientation unchanged.
-
-eng.set_input(
-  thrust,   // f32 -1..1  throttle up/down  (ShiftLeft/Right = +1, CtrlLeft/Right = -1)
-  strafe,   // f32 -1..1  unused (pass 0)
-  lift,     // f32 -1..1  unused (pass 0)
-  pitch,    // f32 rad/s  KeyW = nose up, KeyS = nose down
-  yaw,      // f32 rad/s  KeyQ = left, KeyE = right (rudder)
-  roll,     // f32 rad/s  KeyA = left, KeyD = right
-  boost,    // f32        unused (pass 0); throttle controlled by thrust axis
-  ftl       // bool       Space-hold = afterburner; ALSO the hands-off ascent-assist:
-            //            held with no pitch/roll input → a gravity-turn climb to orbit /
-            //            escape (any steering disengages it). See docs/physics.md.
-);
-eng.step(dt); // f32 seconds — advances quaternion physics + regenerates visible geometry
-```
-Mouse drives freelook only (`set_look`); flight controls are keyboard-only.
-
-## Viewport
-- `eng.set_aspect(aspect)` — `aspect` = canvas width/height (f32). Call once after construction and on
-  every resize. Core bakes a 45° vertical-FOV perspective; without this it defaults to 16:9 and
-  non-16:9 canvases stretch. (Added during integration — projection math stays in core.)
-
-## Camera (third-person chase, free 3D around the globe)
-The camera is positioned behind and above the ship in ship-local space:
-`cam_pos = ship_pos + ship_orientation * (0, CHASE_UP=6, CHASE_BACK=28)`.
-Flight physics (`phys.position`, `phys.orientation`) are the **ship** transform; the camera
-offset is view-only.
-
-**Look framing — ATMO forward-chase ↔ ORBITAL look-down (altitude crossfade).** The camera
-LOOK direction blends by an altitude-driven `orbit_frame_weight` (smoothstep over
-`ORBIT_FRAME_BOT = ATMOSPHERE_TOP·0.5 = 750` → `ORBIT_FRAME_TOP = ATMOSPHERE_TOP = 1500` wu,
-so it reframes exactly as the craft enters ORBIT — no hard snap):
-- **ATMO (w = 0):** look along **ship-forward**, up = ship-up — the existing forward chase.
-- **ORBIT / INTERPLANETARY (w → 1):** look **toward the planet** — down the gravity axis
-  (toward globe center), tilted **~17° off nadir** toward the ship-forward tangent so the
-  **vessel rides HIGH** in the frame and **a big piece of Earth fills the lower view**;
-  screen-up = the gravity-radial (away from center, so "up" is space).
-The freelook offset (`set_look`) is applied **on top** of this blended basis (yaw about the
-look-up axis, pitch about the look-right axis). **CRITICAL:** the geometry sight-cull uses the
-SAME blended + freelook-aware forward (`cam_forward_dir`), so the hemisphere the orbital
-look-down now frames is actually generated — no culled-away planet / missing terrain.
-
-**Spawn**: ship cruising LEVEL inside the atmosphere at `CRUISE_ALT = 250` wu over the
-western/central Mediterranean (38°N, 8°E), heading NORTH toward Europe. (Configurable at
-runtime via `set_spawn` — see "Spawn + setters" above; the web layer maps URL query params
-`?lat=&lon=&alt=&heading=&ve=&agl=` onto it.) The orientation is built from a radial basis
-(up = radial, forward = north tangent), and the craft is seeded with a forward velocity
-(`CRUISE_SPEED = 450` wu/s) and a cruise throttle (`CRUISE_THROTTLE = 0.527`) whose target
-speed equals `CRUISE_SPEED`. With no thrust input the throttle holds, so from frame 1 the
-craft holds altitude and speed — no free-fall, no climb-out. Pitch down dives; pitch up +
-Shift+Space climbs to space.
-
-**Flight model** (see `docs/physics.md`): speed is **decoupled from altitude**, with **three
-modes crossfaded by altitude** (seamless, no discrete switch). Throttle sets a *target speed*
-(hard-capped at `V_CAP = 10000` wu/s, so the HUD km/h is always bounded). **ATMO** (`alt < 1500`):
-slow + dense fly-by-nose with **quadratic drag** (`IDLE 30 .. CRUISE_MAX 400`; cut throttle →
-speed bleeds in ~2–3 s). Hands-off, **AGL terrain-following** holds the craft a small clearance in
-VE-exaggerated meters (default `DEFAULT_TARGET_AGL = 500` exag-m ≈ 1.3 wu near the surface, tunable
-via `set_target_agl` / `?agl=`; converted to wu per-frame with the live render `ve` so it skims
-just above the visible exaggerated ridges) above the terrain DIRECTLY BELOW AS RENDERED — it HUGS
-THE CONTOUR (descends into valleys with the floor) and uses
-the speed-scaled forward look-ahead only for COLLISION AVOIDANCE (raising the target in time to
-clear an upcoming wall), tracked by a critically-damped radial controller. Manual pitch overrides;
-auto re-engages hands-off. **ORBIT** (`1500 .. ORBIT_TOP = 12000`): thin air, faster
-(`1000 .. 3000`), a gentle critically-damped hold keeps a **near-circular** path that's easy to
-raise/lower with pitch and easy to escape (point out + accelerate). **INTERPLANETARY**
-(`> 12000`): free Newtonian (coasts; gravity + nose-thrust) up to `V_CAP`. Per-mode caps
-crossfade ≈ 1 : 7.5 : 25. **Coordinated banking** couples roll into yaw in ATMO/ORBIT (rolling
-banks you into a turn). On re-entry a **CAPTURE ZONE** (`ATMOSPHERE_TOP` < alt < `CAPTURE_ALT =
-R_WORLD·10 = 60000` wu) assist ramps in (point at the planet → the AI brings you in; the cap
-bleeds toward `APPROACH_SPEED = 2000` wu/s) so returning decelerates smoothly — yet pointing
-outward + afterburner still re-escapes (assist, not prison). The chase craft is a small
-foreground silhouette against the terrain and curved horizon ahead.
-
-Projection near/far are at space scale: `Z_NEAR=1`, `Z_FAR=200000` (globe radius 6000,
-camera out to tens of thousands of wu).
-
-## Camera getters (valid after `step`)
-- `eng.view_proj()` → `Float32Array` length 16, **column-major**, ready for
-  `gl.uniformMatrix4fv(loc, false, arr)`. (Combined projection * view, using chase-cam position.)
-- `eng.camera_position()` → `Float32Array` length 3 `[x,y,z]` — the chase-cam world position.
-
-## Aircraft model getters
-- `eng.model_matrix()` → `Float32Array` length 16, **column-major**.
-  = `translate(ship_pos) * rotate(ship_orientation)`. No scale baked in.
-  Pass as the model matrix; multiply `view_proj * model_matrix` in JS to get MVP.
-- `eng.aircraft_scale()` → `f32` = 14.0. Scale to apply to the normalized aircraft
-  mesh (nose-to-tail ≈ 1 wu) to reach world units. Web applies this when uploading
-  vertex positions from `aircraft.json`.
-
-## Geometry getters (regenerated each `step`)
-Core emits two channels for the globe: the **dark occluder sphere** (fill) and the **bright
-latitude rings** (line). Depth test (not painter's order) resolves occlusion, so draw order
-within a channel does not matter; back-to-front is no longer required.
-
-**FILL channel — dark occluder sphere.** A coarse lat/lon tessellation of the visible
-hemisphere at radius `R_WORLD * 0.985` (~88 wu below sea level). Set well below sea level so
-it never z-fights the h=0 ocean rings AND — at ORBITAL distance, where the depth buffer
-(Z_NEAR 1, Z_FAR 200000) has almost no resolution — the dark dome can never depth-win over the
-bright terrain rings and flatten the orbit globe into a featureless disc. Drawn in the dark
-background fill color, it hides the far side of the globe via the depth test.
-- `eng.fill_vertices()` → `Float32Array`, packed `[x,y,z, ...]`. One TRIANGLE_STRIP per
-  occluder latitude band (alternating lat_a / lat_b vertices along longitude).
-- `eng.fill_draws()` → `Uint32Array`, flat pairs `[start,count, ...]`. JS issues
-  `gl.drawArrays(gl.TRIANGLE_STRIP, start, count)` per pair.
-- `eng.fill_strengths()` → `Float32Array`, one f32 per vertex. ~1 in the interior, ramps to 0
-  at the limb (so the occluder edge dissolves). Multiply fill alpha by this.
-- `eng.fill_elevations()` → `Float32Array`, one f32 per vertex. **All 0** (the occluder is the
-  dark sea-level sphere). Present for API parity.
-
-**LINE channel — bright latitude rings.** For each visible ring (grid row), a LINE_STRIP of
-3D sphere points sweeping longitude; the strip is split into runs at the horizon limb.
-- `eng.line_vertices()` → `Float32Array`, packed `[x,y,z, ...]`.
-- `eng.line_draws()` → `Uint32Array`, flat pairs `[start,count, ...]`. JS issues
-  `gl.drawArrays(gl.LINE_STRIP, start, count)` per pair.
-- `eng.line_strengths()` → `Float32Array`, one f32 per vertex. Ramps 0→1 from the horizon
-  limb inward (rings dissolve at the visible-hemisphere edge instead of popping).
-- `eng.line_elevations()` → `Float32Array`, one f32 per vertex, in [0..1] =
-  elev_world / elev_world_max. 0 = ocean ring (dim), 1 = highest peak (bright land glow).
-  Drives elevation→brightness in the fragment shader.
-
-Indices in `fill_draws`/`line_draws` are VERTEX indices into the respective vertex array
-(not byte offsets). Returned typed arrays are copies; valid until the next `step`.
-
-**The FILL occluder is generated DECOUPLED from (far COARSER than) the lines.** It is only a
-flat dark depth-occluder, so it uses no sub-ring interpolation (raw data rows only), a row
-step and column stride each coarsened ×`FILL_COARSEN` (=3) over the line strides, and is
-nudged inward to `R * FILL_R_INSET` (=0.999) so the coarse mesh sits a hair below the bright
-lines and can never poke through / tear them. This cuts fill verts ~16× vs the lines with no
-visible change.
-
-### Zero-copy geometry access + primitive-restart indices (per frame, preferred path)
-To avoid copying ~400k floats across the WASM→JS boundary each frame and to collapse the
-~750 per-strip draws into ONE indexed draw, the core exposes:
-
-- `(ptr, len)` getters returning a byte offset into WASM linear memory and an ELEMENT count:
-  - `fill_verts_ptr()/_len()`, `fill_strengths_ptr()/_len()`, `fill_elevations_ptr()/_len()`,
-    `fill_indices_ptr()/_len()`
-  - `line_verts_ptr()/_len()`, `line_strengths_ptr()/_len()`, `line_elevations_ptr()/_len()`,
-    `line_indices_ptr()/_len()`
-  - verts/strengths/elevations are `f32`; indices are `u32`.
-- `fill_indices` / `line_indices` are **restart-delimited UNSIGNED_INT index lists**: each
-  strip's vertex indices in order, separated by the WebGL2 fixed restart index `0xFFFFFFFF`
-  (always enabled). JS draws all strips with a single
-  `gl.drawElements(gl.TRIANGLE_STRIP|gl.LINE_STRIP, len, gl.UNSIGNED_INT, 0)`.
-
-JS builds typed-array VIEWS over `wasm.memory.buffer` (no copy):
-`new Float32Array(wasm.memory.buffer, ptr, len)` / `new Uint32Array(...)`, then uploads via
-`gl.bufferSubData` into pre-sized, reused VBOs (grown only when the used size exceeds
-capacity) — never `bufferData` per frame. **CRITICAL:** a view detaches if WASM memory grows;
-JS MUST re-fetch `wasm.memory.buffer` (compare identity with `===`) and recreate the views
-when it changes. The core reuses its geometry `Vec`s across frames via `.clear()` (capacity
-kept), and builds the index lists last (after all vertex pushes) so the views are valid.
-
-The `init()` default export's return value carries `.memory`; `web/main.js` passes it to
-`renderer.draw(eng, wasmMemory)`. When `wasmMemory` is null (mock engine), the renderer falls
-back to the legacy copying getters (`fill_vertices()` etc.) + per-strip `drawArrays`. Both the
-copying getters and the new ptr/len + index getters are present.
-
-**LOD + culling.** Index-anchored, power-of-two strides chosen per-ring by DISTANCE to the
-camera (near → fine, far → coarse), then multiplied by a global altitude `lod_boost`. The
-boost is **1 for ATMO + ORBIT (alt < 12000 wu)** and **2 for INTERPLANETARY (alt ≥ 12000)**:
-the orbit/far view is nearly free, so it now renders at full per-distance detail (recognizable
-continents with clear relief, ~80k verts / a few ms gen at ~6000 km orbit), bounded by the far
-band's own coarse (16,16) stride; only from deep space does the ×2 boost kick in. ATMO is
-unchanged. Because the same stride set is applied globe-wide and rows/cols are sampled at index
-multiples of the stride, the rendered set changes only at discrete power-of-two boundaries —
-nothing swims. **Horizon cull is view-independent**: a surface point P is kept iff
-`dot(normalize(P), normalize(cam_pos)) > R_WORLD/|cam_pos| − margin`. **The sight (frustum)
-cull follows the freelook-aware LOOK forward** (`cam_forward_dir` — incl. the orbital look-down
-reframe), so the orbital down-framing generates the hemisphere it points at, not the ship's
-heading hemisphere.
-
-**Alpha blending contract**: enable `gl.BLEND` with `gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)`.
-Occlusion is resolved by the DEPTH TEST (the dark occluder sphere hides the far side), so
-painter's back-to-front order is no longer required.
-
-## Debug getters (optional, for HUD) — sphere semantics
-- `eng.altitude()` → f32 (world units above the sea-level sphere) = `|cam_pos| − R_WORLD`.
-- `eng.altitude_m()` → f32 (real meters above sea level) = `altitude() × M_PER_WU`, where
-  `M_PER_WU = EARTH_RADIUS_M / R_WORLD ≈ 1061.8` m/wu. Uses the HORIZONTAL planet scale
-  (not VERT_SCALE) so altitudes read as plausible orbital/atmospheric heights.
-- `eng.agl_m()` → f32 (**VE-EXAGGERATED meters** ABOVE GROUND) =
-  `(|pos| − terrain_radius_below) / (VERT_SCALE · ve/VERT_EXAGGERATION)` (= wu clearance × M_PER_WU
-  / ve), clamped ≥ 0, using the SAME `ve` the renderer draws this frame (`ve_for_altitude`, or the
-  exaggeration override). Reported in the terrain's OWN exaggerated vertical scale, so the ATMO
-  terrain-following hold (which targets this) reads ≈ the set clearance — e.g. ~500 over flat
-  ground at the default, NOT ~10000. Distinct from `altitude_m` (height above the sea-level sphere,
-  un-exaggerated meters); over ocean the *wu* heights coincide but the reported scales differ.
-- `eng.ground_dist_wu()` → f32 (**RAW WORLD UNITS** to the GROUND below) = `|pos| − terrain_radius_below`,
-  clamped ≥ 0, using the SAME `ve` the renderer draws this frame. NOT VE-scaled, NOT meters — raw wu,
-  small when skimming (~1–50 wu). The web HUD shows this as `GND <n> wu` in ATMO (1 decimal if <10),
-  the context-aware "distance to the gravitationally dominant body" (the ground in ATMO). ORBIT uses
-  `altitude_m()/1000` → `PLANET <n> km`; INTERPLANETARY uses `altitude_m()/1e6` → `EARTH <n> Mm`
-  (placeholder until a sun body exists, then it becomes `SUN <n> AU`).
-- `eng.speed()` → f32 (world units/sec).
-- `eng.speed_kmh()` → f32 (km/h) = `speed() × M_PER_WU × 3.6` (same horizontal planet scale).
-- `eng.throttle()` → f32 in `[0, 1]` — current engine throttle (gas pedal). The web HUD shows
-  it as `THR nn%` so the pilot can regulate cruise speed. Throttle ramps slowly
-  (`THROTTLE_RATE = 0.3 s⁻¹`, a full sweep ≈ 3.3 s) so intermediate cruise settings are easy to
-  hold; `v_target = lerp(IDLE_SPEED, top, throttle)`.
-- `eng.flight_mode()` → `u8` — current flight mode by altitude: `0 = ATMO` (dense fly-by-nose
-  cruise, `alt < ATMOSPHERE_TOP = 1500`), `1 = ORBIT` (thin-air near-circular hold,
-  `ATMOSPHERE_TOP ≤ alt < ORBIT_TOP = 12000`), `2 = INTERPLANETARY` (free Newtonian + capture
-  assist on re-entry, `alt ≥ ORBIT_TOP`). The web HUD maps these to `· ATMO` / `· ORBIT` /
-  `· INTERPLANETARY`. Speed caps crossfade per mode (`CRUISE_MAX 400` → `ORBIT_CAP 3000` →
-  `V_CAP 10000`, ratio ≈ 1 : 7.5 : 25). The capture-zone assist is a sub-state folded into
-  INTERPLANETARY re-entry, not a separate label.
-- `eng.lat_lon()` → `Float32Array` length 2 `[lat, lon]` — the **sub-camera point**: the camera
-  position projected onto the globe. `lat = asin(cam.y / |cam|)`, `lon = atan2(-cam.z, cam.x)`,
-  both in degrees. Shows what the camera is above.
-
-## WebGPU renderer getters + step (additive — used by the WebGPU compute renderer)
-The WebGPU renderer (`web/renderer-webgpu.js`) is the DEFAULT when a WebGPU adapter is available
-(WebGL2 is the automatic fallback; `?webgpu=0` forces WebGL2). It generates the LINE + FILL
-geometry on the GPU via WGSL compute passes (porting `emit_ring` / `emit_fill_strip`), so it does
-NOT need the CPU per-frame geometry getters at all. These additive getters/methods feed the GPU
-compute; the WebGL2 path does not use them and the existing contract above is unchanged.
-
-- `eng.step_physics_only(dt)` — advance PHYSICS + CAMERA matrices ONLY; does NOT run the CPU
-  `generate_into` vertex emission. The WebGPU loop calls THIS instead of `step(dt)`, so the CPU
-  per-frame cost drops from the full `generate_into` (tens of ms, unbounded at low altitude — the
-  traces' rAF violations) to ~microseconds (the physics integrator + the two camera matrices). All
-  the camera getters below (`view_proj`, `camera_position`, `cam_forward`, `current_ve`) are valid
-  after it, so the GPU compute is driven identically to `step`. WebGL2 keeps using `step(dt)`.
-- `eng.cam_forward()` → `Float32Array` length 3 — the freelook-aware camera forward (world
-  space), the SAME direction the geometry frustum/sight cull uses this frame.
-- `eng.current_ve()` → `f32` — the vertical exaggeration used to draw terrain this frame
-  (override if set, else the altitude-coupled ramp). This is the RAW `ve` (e.g. 2.75..14); the
-  renderer divides by `VERT_EXAGGERATION` to get the `ve_ratio` used in `sphere_point_scaled`.
-- `eng.elev_world_max()` → `f32` — max terrain elevation (world units) for elevation→brightness
-  normalization (matches `line_elevations`).
-- `eng.heightfield_i16_ptr()/_len()` → `u32` — **PREFERRED** upload path: pointer/len of the RAW
-  int16 elevation grid (meters, row-major, row 0 = north, `_len` = i16 element count = width*height;
-  byte length = 2·len) directly in WASM memory — NO f32 materialization. The renderer uploads this
-  i16 buffer ONCE (~151 MB for 12288×6144, vs ~302 MB f32 — under `maxStorageBufferBindingSize`,
-  which the device requests bumped from the adapter) and converts meters → world units in WGSL via
-  `* vert_scale()` (matching `Heightfield::sample`).
-- `eng.vert_scale()` → `f32` — `VERT_SCALE` (world units per meter); WGSL multiplies the raw int16
-  meters by this to get world-unit elevations.
-- `eng.heightfield_ptr()/_len()` → `u32` — LEGACY f32 upload path (kept as a fallback): pointer/len
-  of an f32 world-unit grid that `heightfield_ptr()` lazily materializes on first call (`&mut self`).
-  Larger (~302 MB) and may exceed `maxStorageBufferBindingSize`; prefer the i16 path above.
-- `eng.grid_width()/grid_height()` → `u32` — heightfield grid dimensions.
-
-## Rendering contract (web side)
-- Enable depth test (LEQUAL). Draw the dark occluder-sphere fills (they write depth and hide
-  the far hemisphere), then the bright latitude-ring lines on top. Background-colored fills +
-  bright elevation-shaded lines give the Joy Division globe. Restrained palette, no neon.
-- No bundlers, all relative paths, no server assumptions. Fetch `../data/*.bin` + `../data/meta.json`
-  and `./pkg/*` at runtime.
-</content>
+## Getters
+- `heightfield_i16_ptr() -> u32` — byte offset into `wasm.memory.buffer` of the raw `i16`
+  elevation grid (meters, row-major, row 0 = north).
+- `heightfield_i16_len() -> u32` — element count of that grid (`width * height`; byte length
+  is `2 * len`).
+- `grid_width() -> u32`
+- `grid_height() -> u32`
+- `vert_scale() -> f32` — `VERT_SCALE`, so callers can convert raw i16 meters to world units
+  (`m * vert_scale()`).
+- `elev_world_max() -> f32` — max terrain elevation in world units (`elev_max * VERT_SCALE`).
