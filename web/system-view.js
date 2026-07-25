@@ -96,7 +96,7 @@ const MOON_PARENT = { moon: 'earth', charon: 'pluto', enceladus: 'saturn' };
 // We orbit the camera around a target. Azimuth (yaw around ecliptic Z), elevation
 // (pitch above the ecliptic plane).
 
-function makePerspCamera(azimuth, elevation, dolly, targetX, targetY, targetZ) {
+function makePerspCamera(azimuth, elevation, dolly, targetX, targetY, targetZ, roll = 0) {
   // Camera eye orbits around the target:
   //   1. Start at distance `dolly` along +Y in orbit space.
   //   2. Tilt by elevation (rotation around X).
@@ -130,9 +130,20 @@ function makePerspCamera(azimuth, elevation, dolly, targetX, targetY, targetZ) {
   ux /= ul; uy /= ul; uz /= ul;
 
   // right = forward × up
-  const rx = fy*uz - fz*uy;
-  const ry = fz*ux - fx*uz;
-  const rz = fx*uy - fy*ux;
+  let rx = fy*uz - fz*uy;
+  let ry = fz*ux - fx*uz;
+  let rz = fx*uy - fy*ux;
+
+  // Roll spins (right, up) about forward. Rolling the basis — rather than rotating
+  // the projected image — keeps labels, hit rectangles and the off-centre anchor
+  // consistent for free, since everything downstream is derived from these axes.
+  if (roll !== 0) {
+    const c = Math.cos(roll), s = Math.sin(roll);
+    const nrx = rx*c + ux*s, nry = ry*c + uy*s, nrz = rz*c + uz*s;
+    const nux = ux*c - rx*s, nuy = uy*c - ry*s, nuz = uz*c - rz*s;
+    rx = nrx; ry = nry; rz = nrz;
+    ux = nux; uy = nuy; uz = nuz;
+  }
 
   return {
     eye: [eyeX, eyeY, eyeZ],
@@ -172,6 +183,21 @@ const FOV_Y = 45 * Math.PI / 180;
 const CAM_ELEVATION = 62 * Math.PI / 180;  // high, looking down on the ecliptic — but not flat
 const CAM_COMPOSE_ANGLE = 135 * Math.PI / 180; // active body sits down-right of frame centre
 const COMPOSE_BIAS = 0.42;  // how far the look-at slides from the scene's centre toward the body you left
+
+// ── Portrait composition ──────────────────────────────────────────────────────
+// Seen from above the orrery is a wide flat ellipse. On a portrait phone the fit
+// solver still fits it, but tiny, because the disc's long axis fights the screen's
+// short axis. Roll the camera so the system's long axis follows the screen's long
+// axis. Driven continuously by the aspect ratio rather than snapped at a threshold,
+// so a desktop window dragged narrow gets the same benefit and a near-square
+// viewport does not flip jarringly. The fit solver runs on the SAME rolled axes,
+// so the fit-everything guarantee holds at every aspect.
+const ROLL_MAX = Math.PI / 2;
+const ROLL_ASPECT_FULL = 0.55; // at or below this aspect the roll is complete
+function rollForAspect(aspect) {
+  if (aspect >= 1) return 0;
+  return ROLL_MAX * smoothstep(clamp01((1 - aspect) / (1 - ROLL_ASPECT_FULL)));
+}
 const FIT_MARGIN = 1.14;    // slack around the outermost orbit
 const DOLLY_NEAR = 0.045;   // scene units — camera sits right beside the body at sysT = 0
 
@@ -410,7 +436,8 @@ export function createSystemView({ registry, helioPos, helioEcl, onEnterBody }) 
     //   Pass 2: the distance D at which every point still clears the frame. A point at
     //           camera-axis coords (a, b, c) relative to the target is held when
     //           |a| ≤ (D + c)·tanX and |b| ≤ (D + c)·tanY.
-    const axes = makePerspCamera(azimuth, elevation, 1, 0, 0, 0);
+    const roll = rollForAspect(aspect);
+    const axes = makePerspCamera(azimuth, elevation, 1, 0, 0, 0, roll);
     const { right: axR, up: axU, fwd: axF } = axes;
     const projA = p => p[0]*axR[0] + p[1]*axR[1] + p[2]*axR[2];
     const projB = p => p[0]*axU[0] + p[1]*axU[1] + p[2]*axU[2];
@@ -455,7 +482,7 @@ export function createSystemView({ registry, helioPos, helioEcl, onEnterBody }) 
     const ty = actPos[1] + (fitTarget[1] - actPos[1]) * tLate;
     const tz = actPos[2] + (fitTarget[2] - actPos[2]) * tLate;
 
-    const cam = makePerspCamera(azimuth, elevation, dolly, tx, ty, tz);
+    const cam = makePerspCamera(azimuth, elevation, dolly, tx, ty, tz, roll);
     const toPixel = makeProjector(W, H);
 
     // ── 3. Starfield ──────────────────────────────────────────────────────────
