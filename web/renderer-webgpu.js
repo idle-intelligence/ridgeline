@@ -157,30 +157,27 @@ fn sample_row_frac(r0: u32, frac: f32, c: u32) -> f32 {
   return a + (b - a) * frac;
 }
 
-// Min elevation (world units) over all data rows in [ra, rb] and columns in
-// [c - half_stride, c + half_stride], both clamped to grid bounds and wrapping
-// longitude.  This mirrors the displaced occluder mesh's per-vertex min-sampling,
-// guaranteeing that a fill-strip vertex can never sit ABOVE any ridgeline in the
-// cell it covers.
-fn sample_fill_min(ra: u32, rb: u32, c: u32, half_stride: u32) -> f32 {
+// Min elevation (world units) between the two bounding ridgeline rows [ra, rb] at
+// column c. The fill strip interpolates linearly between ra and rb, so in a crater
+// the straight segment would ride ABOVE the dipped floor — sampling the minimum keeps
+// the strip at-or-below terrain (it only seals, never pokes).
+//
+// BOUNDED cost: the two endpoints plus two interior thirds (≤4 samples/vertex),
+// independent of how many rows the span covers. A full row×column min loop here was
+// O(rowStep·colStride) per vertex — ~128 samples in ATMO — and dropped the frame rate
+// to ~1 fps. Four points catch crater floors near the 1/3 and 2/3 marks; the column
+// dimension is dropped (adjacent fill columns are close, so column poke is negligible).
+fn sample_fill_min(ra: u32, rb: u32, c: u32) -> f32 {
   let W = cam.width;
-  var mn : f32 = 1e30;
-  var r : u32 = ra;
-  loop {
-    if (r > rb) { break; }
-    // column window: c-half_stride .. c+half_stride, wrapping longitude
-    var dc : i32 = -i32(half_stride);
-    loop {
-      if (dc > i32(half_stride)) { break; }
-      var col : i32 = i32(c) + dc;
-      // wrap to [0, W)
-      col = col % i32(W);
-      if (col < 0) { col = col + i32(W); }
-      let v = sample_idx(r * W + u32(col));
-      if (v < mn) { mn = v; }
-      dc = dc + 1;
-    }
-    r = r + 1u;
+  var mn : f32 = sample_idx(ra * W + c);
+  let hb = sample_idx(rb * W + c);
+  if (hb < mn) { mn = hb; }
+  let span : u32 = rb - ra;
+  if (span >= 2u) {
+    let v1 = sample_idx((ra + span / 3u) * W + c);
+    let v2 = sample_idx((ra + (2u * span) / 3u) * W + c);
+    if (v1 < mn) { mn = v1; }
+    if (v2 < mn) { mn = v2; }
   }
   return mn;
 }
@@ -370,11 +367,10 @@ fn fillmain(@builtin(global_invocation_id) gid : vec3<u32>) {
     let c : u32 = u32(m);
 
     let lon = col_lon(c);
-    // Use the MINIMUM elevation over the entire row-span (ra..rb) and column half-span
-    // (±stride/2) so this fill vertex can never sit above any ridgeline in the cell it
-    // covers.  Both pa and pb share the same min — the strip only seals, never pokes.
-    let half_stride = stride / 2u;
-    let h_min = sample_fill_min(fr.ra, fr.rb, c, half_stride);
+    // Use the MINIMUM elevation between the bounding rows (ra..rb) at this column so the
+    // fill vertex can never sit above a ridgeline. Both pa and pb share the same min —
+    // the strip only seals, never pokes. Bounded to ≤4 samples/vertex (see sample_fill_min).
+    let h_min = sample_fill_min(fr.ra, fr.rb, c);
     let pa = sphere_point_scaled(fr.lat_a, lon, h_min) * ${FILL_R_INSET};
     let pb = sphere_point_scaled(fr.lat_b, lon, h_min) * ${FILL_R_INSET};
     let sa = point_strength(pa);
