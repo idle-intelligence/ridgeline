@@ -53,9 +53,21 @@
 
     .intro {
       color:#888;
-      margin-bottom:48px;
+      margin-bottom:14px;
       max-width:600px;
     }
+
+    .repo-link {
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      font-size:12px;
+      letter-spacing:1px;
+      margin-bottom:48px;
+      padding:11px 0; /* tap target to >=44px tall, text unmoved */
+      margin-top:-11px;
+    }
+    .repo-link svg { flex:0 0 auto; }
 
     section {
       margin-bottom:44px;
@@ -182,6 +194,14 @@
       Each one is a globe of stacked Joy Division "Unknown Pleasures" ridgelines.
     </p>
 
+    <a class="repo-link" href="https://github.com/idle-intelligence/ridgeline"
+       target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" width="15" height="15" fill="currentColor" aria-hidden="true">
+        <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/>
+      </svg>
+      github.com/idle-intelligence/ridgeline
+    </a>
+
     <section>
       <h2>Unknown Pleasures</h2>
       <p>
@@ -215,15 +235,15 @@
         12288×6144 (Earth), stored as raw <code>int16</code>.
       </p>
       <ul>
-        <li><span class="body-name">Earth</span><span class="source">NOAA ETOPO 2022</span></li>
-        <li><span class="body-name">Moon</span><span class="source">NASA LRO / LOLA</span></li>
-        <li><span class="body-name">Mars</span><span class="source">NASA MGS / MOLA MEGDR</span></li>
-        <li><span class="body-name">Venus</span><span class="source">NASA Magellan (via USGS)</span></li>
-        <li><span class="body-name">Mercury</span><span class="source">NASA MESSENGER (via USGS)</span></li>
-        <li><span class="body-name">Ceres &amp; Vesta</span><span class="source">NASA Dawn (DLR / USGS)</span></li>
-        <li><span class="body-name">Enceladus</span><span class="source">NASA Cassini (Schenk &amp; McKinnon, 2024)</span></li>
-        <li><span class="body-name">Pluto &amp; Charon</span><span class="source">NASA New Horizons</span></li>
-        <li><span class="body-name">Sun</span><span class="source">NASA SDO / HMI</span></li>
+        <li><span class="body-name">Earth</span><span class="source"><a href="https://www.ncei.noaa.gov/products/etopo-global-relief-model" target="_blank" rel="noopener">NOAA ETOPO 2022</a></span></li>
+        <li><span class="body-name">Moon</span><span class="source"><a href="https://pds-geosciences.wustl.edu/missions/lro/lola.htm" target="_blank" rel="noopener">NASA LRO / LOLA</a></span></li>
+        <li><span class="body-name">Mars</span><span class="source"><a href="https://pds-geosciences.wustl.edu/mgs/mgs-m-mola-5-megdr-l3-v1/" target="_blank" rel="noopener">NASA MGS / MOLA MEGDR</a></span></li>
+        <li><span class="body-name">Venus</span><span class="source"><a href="https://astrogeology.usgs.gov/search/map/Venus/Magellan/RadarProperties/Venus_Magellan_Topography_Global_4641m_v02" target="_blank" rel="noopener">NASA Magellan (via USGS)</a></span></li>
+        <li><span class="body-name">Mercury</span><span class="source"><a href="https://astrogeology.usgs.gov/search/map/Mercury/Topography/MESSENGER/Mercury_Messenger_USGS_DEM_Global_665m_v2" target="_blank" rel="noopener">NASA MESSENGER (via USGS)</a></span></li>
+        <li><span class="body-name">Ceres &amp; Vesta</span><span class="source">NASA Dawn (DLR / USGS) — <a href="https://astrogeology.usgs.gov/search/map/Ceres/Dawn/DTM/Ceres_Dawn_FC_HAMO_DTM_DLR_Global_60ppd_Oct2016" target="_blank" rel="noopener">Ceres</a>, <a href="https://astrogeology.usgs.gov/search/map/Vesta/Dawn/DTM/Vesta_Dawn_HAMO_DTM_DLR_Global_48ppd" target="_blank" rel="noopener">Vesta</a></span></li>
+        <li><span class="body-name">Enceladus</span><span class="source"><a href="https://astrogeology.usgs.gov/search/map/Enceladus/Cassini/Enceladus_Cassini_DEM_global_200m_schenk2024" target="_blank" rel="noopener">NASA Cassini (Schenk &amp; McKinnon, 2024)</a></span></li>
+        <li><span class="body-name">Pluto &amp; Charon</span><span class="source">NASA New Horizons — <a href="https://astrogeology.usgs.gov/search/map/Pluto/NewHorizons/Pluto_NewHorizons_Global_DEM_300m_Jul2017" target="_blank" rel="noopener">Pluto</a>, <a href="https://astrogeology.usgs.gov/search/map/Charon/NewHorizons/Charon_NewHorizons_Global_DEM_300m_Jul2017" target="_blank" rel="noopener">Charon</a></span></li>
+        <li><span class="body-name">Sun</span><span class="source"><a href="https://jsoc1.stanford.edu/data/hmi/synoptic/" target="_blank" rel="noopener">NASA SDO / HMI</a></span></li>
       </ul>
     </section>
 
@@ -289,7 +309,7 @@
       <h2>Exaggerating height for the sake of seeing Olympus Mons</h2>
       <p>
         At true scale there would be nothing to see: Everest is 8.8 km on a 6371 km planet,
-        about 8 world units of bulge on a 6000-unit sphere. Relief is therefore exaggerated,
+        about 8 world units on a 6000-unit sphere. Relief is therefore exaggerated,
         by an amount that depends on altitude — ×2.75 near the ground, easing to ×14 at
         distance, which keeps continents readable from orbit without turning low passes into
         spikes.
