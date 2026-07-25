@@ -22,33 +22,33 @@ and desktop Firefox are recent enough at time of writing. Firefox on Android exp
 ## Run locally
 
 You need a WebGPU browser, a [Rust toolchain](https://rustup.rs) with
-[wasm-pack](https://github.com/drager/wasm-pack), and Python 3 (to serve, or to re-bake terrain).
+[wasm-pack](https://github.com/drager/wasm-pack), and Python 3 to serve.
 
 ```
-# 1. Fetch the binary heightfields (~1.2 GB)
-hf download idle-intelligence/ridgeline-terrain --repo-type dataset --include "*.bin" --local-dir data
-
-# 2. Build the WASM core — web/pkg/ is gitignored, so this must run before the app will load
+# web/pkg/ is gitignored, so the WASM core must be built before the app will load
 wasm-pack build core --target web --out-dir ../web/pkg
-```
-
-Serve from the **repo root** (not `web/`) so the app's `../data/*` fetches resolve:
-
-```
 python3 -m http.server 8080
 ```
 
-Then open http://localhost:8080/web/
+Then open http://localhost:8080/web/ — identical to the published demo, terrain included. No
+terrain download is needed: tiers stream from the Hugging Face dataset and the browser caches
+each one after first fetch.
 
-Fetching only `--include "*_d16.bin"` (~4 MB) is enough to see every body, but it is a 16×
-decimation and that is all you will ever see: the app refines to `_d4` and full resolution as you
-descend, and with only the `_d16` tier on disk those fetches 404 and every world stays flat. Get
-the full set if you intend to fly close. The Sun degrades worst at `_d16` — it is a signed
-magnetogram, so area-mean downsampling cancels opposite polarities and washes it out.
+### Running against local terrain
 
-No `hf` CLI? Grab the files by URL from
-[the dataset](https://huggingface.co/datasets/idle-intelligence/ridgeline-terrain) into `data/`, or
-re-bake them with the scripts in `data/bake/`.
+For offline work, or to test a re-bake before uploading it:
+
+```
+hf download idle-intelligence/ridgeline-terrain --repo-type dataset --include "*.bin" --local-dir data
+```
+
+Then open http://localhost:8080/web/?data=local — serve from the **repo root** (not `web/`) so the
+app's `../data/*` fetches resolve.
+
+`--include "*_d16.bin"` is only ~4 MB and paints every body, but it is a 16× decimation and that is
+all you will ever see: the app refines to `_d4` (64 MB) and full resolution (1.1 GB) as you descend,
+and any tier missing from disk 404s and leaves that world flat. The Sun degrades worst at `_d16` —
+it is a signed magnetogram, so area-mean downsampling cancels opposite polarities and washes it out.
 
 ## Controls
 
@@ -109,9 +109,8 @@ after a re-bake, or the change will be invisible at altitude.
 
 ## Deploying
 
-`./deploy-gh-pages.sh` builds the WASM and publishes `web/` to the `gh-pages` branch. Terrain is not
-deployed — the published page sets `window.RIDGELINE_DATA_BASE` to the HF dataset and streams every
-tier from there.
+`./deploy-gh-pages.sh` builds the WASM and publishes `web/` to the `gh-pages` branch. Terrain is
+never deployed — every build streams it from the HF dataset.
 
 ## Branches
 

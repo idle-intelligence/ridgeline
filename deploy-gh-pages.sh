@@ -3,10 +3,9 @@
 # https://idle-intelligence.github.io/ridgeline/web/
 #
 # Only web/ + the built WASM are deployed. The terrain blobs stay on the HF
-# dataset and are fetched from there at runtime via window.RIDGELINE_DATA_BASE.
+# dataset, which terrain-cache.js already fetches from by default.
 set -e
 
-HF_BASE='https://huggingface.co/datasets/idle-intelligence/ridgeline-terrain/resolve/main'
 ROOT=$(cd "$(dirname "$0")" && pwd)
 cd "$ROOT"
 
@@ -29,17 +28,18 @@ cp web/*.html web/*.js web/favicon.svg "$WT/web/"
 rm -f "$WT"/web/*.test.js
 cp -R web/pkg "$WT/web/pkg"
 
-python3 - "$WT/web/index.html" "$HF_BASE" <<'PY'
-import sys
-path, base = sys.argv[1], sys.argv[2]
-tag = '<script type="module" src="explore.js"></script>'
-html = open(path).read()
-assert tag in html, 'explore.js script tag not found in index.html'
-open(path, 'w').write(
-    html.replace(tag, f"<script>window.RIDGELINE_DATA_BASE = {base!r};</script>\n  {tag}"))
-PY
+# The app lives under web/; send the bare repo URL there so it isn't a 404.
+cat > "$WT/index.html" <<'HTML'
+<!doctype html>
+<meta charset="utf-8">
+<title>ridgeline</title>
+<meta http-equiv="refresh" content="0; url=web/">
+<link rel="canonical" href="web/">
+<a href="web/">ridgeline</a>
+HTML
 
-git -C "$WT" add -A
+# -f: web/pkg is gitignored in the source tree, but it is the whole point of the deploy.
+git -C "$WT" add -Af
 git -C "$WT" commit -qm "Deploy explorer" || echo "gh-pages: no changes to deploy"
 git -C "$WT" push -q origin gh-pages
 git worktree remove --force "$WT"
