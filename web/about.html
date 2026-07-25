@@ -310,7 +310,7 @@
       <p>
         At true scale there would be nothing to see: Everest is 8.8 km on a 6371 km planet,
         about 8 world units on a 6000-unit sphere. Relief is therefore exaggerated,
-        by an amount that depends on altitude — ×2.75 near the ground, easing to ×14 at
+        by an amount that depends on altitude: ×2.75 near the ground, easing to ×14 at
         distance, which keeps continents readable from orbit without turning low passes into
         spikes.
       </p>
@@ -321,15 +321,15 @@
       </p>
       <p>
         Ceres, Vesta, Enceladus and Charon opt out. They are small enough that their real
-        relief is already a visible fraction of their radius — ±1.1% for Enceladus, ±2.3% for
-        Charon — so they are drawn at a fixed exaggeration preserving the true ratio. Vesta is
+        relief is already a visible fraction of their radius (±1.1% for Enceladus, ±2.3% for
+        Charon), so they are drawn at a fixed exaggeration preserving the true ratio. Vesta is
         that lumpy: its semi-axes differ by about 60 km.
       </p>
 
     </section>
 
     <section>
-      <h2>Orrery scale</h2>
+      <h2>Logarithmic system</h2>
       <p>
         Drawn to scale an orrery is mostly empty: fit Pluto on screen and the inner planets
         collapse into the Sun. Only radial distance is compressed, logarithmically:
@@ -347,11 +347,11 @@
     <section>
       <h2>Architecture</h2>
       <ul class="prose-list">
-        <li>Everything runs client-side. No server, no build step, no framework — vanilla
+        <li>Everything runs client-side. No server, no build step, no framework. Vanilla
           JavaScript static files.</li>
         <li>Terrain is processed offline in Python into raw <code>int16</code> heightfields and
-          hosted as a Hugging Face dataset. Each body ships three tiers — full resolution,
-          ÷4 and ÷16 — and loads coarse-to-fine, so the globe paints from the ÷16 tier and
+          hosted as a Hugging Face dataset. Each body ships three tiers (full resolution,
+          ÷4 and ÷16) and loads coarse-to-fine, so the globe paints from the ÷16 tier and
           sharpens as you descend. Files are fetched once and kept in the browser's Cache API.</li>
         <li>A small WebAssembly module (Rust) decodes and owns the heightfield in memory for
           the GPU to read. It holds no geometry logic.</li>
@@ -360,7 +360,7 @@
           per frame, never stored.</li>
         <li>Camera, Kepler ephemeris and orrery are plain JavaScript. The ephemeris is
           approximate in absolute terms; relative geometry and motion are correct.</li>
-        <li>WebGPU is required. There is no fallback renderer — without it the page says so
+        <li>WebGPU is required. There is no fallback renderer; without it the page says so
           and stops.</li>
       </ul>
     </section>
