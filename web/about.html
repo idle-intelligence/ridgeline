@@ -157,7 +157,7 @@
     </header>
 
     <p class="intro">
-      ridgeline is a flight-and-explore toy over real worlds — Earth, the Moon, Mars, Venus,
+      ridgeline is a toy for exploring real worlds — Earth, the Moon, Mars, Venus,
       Mercury, Ceres, Vesta, Enceladus, Pluto, Charon, and the Sun — each drawn as a globe
       of stacked Joy Division "Unknown Pleasures" ridgelines. Every ridge is real data.
       It runs entirely in your browser.
@@ -224,7 +224,7 @@
       <h2>How it's built</h2>
       <ul class="prose-list">
         <li>A Rust core compiled to WebAssembly does the heavy math — mapping each grid cell
-          onto the sphere, flight physics, per-frame culling and level-of-detail, and the
+          onto the sphere, camera and motion physics, per-frame culling and level-of-detail, and the
           ephemeris.</li>
         <li>The ridgeline geometry is generated every frame by WebGPU compute shaders (with a
           WebGL2 fallback). The lines you see are built on the GPU, not stored.</li>
