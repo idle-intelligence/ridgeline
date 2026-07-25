@@ -657,17 +657,20 @@ export function computeMinElevPerVertex(hf, gridW, gridH, stacks, slices) {
     const rLo = Math.floor((90 - latHi) / latPerRow);
     const rHi  = Math.ceil((90 - latLo) / latPerRow);
     const rMin = Math.max(0, rLo), rMax = Math.min(gridH - 1, rHi);
-    for (let j = 0; j <= slices; j++) {
+    for (let j = 0; j < slices; j++) {
       const lonCenter = -180 + 360 * (j / slices);
       const lonLo = lonCenter - halfCellLon, lonHi = lonCenter + halfCellLon;
+      // Longitude WRAPS: the ±180° vertices see the columns on both sides of the seam.
+      // Clipping there instead would leave the two seam vertices with a half-window
+      // (a higher, less safe minimum) while the envelope filter below wraps.
       const cLo = Math.floor((lonLo + 180) / lonPerCol);
       const cHi  = Math.ceil((lonHi + 180) / lonPerCol);
-      const cMin = Math.max(0, cLo), cMax = Math.min(gridW - 1, cHi);
       let mn = 32767;
       for (let r = rMin; r <= rMax; r++) {
         const rowBase = r * gridW;
-        for (let c = cMin; c <= cMax; c++) {
-          const v = hf[rowBase + c];
+        for (let c = cLo; c <= cHi; c++) {
+          const cw = ((c % gridW) + gridW) % gridW;
+          const v = hf[rowBase + cw];
           if (v < mn) mn = v;
           if (v > rawMax) rawMax = v;
         }
@@ -676,6 +679,10 @@ export function computeMinElevPerVertex(hf, gridW, gridH, stacks, slices) {
       if (m < rawMin) rawMin = m;
       minElev[i * (slices + 1) + j] = m;
     }
+    // Column `slices` (+180°) is the SAME meridian as column 0 (−180°) — give it the
+    // identical value rather than a second, differently-rounded window, so the wrapping
+    // envelope filter below can never end up above it.
+    minElev[i * (slices + 1) + slices] = minElev[i * (slices + 1)];
   }
   return { minElev, rawMin, rawMax };
 }
