@@ -8,6 +8,10 @@ surface — or pull all the way out to a SYSTEM view of the whole orrery.
 A `game + dataviz` experiment — a thing I built, not a polished product. Static site: no bundler,
 no server, all relative paths.
 
+There is also a `flight` branch: a parked but working flight-sim build over the Earth globe. That
+was the project's earlier incarnation, dropped once the explorer became the whole point. `main` is
+the explorer; nothing on `flight` feeds into it.
+
 ## Requirements
 A **WebGPU** compute renderer, so a WebGPU-capable browser is required
 (Chrome/Edge 113+, Safari 18+; Firefox Android has no WebGPU yet).
