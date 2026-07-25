@@ -8,13 +8,20 @@ surface — or pull all the way out to a SYSTEM view of the whole orrery.
 A `game + dataviz` experiment — a thing I built, not a polished product. Static site: no bundler,
 no server, all relative paths.
 
-There is also a `flight` branch: a parked but working flight-sim build over the Earth globe. That
-was the project's earlier incarnation, dropped once the explorer became the whole point. `main` is
-the explorer; nothing on `flight` feeds into it.
+It started as a flight-arcade experiment — fly a craft over the Earth globe — and turned into
+exploration instead: no craft, no throttle, just a camera you move over real worlds. The `flight`
+branch keeps that earlier build, parked but working. `main` is the explorer; nothing on `flight`
+feeds into it.
+
+`docs/` is a research log from along the way (WebGPU feasibility, perf traces, flight physics).
+It is dated by design and describes the earlier architecture in places — kept as a record rather
+than maintained as documentation.
 
 ## Requirements
-A **WebGPU** compute renderer, so a WebGPU-capable browser is required
-(Chrome/Edge 113+, Safari 18+; Firefox Android has no WebGPU yet).
+A **WebGPU** compute renderer, so a WebGPU-capable browser is required. Chrome and Edge have
+shipped it since 113; Safari and desktop Firefox are recent enough at time of writing. Firefox on
+Android exposes no `navigator.gpu` at all — the page will say so and stop. There is no fallback
+renderer.
 
 ## Run locally
 You need:
