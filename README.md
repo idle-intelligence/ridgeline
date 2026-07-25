@@ -1,5 +1,7 @@
 # ridgeline
 
+![Earth in orbit view — the globe drawn as stacked latitude ridgelines, Africa and the Indian subcontinent picked out in relief](https://huggingface.co/datasets/idle-intelligence/ridgeline-terrain/resolve/main/preview.png)
+
 A 3D explorer of the solar system's solid worlds, each rendered as a globe of stacked Joy Division
 "Unknown Pleasures" latitude rings. Real elevation data; spawn out in deep space, recognise the
 continents (or Olympus Mons, or Mare Imbrium) on the glowing globe, then orbit, dive, and skim the
