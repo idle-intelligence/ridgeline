@@ -194,9 +194,22 @@ const COMPOSE_BIAS = 0.42;  // how far the look-at slides from the scene's centr
 // so the fit-everything guarantee holds at every aspect.
 const ROLL_MAX = Math.PI / 2;
 const ROLL_ASPECT_FULL = 0.55; // at or below this aspect the roll is complete
-function rollForAspect(aspect) {
+export function rollForAspect(aspect) {
   if (aspect >= 1) return 0;
   return ROLL_MAX * smoothstep(clamp01((1 - aspect) / (1 - ROLL_ASPECT_FULL)));
+}
+
+/**
+ * Express a screen-space drag delta in the ROLLED camera basis, so a horizontal
+ * swipe always rotates the system the way the user sees it. The camera's right/up
+ * are (R·cos+U·sin, U·cos−R·sin); a drag (dx, −dy) read against those axes is
+ * (dx·cos+dy·sin, −(dy·cos−dx·sin)) against the unrolled pair the azimuth /
+ * elevation gains are calibrated for. Identity at roll 0.
+ */
+export function unrollDrag(dx, dy, roll) {
+  if (roll === 0) return { dx, dy };
+  const c = Math.cos(roll), s = Math.sin(roll);
+  return { dx: dx*c + dy*s, dy: dy*c - dx*s };
 }
 const FIT_MARGIN = 1.14;    // slack around the outermost orbit
 const DOLLY_NEAR = 0.045;   // scene units — camera sits right beside the body at sysT = 0
@@ -241,6 +254,10 @@ export function createSystemView({ registry, helioPos, helioEcl, onEnterBody }) 
   let baseAzimuth = 0;
   let azimuthUser = 0;
   let elevation   = CAM_ELEVATION;
+  // The roll the last drawn frame used. Drag deltas are read against it so the
+  // gesture matches the frame the user is actually looking at — one source, no
+  // second copy of the aspect → roll curve.
+  let camRoll     = 0;
 
   // ── Active body tracking ──────────────────────────────────────────────────────
   let activeId = 'earth';
@@ -304,9 +321,10 @@ export function createSystemView({ registry, helioPos, helioEcl, onEnterBody }) 
     const m = gesture.move(x, y);
     if (!m) { if (!touch) hoverId = hitTest(x, y); return; }
     if (m.dragging) {
-      azimuthUser += m.dx * 0.007;
+      const d = unrollDrag(m.dx, m.dy, camRoll);
+      azimuthUser += d.dx * 0.007;
       elevation = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05,
-                    elevation - m.dy * 0.005));
+                    elevation - d.dy * 0.005));
       hoverId = null;
     }
   }
@@ -436,7 +454,7 @@ export function createSystemView({ registry, helioPos, helioEcl, onEnterBody }) 
     //   Pass 2: the distance D at which every point still clears the frame. A point at
     //           camera-axis coords (a, b, c) relative to the target is held when
     //           |a| ≤ (D + c)·tanX and |b| ≤ (D + c)·tanY.
-    const roll = rollForAspect(aspect);
+    const roll = camRoll = rollForAspect(aspect);
     const axes = makePerspCamera(azimuth, elevation, 1, 0, 0, 0, roll);
     const { right: axR, up: axU, fwd: axF } = axes;
     const projA = p => p[0]*axR[0] + p[1]*axR[1] + p[2]*axR[2];
