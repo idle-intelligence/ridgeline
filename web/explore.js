@@ -923,6 +923,22 @@ async function main() {
   }, { passive: false });
 
   // ── Touch ───────────────────────────────────────────────────────────────────
+  // Seed pinch/pan state from the first two touches. Used on every transition into
+  // or within a multi-touch gesture, so a stale delta is never applied.
+  function beginPinch(touches) {
+    const t0 = touches[0], t1 = touches[1];
+    lastPinchDist = Math.hypot(t0.clientX-t1.clientX, t0.clientY-t1.clientY);
+    twoCX = (t0.clientX + t1.clientX) / 2;
+    twoCY = (t0.clientY + t1.clientY) / 2;
+  }
+  function resetGestures() {
+    systemView.onPointerCancel();
+    globeGesture.cancel();
+    lastPinchDist = 0;
+    twoCX = twoCY = 0;
+    dragActive = false;
+    rightDragActive = false;
+  }
   canvas.addEventListener('touchstart', e => {
     e.preventDefault();
     if (e.touches.length === 1) {
@@ -932,15 +948,14 @@ async function main() {
         globeGesture.press(e.touches[0].clientX, e.touches[0].clientY, true);
         beginDrag(e.touches[0].clientX, e.touches[0].clientY);
       }
-    } else if (e.touches.length === 2) {
+    } else if (e.touches.length >= 2) {
       // A second finger landing mid-rotate ends it cleanly — no tap, no jump.
+      // >= 2, not === 2: with a third finger down neither branch matched, so
+      // lastPinchDist went stale and releasing back to two jumped the altitude.
       systemView.onPointerCancel();
       globeGesture.cancel();
       dragActive = false;
-      const t0 = e.touches[0], t1 = e.touches[1];
-      lastPinchDist = Math.hypot(t0.clientX-t1.clientX, t0.clientY-t1.clientY);
-      twoCX = (t0.clientX + t1.clientX) / 2;
-      twoCY = (t0.clientY + t1.clientY) / 2;
+      beginPinch(e.touches);
       active._autoTilt = false; // user takes over pitch → stop the surface auto-morph
     }
   }, { passive: false });
@@ -952,7 +967,7 @@ async function main() {
         globeGesture.move(e.touches[0].clientX, e.touches[0].clientY);
         moveDrag(e.touches[0].clientX, e.touches[0].clientY);
       }
-    } else if (e.touches.length === 2) {
+    } else if (e.touches.length >= 2) {
       // Two fingers do BOTH: pinch (distance) → zoom; pan (centroid move) → tilt + heading,
       // exactly like the desktop right-drag.
       const t0 = e.touches[0], t1 = e.touches[1];
@@ -974,19 +989,31 @@ async function main() {
   }, { passive: false });
   canvas.addEventListener('touchend', e => {
     const t = e.changedTouches[0];
-    if (e.touches.length === 0 && t) {
-      systemView.onPointerUp(t.clientX, t.clientY);
-      releaseGlobeGesture(t.clientX, t.clientY);
+    if (e.touches.length === 0) {
+      if (t) {
+        systemView.onPointerUp(t.clientX, t.clientY);
+        releaseGlobeGesture(t.clientX, t.clientY);
+      }
+      lastPinchDist = 0;
+      dragActive = false;
+      return;
     }
-    if (e.touches.length < 2) lastPinchDist = 0;
-    if (e.touches.length === 0) dragActive = false;
+    if (e.touches.length === 1) {
+      // Dropping out of a pinch used to leave the surviving finger inert: dragActive
+      // was forced false when the second finger landed and was never re-armed.
+      // beginDrag re-freezes the camera at the survivor's current position, so the
+      // rotation resumes from where the finger is — no jump. Never a tap.
+      lastPinchDist = 0;
+      if (sysT <= SYS_INPUT_T) beginDrag(e.touches[0].clientX, e.touches[0].clientY);
+    } else {
+      // 3+ fingers back down to 2 — re-seed from the survivors rather than applying
+      // a delta against the distance/centroid of a finger that is already gone.
+      beginPinch(e.touches);
+    }
   }, { passive: false });
-  canvas.addEventListener('touchcancel', () => {
-    systemView.onPointerCancel();
-    globeGesture.cancel();
-    lastPinchDist = 0;
-    dragActive = false;
-  });
+  // iOS fires touchcancel for the notification shade, incoming calls and edge swipes.
+  // Without this every gesture variable was left stale.
+  canvas.addEventListener('touchcancel', resetGestures);
 
   // ── Render loop ───────────────────────────────────────────────────────────
   let prev = performance.now();
