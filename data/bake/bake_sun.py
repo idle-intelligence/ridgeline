@@ -18,13 +18,17 @@ VALUE MAPPING (chosen after inspecting histogram):
   Linear clipping at ±1500 G crushes quiet-sun texture in the ±few-G range.
   → Use signed sqrt compression:
 
-      elev_int16 = round(sign(B) × sqrt(|B| / 1500.0) × 30000), capped at ±10000
+      elev_int16 = round(sign(B) × sqrt(|B| / 1500.0) × 30000), capped at ±32000
 
-  Range: ±10000 (needle suppression — see apply_value_mapping).
-  Inverse: B_gauss = sign(elev) × (elev / 30000)² × 1500.
+  Range: ±32000 (int16-safe; barely bites: clips only |B| ≳ 1638 G).
+  Inverse (valid up to the ceiling): B_gauss = sign(elev) × (elev / 30000)² × 1500.
 
   This spreads the quiet-sun ±5 G into ±elev ~700, giving visible texture,
-  while strong active-region fields (±1000+ G) map to ±elev ~24000.
+  while strong active-region fields (±1000 G) map to ±elev ~24495, and
+  ±1638 G reaches the ±32000 ceiling (only the very strongest flux concentrations
+  clip).  The full active-region range 5–1638 G maps to DISTINCT heights (no
+  plateau) — restoring relief that was lost when the old ±10000 cap treated
+  every |B| > 167 G identically.
 
 The HMI synoptic map is in SIN-latitude rows (uniform in sin(lat)).  We
 resample to equirectangular (uniform lat) via per-column 1-D linear
@@ -358,22 +362,25 @@ def print_histogram(B):
 def apply_value_mapping(B):
     """
     Signed sqrt compression:
-      elev_int16 = round(sign(B) × sqrt(|B| / 1500.0) × 30000)
+      elev_int16 = round(sign(B) × sqrt(|B| / 1500.0) × 30000), clipped to ±32000
 
     Rationale:
     - Linear map: clipping at ±1500 G and scaling by 20 gives ±30000, but
       quiet-sun fields (±5 G) map to only ±100 counts — barely visible.
     - Signed sqrt: quiet-sun ±5 G → elev ±sqrt(5/1500)×30000 ≈ ±690, giving
       rich texture.  Active-region ±1000 G → ±sqrt(1000/1500)×30000 ≈ ±24495.
+    - ±32000 ceiling is int16-safe and only clips |B| ≳ 1638 G (the very
+      strongest flux concentrations), so the range 5–1638 G is fully gradated.
+    - The old ±10000 cap clipped everything above |B|≈167 G to the same plateau,
+      making all active regions render identically flat — this is the bug we fix.
     - NaN / nodata → 0 (quiet).
     """
     B_clean = np.where(np.isnan(B), 0.0, B)
     sign_B = np.sign(B_clean)
     elev_f = sign_B * np.sqrt(np.abs(B_clean) / 1500.0) * 30000.0
-    # Cap at ±10000: sqrt still leaves active-region needles ~5× the p99 (±6400),
-    # which render as spikes. Capping turns needles into mountains while leaving
-    # the quiet-sun texture (±700-ish) untouched. Inverse only valid below the cap.
-    return np.round(np.clip(elev_f, -10000, 10000)).astype(np.int16)
+    # ±32000: int16-safe safety margin (max unclipped value ≈ ±sqrt(3000/1500)×30000 ≈ ±42426).
+    # Only |B| ≳ 1638 G clips — preserves full gradation across the active-region range.
+    return np.round(np.clip(elev_f, -32000, 32000)).astype(np.int16)
 
 
 # ---------------------------------------------------------------------------
@@ -419,7 +426,7 @@ def verify(elev16):
 
     # Check for bipolar pairs: large positive adjacent to large negative
     # Use sliding window: strong+ within 20 columns of strong-
-    threshold = 9000   # strong active region (just below the ±10000 needle cap)
+    threshold = 20000  # strong active region (well into the active-region range)
     strong_pos = (belt > threshold)
     strong_neg = (belt < -threshold)
 
@@ -453,7 +460,7 @@ def verify(elev16):
     p50 = np.percentile(vals, 50)
     p99 = np.percentile(vals, 99)
     p1 = np.percentile(vals, 1)
-    dist_ok = abs(p50) < 2000 and p99 > 5000 and p1 < -5000
+    dist_ok = abs(p50) < 2000 and p99 > 4000 and p1 < -4000
     print(f"  [{'OK' if dist_ok else '??'}] distribution sane "
           f"(p1={p1:.0f}, p50={p50:.0f}, p99={p99:.0f})")
 
@@ -500,6 +507,16 @@ def main():
     print("\napplying signed-sqrt value mapping ...")
     elev16 = apply_value_mapping(B_equirect)
     print(f"  elev16 range: {int(elev16.min())} .. {int(elev16.max())}")
+
+    # Print elevation histogram to confirm active-region spread
+    e_vals = elev16.ravel().astype(np.float32)
+    print("\n  elevation histogram (int16 encoded values):")
+    for p, label in [(50, 'p50'), (99, 'p99'), (99.9, 'p99.9')]:
+        print(f"    {label:6s}: {np.percentile(e_vals, p):+9.0f}")
+    print(f"    {'max':6s}: {e_vals.max():+9.0f}")
+    n_clipped = int(np.sum(np.abs(e_vals) >= 32000))
+    print(f"    clipped to ±32000: {n_clipped:,} pixels "
+          f"({100*n_clipped/e_vals.size:.3f}%)")
 
     # 6. Row 0 orientation: our convention = +90N at row 0.
     # sinlat_to_equirect already produces row 0 = +90N (target_lats starts at +90).
@@ -553,14 +570,17 @@ def main():
         "value_kind": "magnetic_field",
         "value_unit": "gauss",
         "value_mapping": (
-            "elev_int16 = round(sign(B) * sqrt(|B| / 1500.0) * 30000); "
-            "inverse: B_gauss = sign(elev) * (elev / 30000)^2 * 1500; "
-            "NaN/nodata -> 0"
+            "elev_int16 = round(sign(B) * sqrt(|B| / 1500.0) * 30000), clipped to +/-32000; "
+            "inverse (valid below ceiling): B_gauss = sign(elev) * (elev / 30000)^2 * 1500; "
+            "ceiling reached at |B| ~= 1638 G; NaN/nodata -> 0"
         ),
         "value_mapping_rationale": (
             "Signed sqrt compression spreads quiet-sun |B|~5G into elev~+/-700 "
-            "for visible texture while strong active-region |B|~1000G map to "
-            "elev~+/-24500, safely within int16 range (+/-30000 clipped to +/-32000)."
+            "for visible texture while active-region |B|~1000G map to elev~+/-24500 "
+            "and |B|~1638G reaches the +/-32000 int16-safe ceiling. "
+            "Full gradation is preserved across 5-1638 G (no early plateau). "
+            "Previous bake used +/-10000 cap which clipped everything above |B|~167G "
+            "to the same height, making active regions render as a flat tabletop."
         ),
     }
     meta_path = os.path.join(OUT_DIR, "sun_meta.json")

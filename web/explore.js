@@ -288,8 +288,8 @@ const SUN = new Body({
   radiusM: 696000000, rotationPeriodSec: 25.38 * DAY_SEC, // Carrington sidereal rotation
   // Field-values are tiny relative to the huge radius — boost ve so the magnetic
   // ridges read like Earth's mountains do (≈ Earth relief ratio × 32).
-  veFactor: 2, color: '#ffcf6a', hasOcean: false,
-  cacheBust: 'r2', // re-bake 2: needle cap ±10000
+  veFactor: 1.5, color: '#ffcf6a', hasOcean: false,
+  cacheBust: 'r3', // re-bake 3: restored gradation — ±32000 cap (was ±10000); veFactor 2→1.5
   autoTilt: false, // no resting-pitch morphs on the Sun — zooming keeps your angle
   tint: [1.35, 0.82, 0.38], // warm gold — blue cut hard so bright ridges stay amber, not clipped white
   modes: [[50, 'SURFACE'], [1500, 'CORONA'], [12000, 'ORBIT'], [Infinity, 'DEEP SPACE']],

@@ -7,8 +7,8 @@
   },
   "width": 2880,
   "height": 1440,
-  "elev_min": -10000,
-  "elev_max": 10000,
+  "elev_min": -32000,
+  "elev_max": 32000,
   "dtype": "int16",
   "byte_order": "little",
   "row_order": "north_to_south",
@@ -21,6 +21,6 @@
   "rotation_period_note": "Carrington sidereal rotation 25.38 days",
   "value_kind": "magnetic_field",
   "value_unit": "gauss",
-  "value_mapping": "elev_int16 = round(sign(B) * sqrt(|B| / 1500.0) * 30000); inverse: B_gauss = sign(elev) * (elev / 30000)^2 * 1500; NaN/nodata -> 0",
-  "value_mapping_rationale": "Signed sqrt compression spreads quiet-sun |B|~5G into elev~+/-700 for visible texture while strong active-region |B|~1000G map to elev~+/-24500, safely within int16 range (+/-30000 clipped to +/-32000)."
+  "value_mapping": "elev_int16 = round(sign(B) * sqrt(|B| / 1500.0) * 30000), clipped to +/-32000; inverse (valid below ceiling): B_gauss = sign(elev) * (elev / 30000)^2 * 1500; ceiling reached at |B| ~= 1638 G; NaN/nodata -> 0",
+  "value_mapping_rationale": "Signed sqrt compression spreads quiet-sun |B|~5G into elev~+/-700 for visible texture while active-region |B|~1000G map to elev~+/-24500 and |B|~1638G reaches the +/-32000 int16-safe ceiling. Full gradation is preserved across 5-1638 G (no early plateau). Previous bake used +/-10000 cap which clipped everything above |B|~167G to the same height, making active regions render as a flat tabletop."
 }
