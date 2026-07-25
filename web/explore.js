@@ -69,7 +69,7 @@ const Z_FAR = 200_000.0;
 const DAY_SEC = 86400;
 
 // ── System (orrery) view thresholds ──────────────────────────────────────────
-// Transition is driven by ALTITUDE (wu), not by a boolean systemMode toggle.
+// Transition is driven by ALTITUDE (wu) alone — no separate mode toggle.
 // sysT = smoothstep((alt - SYS_FADE_START) / (SYS_FADE_END - SYS_FADE_START))
 // sysT=0 → at the globe; sysT=1 → whole system framed.
 //
@@ -88,7 +88,7 @@ const ALT_CAP_SYSTEM    = SYS_FADE_END; // fully zoomed out = the end of the whe
 const SYS_HANDOFF_START = 0.9;       // sysT at which the (now dot-sized) globe hands off to the orrery dot
 
 // System mode state (module-level so frame loop + handlers can share it).
-let systemMode = false;  // true = altitude-driven system view is active/entering
+const SYS_INPUT_T = 0.35; // sysT past which pointer input drives the orrery, not the globe
 let sysT = 0.0;          // 0 = globe, 1 = system; computed from altitude each frame
 let systemView = null;   // set after main() creates it
 
@@ -820,7 +820,7 @@ async function main() {
   // ── Mouse ───────────────────────────────────────────────────────────────────
   canvas.addEventListener('contextmenu', e => e.preventDefault());
   canvas.addEventListener('mousedown', e => {
-    if (sysT > 0.5) {
+    if (sysT > SYS_INPUT_T) {
       systemView.onPointerDown(e);
       return;
     }
@@ -834,7 +834,12 @@ async function main() {
     beginDrag(e.clientX, e.clientY);
   });
   window.addEventListener('mousemove', e => {
-    if (sysT > 0.5) { systemView.onPointerMove(e); return; }
+    if (sysT > SYS_INPUT_T) {
+      systemView.onPointerMove(e);
+      canvas.style.cursor = systemView.isHovering() ? 'pointer' : '';
+      return;
+    }
+    canvas.style.cursor = '';
     if (rightDragActive) {
       active.view.tilt    = clampTilt(rdStartTilt - (e.clientY-rdStartY)*0.005, active.modeFor(active.view.altitude));
       active.view.heading = rdStartHeading + (e.clientX-rdStartX)*0.005;
@@ -843,43 +848,19 @@ async function main() {
     moveDrag(e.clientX, e.clientY);
   });
   window.addEventListener('mouseup', e => {
-    if (sysT > 0.5) { systemView.onPointerUp(e); return; }
+    if (sysT > SYS_INPUT_T) { systemView.onPointerUp(e); return; }
     if (e.button === 2) rightDragActive = false; else dragActive = false;
   });
 
-  // System view click-on-body handler (separate click listener on the sys canvas).
-  // Fires only while systemMode (sys canvas has pointer-events:auto then).
-  document.addEventListener('click', e => {
-    if (!systemMode) return;
-    const hit = systemView.hitTest(e.clientX, e.clientY);
-    if (hit) {
-      const targetBody = REGISTRY.find(b => b.id === hit);
-      if (targetBody) {
-        // Snap altitude just below SYS_FADE_START so the globe immediately fades in.
-        active.view.altitude = SYS_FADE_START * 0.85;
-        // systemMode will clear itself next frame when sysT falls to ~0.
-        jumpTo(targetBody).catch(err => console.warn('[explore] jumpTo after system click:', err));
-      }
-    }
-  });
   canvas.addEventListener('wheel', e => {
     e.preventDefault();
     const v = active.view;
-    if (sysT >= 0.99) {
-      // Fully in system mode: wheel routes to system scene dolly AND drives altitude.
-      // Dolly-in (negative deltaY) → decrease altitude → fade back to globe.
-      // Dolly-out → increase altitude → stay in system.
-      systemView.onWheel(e);  // adjust scene dolly for visual zoom
-      // Also drive altitude so reversibility works.
-      const factor = Math.pow(0.85, -e.deltaY / 100);
-      v.altitude = Math.max(2, Math.min(ALT_CAP_SYSTEM, v.altitude * factor));
-    } else {
-      // Globe mode (or mid-fade): altitude zoom drives the fade.
-      const altCap = v.altitude > SYS_FADE_START * 0.5 ? ALT_CAP_SYSTEM : 100_000;
-      v.altitude = Math.max(2, Math.min(altCap, v.altitude * Math.pow(0.85, -e.deltaY / 100)));
-    }
-    // systemMode follows altitude (true when we're above the fade start).
-    systemMode = v.altitude >= SYS_FADE_START;
+    // Altitude is the single control for the whole zoom-out — it drives sysT, which drives
+    // the orrery camera's pull-back. Past SYS_FADE_START the step is bigger so the retreat
+    // through 1.5 M wu is FAST (~8 notches) rather than a slow grind.
+    const step = v.altitude >= SYS_FADE_START ? 0.72 : 0.85;
+    const altCap = v.altitude > SYS_FADE_START * 0.5 ? ALT_CAP_SYSTEM : 100_000;
+    v.altitude = Math.max(2, Math.min(altCap, v.altitude * Math.pow(step, -e.deltaY / 100)));
   }, { passive: false });
 
   // ── Touch ───────────────────────────────────────────────────────────────────
@@ -950,14 +931,15 @@ async function main() {
       sysT = u * u * (3 - 2 * u); // smoothstep
     }
 
-    // Cross-fade: globe (#c) fades out as sysT→1, orrery (#sys) fades in.
-    const globeOpacity  = 1 - sysT;
-    const orreryOpacity = sysT;
+    // No cross-fade: both canvases stay opaque through the pull-back. The globe only
+    // dips out over the last sliver, where it is already a few pixels wide and the
+    // orrery is drawing its dot in the same place.
+    const globeOpacity = 1 - Math.max(0, (sysT - SYS_HANDOFF_START) / (1 - SYS_HANDOFF_START));
     canvas.style.opacity = String(globeOpacity);
 
     if (systemView) {
       systemView.setActive(active.id);
-      if (orreryOpacity > 0) {
+      if (sysT > 0) {
         // The overlay must stay pointer-events:none — it has NO listeners of its own; all
         // input (drag/wheel/click) is handled by the globe-canvas + window/document
         // listeners, which route to the system view by sysT. If the overlay captured
@@ -965,23 +947,23 @@ async function main() {
         canvas.style.display = 'block';
         systemView.canvas.style.display = 'block';
         systemView.canvas.style.pointerEvents = 'none';
-        systemView.canvas.style.opacity = String(orreryOpacity);
-        systemView.draw(jd);
+        systemView.canvas.style.opacity = '1';
+        systemView.draw(jd, sysT);
       } else {
         systemView.hide();
       }
     }
 
-    // ── Globe render (skip when fully in system mode) ─────────────────────
+    // ── Globe render (skipped once it has handed off to the orrery dot) ───
     const cam = computeCamera(getAspect());
-    if (sysT < 1.0) {
+    if (globeOpacity > 0) {
       renderer.draw(makeProxy(cam), null);
     }
     if (!loadingDone) { document.getElementById('loading').style.display = 'none'; loadingDone = true; }
 
     // ── HUD ───────────────────────────────────────────────────────────────
     const infoEl = document.getElementById('info');
-    if (sysT > 0.5) {
+    if (sysT > SYS_INPUT_T) {
       // System mode HUD: minimal readout.
       const pad = n => String(n).padStart(2,'0');
       const ms = (jd - 2440587.5) * 86400000;
@@ -993,8 +975,8 @@ async function main() {
       infoEl.textContent = hudText();
     }
 
-    // ── Markers: hide all in system mode ─────────────────────────────────
-    if (sysT > 0.5) {
+    // ── Markers: hide once the orrery's own labels take over ─────────────
+    if (sysT > 0.15) {
       for (const b of ALL_MARKERS) {
         const w = widgets.get(b.id);
         if (w) { w.marker.style.display = 'none'; w.arrow.style.display = 'none'; }

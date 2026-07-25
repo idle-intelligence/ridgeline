@@ -169,9 +169,9 @@ const PATH_N = 192;                  // samples per orbit (time-uniform → spar
 const FOV_Y = 45 * Math.PI / 180;
 const CAM_ELEVATION = 62 * Math.PI / 180;  // high, looking down on the ecliptic — but not flat
 const CAM_COMPOSE_ANGLE = 135 * Math.PI / 180; // active body sits down-right of frame centre
-const TARGET_BIAS = 0.55;   // settled look-at = TARGET_BIAS × (active body's scene position)
+const COMPOSE_BIAS = 0.42;  // how far the look-at slides from the scene's centre toward the body you left
 const FIT_MARGIN = 1.14;    // slack around the outermost orbit
-const DOLLY_NEAR = 0.006;   // scene units — camera sits right beside the body at sysT = 0
+const DOLLY_NEAR = 0.045;   // scene units — camera sits right beside the body at sysT = 0
 
 // ── createSystemView ──────────────────────────────────────────────────────────
 
@@ -384,22 +384,55 @@ export function createSystemView({ registry, helioPos, helioEcl, getJd, onEnterB
     }
     const azimuth = baseAzimuth + azimuthUser;
 
-    // Settled target: biased toward the body we left, so the Sun sits off-centre and
-    // you keep your sense of place. The fit distance is computed for THAT target so
-    // the outermost orbit still clears the frame edges.
-    const fitTarget = [actPos[0] * TARGET_BIAS, actPos[1] * TARGET_BIAS, actPos[2] * TARGET_BIAS];
+    // Settled framing, solved against the ACTUAL scene points rather than a bounding
+    // sphere — the orrery is a near-flat disc seen at a steep angle, and a sphere fit
+    // leaves it swimming in empty frame.
+    //   Pass 1: screen-space (right, up) bounds of every orbit sample and body.
+    //   Target: the centre of those bounds, then pushed COMPOSE_BIAS of the way toward
+    //           the body we left — so the frame is full AND the composition is off-centre,
+    //           deliberately weighted to where you came from instead of to the Sun.
+    //   Pass 2: the distance D at which every point still clears the frame. A point at
+    //           camera-axis coords (a, b, c) relative to the target is held when
+    //           |a| ≤ (D + c)·tanX and |b| ≤ (D + c)·tanY.
     const axes = makePerspCamera(azimuth, elevation, 1, 0, 0, 0);
-    const offR = fitTarget[0]*axes.right[0] + fitTarget[1]*axes.right[1] + fitTarget[2]*axes.right[2];
-    const offU = fitTarget[0]*axes.up[0]    + fitTarget[1]*axes.up[1]    + fitTarget[2]*axes.up[2];
-    const fitDolly = sceneMaxR + FIT_MARGIN * Math.max(
-      (Math.abs(offR) + sceneMaxR) / tanX,
-      (Math.abs(offU) + sceneMaxR) / tanY,
-    );
+    const { right: axR, up: axU, fwd: axF } = axes;
+    const projA = p => p[0]*axR[0] + p[1]*axR[1] + p[2]*axR[2];
+    const projB = p => p[0]*axU[0] + p[1]*axU[1] + p[2]*axU[2];
+    const projC = p => p[0]*axF[0] + p[1]*axF[1] + p[2]*axF[2];
 
-    // Dolly interpolates in LOG space (perceptually uniform zoom) with an ease-in
-    // curve → the pull-back visibly accelerates. Target slides late so the body stays
-    // centred while the globe is still the thing you're looking at.
-    const zoom = sysT * sysT * (3 - 2 * sysT) * 0.35 + sysT * sysT * sysT * 0.65;
+    let aMin = Infinity, aMax = -Infinity, bMin = Infinity, bMax = -Infinity;
+    const bound = (p) => {
+      const a = projA(p), b = projB(p);
+      if (a < aMin) aMin = a; if (a > aMax) aMax = a;
+      if (b < bMin) bMin = b; if (b > bMax) bMax = b;
+    };
+    for (const path of paths) for (const p of path.points) bound(p);
+    for (const s of bodyScenePos.values()) bound(s);
+
+    const aT = (aMin + aMax) / 2 + (projA(actPos) - (aMin + aMax) / 2) * COMPOSE_BIAS;
+    const bT = (bMin + bMax) / 2 + (projB(actPos) - (bMin + bMax) / 2) * COMPOSE_BIAS;
+    const fitTarget = [
+      aT * axR[0] + bT * axU[0],
+      aT * axR[1] + bT * axU[1],
+      aT * axR[2] + bT * axU[2],
+    ];
+    const cT = projC(fitTarget);
+
+    let fitDolly = 0;
+    const widen = (p) => {
+      const a = projA(p) - aT, b = projB(p) - bT, c = projC(p) - cT;
+      const need = Math.max(Math.abs(a) / tanX, Math.abs(b) / tanY) - c;
+      if (need > fitDolly) fitDolly = need;
+    };
+    for (const path of paths) for (const p of path.points) widen(p);
+    for (const s of bodyScenePos.values()) widen(s);
+    fitDolly = Math.max(sceneMaxR * 0.5, fitDolly * FIT_MARGIN);
+
+    // Dolly interpolates in LOG space: distance grows exponentially with sysT, which is
+    // what a real pull-back looks like — the scene rushes away faster and faster. A mild
+    // ease-in on top biases the acceleration further toward the end. The target slides
+    // late so the body stays centred while it is still the thing you're looking at.
+    const zoom = sysT * 0.75 + sysT * sysT * 0.25;
     const dolly = DOLLY_NEAR * Math.pow(fitDolly / DOLLY_NEAR, zoom);
     const tLate = smoothstep(clamp01((sysT - 0.45) / 0.55));
     const tx = actPos[0] + (fitTarget[0] - actPos[0]) * tLate;
@@ -471,6 +504,12 @@ export function createSystemView({ registry, helioPos, helioEcl, getJd, onEnterB
     // of the pull-back; suppress its dot so there is only ever one of it on screen.
     const globeStillUp = sysT < 0.9;
 
+    // Dots + labels ramp in just after the pull-back starts, as the globe's own DOM
+    // markers are being retired — two sets of labels at once would just be clutter.
+    const uiA = smoothstep(clamp01((sysT - 0.05) / 0.25));
+    if (uiA < 0.01) { hitTargets.clear(); return; }
+    ctx.globalAlpha = uiA;
+
     // ── 6. Sun glow (before other bodies so dots overdraw it) ─────────────────
     {
       const sunP = bodyPositions.get('sun');
@@ -513,9 +552,9 @@ export function createSystemView({ registry, helioPos, helioEcl, getJd, onEnterB
         ctx.arc(px, py, dotR + 5, 0, Math.PI * 2);
         ctx.strokeStyle = color;
         ctx.lineWidth = 1.5;
-        ctx.globalAlpha = 0.55;
+        ctx.globalAlpha = 0.55 * uiA;
         ctx.stroke();
-        ctx.globalAlpha = 1.0;
+        ctx.globalAlpha = uiA;
       }
 
       if (b.id === hoverId) {
@@ -523,9 +562,9 @@ export function createSystemView({ registry, helioPos, helioEcl, getJd, onEnterB
         ctx.arc(px, py, dotR + 8, 0, Math.PI * 2);
         ctx.strokeStyle = '#ffffff';
         ctx.lineWidth = 1;
-        ctx.globalAlpha = 0.5;
+        ctx.globalAlpha = 0.5 * uiA;
         ctx.stroke();
-        ctx.globalAlpha = 1.0;
+        ctx.globalAlpha = uiA;
       }
 
       labelInfos.push({ id: b.id, px, py, dotR, color, name: b.name });
@@ -540,7 +579,10 @@ export function createSystemView({ registry, helioPos, helioEcl, getJd, onEnterB
 
     for (const info of labelInfos) {
       const textW = ctx.measureText(info.name).width;
-      const labelX = info.px + info.dotR + 5;
+      // Flip to the left of the dot rather than run off the right edge.
+      const labelX = info.px + info.dotR + 5 + textW > W - 8
+        ? info.px - info.dotR - 5 - textW
+        : info.px + info.dotR + 5;
       let labelY = info.py + 4;
 
       for (const p of placed) {
@@ -582,6 +624,7 @@ export function createSystemView({ registry, helioPos, helioEcl, getJd, onEnterB
     ctx.textAlign = 'right';
     ctx.fillStyle = 'rgba(255,255,255,0.22)';
     ctx.fillText(jdToDateStr(jd), W - 16, H - 28);
+    ctx.globalAlpha = 1.0;
   }
 
   return {
