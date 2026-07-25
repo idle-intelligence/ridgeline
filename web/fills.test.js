@@ -1,8 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { WebGPURenderer } from './renderer-webgpu.js';
-
-const R_WORLD = 6000;
+import { WORLD_RADIUS as R_WORLD } from './constants.js';
 
 // Build the fill-strip schedule the way draw() does, without a GPU device.
 function fillBands({ gridW, gridH, altWu, camLat = 0 }) {

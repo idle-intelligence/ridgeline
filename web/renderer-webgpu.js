@@ -23,18 +23,12 @@
 //      elevation→brightness + strength shading, then the aircraft wireframe (model_matrix). All
 //      channels match the WebGL2 renderer.
 
-import { PALETTE, WORLD_RADIUS } from './constants.js';
+import {
+  PALETTE, WORLD_RADIUS, EARTH_RADIUS_M, VERT_EXAGGERATION,
+  HORIZON_MARGIN, FADE_BAND, SIGHT_HALF_ANGLE, POLE_GUARD_LAT, OCCLUDER_FOV_GATE,
+} from './constants.js';
 
 const R_WORLD = WORLD_RADIUS;
-const VERT_EXAGGERATION = 8.0;
-
-// LOD/cull constants — MUST match core/src/geometry.rs.
-const HORIZON_MARGIN = 0.04;
-const FADE_BAND = 0.12;
-const SIGHT_HALF_ANGLE = 1.483;
-const POLE_GUARD_LAT = 88.0;     // polar-cap convergence guard — matches geometry.rs
-const OCCLUDER_FOV_GATE = 0.55; // dome gate (disc regime) — matches geometry.rs
-const OCCLUDER_R = R_WORLD * 0.985; // dome radius — matches geometry.rs
 const FILL_COARSEN = 3;          // per-ring fill coarsen vs lines — matches geometry.rs
 
 // ── The FLOOR field ──────────────────────────────────────────────────────────
@@ -806,7 +800,7 @@ export class WebGPURenderer {
     this.adapterLimits = { maxStorageBufferBindingSize: limMaxBinding, maxBufferSize: limMaxBuffer };
 
     // Synthesise an eng-like object from meta + raw buffer so _init can proceed normally.
-    const VERT_SCALE = (6000.0 / 6371000.0) * 8.0;
+    const VERT_SCALE = (R_WORLD / EARTH_RADIUS_M) * VERT_EXAGGERATION;
     const fakeEng = {
       heightfield_i16_ptr: () => 0,
       heightfield_i16_len: () => meta.width * meta.height,

@@ -5,6 +5,19 @@
 // affects the HUD km scale and vertical-exaggeration feel (see Body.mPerWu).
 export const WORLD_RADIUS = 6000.0;
 
+// Real Earth radius, meters — used to derive VERT_SCALE from R_WORLD.
+export const EARTH_RADIUS_M = 6_371_000.0;
+
+// Vertical exaggeration applied to elevation when mapping to world units.
+export const VERT_EXAGGERATION = 8.0;
+
+// LOD/cull constants — MUST match core/src/geometry.rs.
+export const HORIZON_MARGIN = 0.04;
+export const FADE_BAND = 0.12;
+export const SIGHT_HALF_ANGLE = 1.483;
+export const POLE_GUARD_LAT = 88.0;     // polar-cap convergence guard — matches geometry.rs
+export const OCCLUDER_FOV_GATE = 0.55; // dome gate (disc regime) — matches geometry.rs
+
 // Palette — restrained, not neon.
 // Sky: very deep blue-black. Fill: slightly lighter, warm-tinted dark grey-blue.
 // Ridge line: cool off-white, slightly warm.

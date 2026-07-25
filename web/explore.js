@@ -1,5 +1,5 @@
 import { WebGPURenderer } from './renderer-webgpu.js';
-import { WORLD_RADIUS } from './constants.js';
+import { WORLD_RADIUS, VERT_EXAGGERATION } from './constants.js';
 import { Body } from './body.js';
 import { dataUrl, cachedFetch } from './terrain-cache.js';
 import {
@@ -11,7 +11,6 @@ import { toJD, bodySkyDirection, OBLIQUITY, helioPos, helioEcl } from './ephemer
 import { createSystemView } from './system-view.js';
 
 const R_WORLD = WORLD_RADIUS;
-const VERT_EXAGGERATION = 8.0; // matches the renderer's ve_ratio = ve / VERT_EXAGGERATION
 const FOV_Y = Math.PI / 4;    // 45° — matches core
 // Camera pitch off nadir: TILT_MIN (~3°) = straight down at the planet, π/2 = horizon, higher =
 // looking up into the sky. How far above the horizon you may crane is capped PER altitude mode:
