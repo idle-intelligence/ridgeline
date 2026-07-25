@@ -157,6 +157,34 @@ fn sample_row_frac(r0: u32, frac: f32, c: u32) -> f32 {
   return a + (b - a) * frac;
 }
 
+// Min elevation (world units) over all data rows in [ra, rb] and columns in
+// [c - half_stride, c + half_stride], both clamped to grid bounds and wrapping
+// longitude.  This mirrors the displaced occluder mesh's per-vertex min-sampling,
+// guaranteeing that a fill-strip vertex can never sit ABOVE any ridgeline in the
+// cell it covers.
+fn sample_fill_min(ra: u32, rb: u32, c: u32, half_stride: u32) -> f32 {
+  let W = cam.width;
+  var mn : f32 = 1e30;
+  var r : u32 = ra;
+  loop {
+    if (r > rb) { break; }
+    // column window: c-half_stride .. c+half_stride, wrapping longitude
+    var dc : i32 = -i32(half_stride);
+    loop {
+      if (dc > i32(half_stride)) { break; }
+      var col : i32 = i32(c) + dc;
+      // wrap to [0, W)
+      col = col % i32(W);
+      if (col < 0) { col = col + i32(W); }
+      let v = sample_idx(r * W + u32(col));
+      if (v < mn) { mn = v; }
+      dc = dc + 1;
+    }
+    r = r + 1u;
+  }
+  return mn;
+}
+
 fn elev_norm(r0: u32, frac: f32, c: u32) -> f32 {
   if (cam.elev_max <= 0.0) { return 0.0; }
   return clamp(sample_row_frac(r0, frac, c) / cam.elev_max, 0.0, 1.0);
@@ -342,10 +370,13 @@ fn fillmain(@builtin(global_invocation_id) gid : vec3<u32>) {
     let c : u32 = u32(m);
 
     let lon = col_lon(c);
-    let ha_wu = sample_row_frac(fr.ra, 0.0, c);
-    let hb_wu = sample_row_frac(fr.rb, 0.0, c);
-    let pa = sphere_point_scaled(fr.lat_a, lon, ha_wu) * ${FILL_R_INSET};
-    let pb = sphere_point_scaled(fr.lat_b, lon, hb_wu) * ${FILL_R_INSET};
+    // Use the MINIMUM elevation over the entire row-span (ra..rb) and column half-span
+    // (±stride/2) so this fill vertex can never sit above any ridgeline in the cell it
+    // covers.  Both pa and pb share the same min — the strip only seals, never pokes.
+    let half_stride = stride / 2u;
+    let h_min = sample_fill_min(fr.ra, fr.rb, c, half_stride);
+    let pa = sphere_point_scaled(fr.lat_a, lon, h_min) * ${FILL_R_INSET};
+    let pb = sphere_point_scaled(fr.lat_b, lon, h_min) * ${FILL_R_INSET};
     let sa = point_strength(pa);
     let sb = point_strength(pb);
     let vis = (sa > 0.0 && in_sight(pa)) || (sb > 0.0 && in_sight(pb));
