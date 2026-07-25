@@ -91,6 +91,23 @@ const MAX_FILL_ROWS = 8_000; // fill strip descriptors per frame
 
 const RESTART = 0xffffffff;
 
+// The compute stage declares this many storage buffers. WebGPU guarantees only 8 per stage,
+// so this is a hard ceiling, not a target — see bindings.test.js.
+const COMPUTE_STORAGE_BUFFERS = 8;
+
+// Counters and the two drawIndexedIndirect arg blocks live in ONE storage buffer — WebGPU
+// guarantees only 8 storage buffers per shader stage, and the compute pass needs every slot.
+// u32 offsets: 0..3 counters, 4..8 line args, 9..13 fill args (byte offsets stay 4-aligned,
+// which is all drawIndexedIndirect requires).
+const INDIRECT_LINE_U32 = 4;
+const INDIRECT_FILL_U32 = 9;
+const COUNTER_BUF_U32 = 14;
+
+// Line positions (x,y,z) and attributes (strength,elev) share ONE buffer for the same reason:
+// positions from f32 index 0, attributes from ATTR_BASE_F32. Both regions are also bound as
+// vertex buffers — setVertexBuffer takes the byte offset.
+const ATTR_BASE_F32 = MAX_VERTS * 3;
+
 // ── WGSL: compute pass (ports emit_ring [LINE] + emit_fill_strip [FILL]) ──────
 const COMPUTE_WGSL = /* wgsl */`
 struct Camera {
@@ -121,15 +138,16 @@ struct FillRow { ra : u32, rb : u32, lat_a : f32, lat_b : f32, stride : u32, _pa
 @group(0) @binding(0) var<uniform> cam : Camera;
 @group(0) @binding(1) var<storage, read> heightfield : array<i32>; // packed i16 pairs
 @group(0) @binding(2) var<storage, read> rings : array<Ring>;
-@group(0) @binding(3) var<storage, read_write> out_pos : array<f32>;   // line x,y,z
-@group(0) @binding(4) var<storage, read_write> out_attr : array<f32>;  // line strength,elev
-@group(0) @binding(5) var<storage, read_write> out_idx : array<u32>;   // line indices
-@group(0) @binding(6) var<storage, read_write> counters : array<atomic<u32>>; // [0]=lvert [1]=lidx [2]=fvert [3]=fidx
-@group(0) @binding(7) var<storage, read_write> indirect : array<u32>;  // 2 indexed-indirect args (line, fill)
-@group(0) @binding(8) var<storage, read> fills : array<FillRow>;
-@group(0) @binding(9) var<storage, read_write> fout_pos : array<f32>;  // fill x,y,z
-@group(0) @binding(10) var<storage, read_write> fout_idx : array<u32>; // fill indices (tri-strip, restart)
-@group(0) @binding(11) var<uniform> floor_field : array<vec4<f32>, ${FLOOR_VEC4S}>; // FLOOR_ROWS×FLOOR_COLS, raw i16 units
+// line verts: x,y,z from 0, then strength,elev from ${ATTR_BASE_F32}u (one buffer, two regions)
+@group(0) @binding(3) var<storage, read_write> out_line : array<f32>;
+@group(0) @binding(4) var<storage, read_write> out_idx : array<u32>;   // line indices
+// counters + indirect share ONE buffer: [0]=lvert [1]=lidx [2]=fvert [3]=fidx, then the two
+// indexed-indirect arg blocks at ${INDIRECT_LINE_U32}u (line) and ${INDIRECT_FILL_U32}u (fill).
+@group(0) @binding(5) var<storage, read_write> counters : array<atomic<u32>>;
+@group(0) @binding(6) var<storage, read> fills : array<FillRow>;
+@group(0) @binding(7) var<storage, read_write> fout_pos : array<f32>;  // fill x,y,z
+@group(0) @binding(8) var<storage, read_write> fout_idx : array<u32>;  // fill indices (tri-strip, restart)
+@group(0) @binding(9) var<uniform> floor_field : array<vec4<f32>, ${FLOOR_VEC4S}>; // FLOOR_ROWS×FLOOR_COLS, raw i16 units
 
 const PI : f32 = 3.14159265359;
 fn deg2rad(d: f32) -> f32 { return d * (PI / 180.0); }
@@ -321,11 +339,11 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     let vis = (s > 0.0) && in_sight(p);
 
     if (vis && vcur < vbase + col_budget) {
-      out_pos[vcur * 3u + 0u] = p.x;
-      out_pos[vcur * 3u + 1u] = p.y;
-      out_pos[vcur * 3u + 2u] = p.z;
-      out_attr[vcur * 2u + 0u] = s;
-      out_attr[vcur * 2u + 1u] = elev_norm(ring.r0, ring.frac, c);
+      out_line[vcur * 3u + 0u] = p.x;
+      out_line[vcur * 3u + 1u] = p.y;
+      out_line[vcur * 3u + 2u] = p.z;
+      out_line[${ATTR_BASE_F32}u + vcur * 2u + 0u] = s;
+      out_line[${ATTR_BASE_F32}u + vcur * 2u + 1u] = elev_norm(ring.r0, ring.frac, c);
       if (!prev_vis) { out_idx[icur] = ${RESTART}u; icur = icur + 1u; }
       out_idx[icur] = vcur; icur = icur + 1u;
       vcur = vcur + 1u;
@@ -442,10 +460,14 @@ fn fillmain(@builtin(global_invocation_id) gid : vec3<u32>) {
 // Finalize: write the two drawIndexedIndirect arg blocks from the index counters.
 @compute @workgroup_size(1)
 fn finalize() {
+  let l = ${INDIRECT_LINE_U32}u;
   let lidx = min(atomicLoad(&counters[1]), ${MAX_INDICES}u);
-  indirect[0] = lidx; indirect[1] = 1u; indirect[2] = 0u; indirect[3] = 0u; indirect[4] = 0u;
+  atomicStore(&counters[l], lidx); atomicStore(&counters[l + 1u], 1u);
+  atomicStore(&counters[l + 2u], 0u); atomicStore(&counters[l + 3u], 0u); atomicStore(&counters[l + 4u], 0u);
+  let f = ${INDIRECT_FILL_U32}u;
   let fidx = min(atomicLoad(&counters[3]), ${MAX_FILL_INDICES}u);
-  indirect[5] = fidx; indirect[6] = 1u; indirect[7] = 0u; indirect[8] = 0u; indirect[9] = 0u;
+  atomicStore(&counters[f], fidx); atomicStore(&counters[f + 1u], 1u);
+  atomicStore(&counters[f + 2u], 0u); atomicStore(&counters[f + 3u], 0u); atomicStore(&counters[f + 4u], 0u);
 }
 `;
 
@@ -759,7 +781,11 @@ export class WebGPURenderer {
       throw new Error(`heightfield ${(hfBytes/1e6).toFixed(0)}MB exceeds adapter limits`);
     }
     const limMaxStorage = adapter.limits.maxStorageBuffersPerShaderStage;
-    if (limMaxStorage < 10) throw new Error(`maxStorageBuffersPerShaderStage ${limMaxStorage} < 10`);
+    if (limMaxStorage < COMPUTE_STORAGE_BUFFERS) {
+      throw new Error(
+        `this device's WebGPU limits are too low: maxStorageBuffersPerShaderStage ` +
+        `${limMaxStorage} < ${COMPUTE_STORAGE_BUFFERS}`);
+    }
     const device = await adapter.requestDevice({
       requiredLimits: {
         maxStorageBufferBindingSize: limMaxBinding,
@@ -793,7 +819,7 @@ export class WebGPURenderer {
 
     // The int16 heightfield needs a large storage-buffer binding (~151 MB for 12288×6144).
     // Request the adapter's max where it exceeds the 128 MB default. If the adapter can't
-    // bind the whole grid, fail clearly so main.js falls back to WebGL2.
+    // bind the whole grid, fail clearly — there is no second renderer to fall back to.
     const hfBytes = eng.heightfield_i16_len() * 2;
     const limMaxBinding = adapter.limits.maxStorageBufferBindingSize;
     const limMaxBuffer = adapter.limits.maxBufferSize;
@@ -801,13 +827,15 @@ export class WebGPURenderer {
       throw new Error(
         `heightfield ${(hfBytes/1e6).toFixed(0)}MB exceeds adapter limits ` +
         `(maxStorageBufferBindingSize ${(limMaxBinding/1e6).toFixed(0)}MB, ` +
-        `maxBufferSize ${(limMaxBuffer/1e6).toFixed(0)}MB) — fall back to WebGL2`);
+        `maxBufferSize ${(limMaxBuffer/1e6).toFixed(0)}MB)`);
     }
-    // The compute pass uses 10 storage buffers in one stage; the default per-stage limit is 8.
-    // Request the adapter's max (it must support ≥ 10 for this renderer; else fail → WebGL2).
+    // The compute pass uses COMPUTE_STORAGE_BUFFERS storage buffers in one stage, which is
+    // exactly the per-stage minimum WebGPU guarantees.
     const limMaxStorage = adapter.limits.maxStorageBuffersPerShaderStage;
-    if (limMaxStorage < 10) {
-      throw new Error(`maxStorageBuffersPerShaderStage ${limMaxStorage} < 10 — fall back to WebGL2`);
+    if (limMaxStorage < COMPUTE_STORAGE_BUFFERS) {
+      throw new Error(
+        `this device's WebGPU limits are too low: maxStorageBuffersPerShaderStage ` +
+        `${limMaxStorage} < ${COMPUTE_STORAGE_BUFFERS}`);
     }
     const device = await adapter.requestDevice({
       requiredLimits: {
@@ -838,18 +866,19 @@ export class WebGPURenderer {
     // (e.g. the Moon in explore mode) can be registered and swapped at runtime.
 
     // ── GPU geometry buffers (LINE + FILL channels) ──
-    this.posBuf = device.createBuffer({ size: MAX_VERTS * 3 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX });
-    this.attrBuf = device.createBuffer({ size: MAX_VERTS * 2 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX });
+    this.lineVertBuf = device.createBuffer({ size: (ATTR_BASE_F32 + MAX_VERTS * 2) * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX });
     this.idxBuf = device.createBuffer({ size: MAX_INDICES * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDEX });
     this.fillPosBuf = device.createBuffer({ size: MAX_FILL_VERTS * 3 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX });
     this.fillIdxBuf = device.createBuffer({ size: MAX_FILL_INDICES * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDEX });
-    this.counterBuf = device.createBuffer({ size: 4 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
-    this.indirectBuf = device.createBuffer({ size: 10 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+    this.counterBuf = device.createBuffer({
+      size: COUNTER_BUF_U32 * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+    });
     this.ringBuf = device.createBuffer({ size: MAX_RINGS * 4 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.fillRowBuf = device.createBuffer({ size: MAX_FILL_ROWS * 8 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.camBuf = device.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
-    // ── Compute pipelines (explicit shared layout: all 12 bindings to all 3 entry points) ──
+    // ── Compute pipelines (explicit shared layout: all 10 bindings to all 3 entry points) ──
     const computeMod = device.createShaderModule({ code: COMPUTE_WGSL });
     const st = (t) => ({ buffer: { type: t } });
     const computeBGL = device.createBindGroupLayout({
@@ -860,12 +889,10 @@ export class WebGPURenderer {
         { binding: 3, visibility: GPUShaderStage.COMPUTE, ...st('storage') },
         { binding: 4, visibility: GPUShaderStage.COMPUTE, ...st('storage') },
         { binding: 5, visibility: GPUShaderStage.COMPUTE, ...st('storage') },
-        { binding: 6, visibility: GPUShaderStage.COMPUTE, ...st('storage') },
+        { binding: 6, visibility: GPUShaderStage.COMPUTE, ...st('read-only-storage') },
         { binding: 7, visibility: GPUShaderStage.COMPUTE, ...st('storage') },
-        { binding: 8, visibility: GPUShaderStage.COMPUTE, ...st('read-only-storage') },
-        { binding: 9, visibility: GPUShaderStage.COMPUTE, ...st('storage') },
-        { binding: 10, visibility: GPUShaderStage.COMPUTE, ...st('storage') },
-        { binding: 11, visibility: GPUShaderStage.COMPUTE, ...st('uniform') },
+        { binding: 8, visibility: GPUShaderStage.COMPUTE, ...st('storage') },
+        { binding: 9, visibility: GPUShaderStage.COMPUTE, ...st('uniform') },
       ],
     });
     const computeLayout = device.createPipelineLayout({ bindGroupLayouts: [computeBGL] });
@@ -1175,15 +1202,13 @@ export class WebGPURenderer {
         { binding: 0, resource: { buffer: this.camBuf } },
         { binding: 1, resource: { buffer: hfBuf } },
         { binding: 2, resource: { buffer: this.ringBuf } },
-        { binding: 3, resource: { buffer: this.posBuf } },
-        { binding: 4, resource: { buffer: this.attrBuf } },
-        { binding: 5, resource: { buffer: this.idxBuf } },
-        { binding: 6, resource: { buffer: this.counterBuf } },
-        { binding: 7, resource: { buffer: this.indirectBuf } },
-        { binding: 8, resource: { buffer: this.fillRowBuf } },
-        { binding: 9, resource: { buffer: this.fillPosBuf } },
-        { binding: 10, resource: { buffer: this.fillIdxBuf } },
-        { binding: 11, resource: { buffer: minElevBuf } },
+        { binding: 3, resource: { buffer: this.lineVertBuf } },
+        { binding: 4, resource: { buffer: this.idxBuf } },
+        { binding: 5, resource: { buffer: this.counterBuf } },
+        { binding: 6, resource: { buffer: this.fillRowBuf } },
+        { binding: 7, resource: { buffer: this.fillPosBuf } },
+        { binding: 8, resource: { buffer: this.fillIdxBuf } },
+        { binding: 9, resource: { buffer: minElevBuf } },
       ],
     });
 
@@ -1358,7 +1383,7 @@ export class WebGPURenderer {
       rp.setBindGroup(0, this.fillBind);
       rp.setVertexBuffer(0, this.fillPosBuf);
       rp.setIndexBuffer(this.fillIdxBuf, 'uint32');
-      rp.drawIndexedIndirect(this.indirectBuf, 5 * 4); // fill args block
+      rp.drawIndexedIndirect(this.counterBuf, INDIRECT_FILL_U32 * 4); // fill args block
     }
 
     // lines (drawIndexedIndirect from compute output)
@@ -1368,10 +1393,10 @@ export class WebGPURenderer {
     device.queue.writeBuffer(this.lineVP, 0, this._lineUScratch);
     rp.setPipeline(this.linePipe);
     rp.setBindGroup(0, this.lineBind);
-    rp.setVertexBuffer(0, this.posBuf);
-    rp.setVertexBuffer(1, this.attrBuf);
+    rp.setVertexBuffer(0, this.lineVertBuf);
+    rp.setVertexBuffer(1, this.lineVertBuf, ATTR_BASE_F32 * 4);
     rp.setIndexBuffer(this.idxBuf, 'uint32');
-    rp.drawIndexedIndirect(this.indirectBuf, 0); // line args block
+    rp.drawIndexedIndirect(this.counterBuf, INDIRECT_LINE_U32 * 4); // line args block
 
     rp.end();
     device.queue.submit([enc.finish()]);
@@ -1383,16 +1408,15 @@ export class WebGPURenderer {
     const dev = this.device;
     const rb = dev.createBuffer({ size: 64, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const enc = dev.createCommandEncoder();
-    enc.copyBufferToBuffer(this.counterBuf, 0, rb, 0, 16);
-    enc.copyBufferToBuffer(this.indirectBuf, 0, rb, 16, 40);
+    enc.copyBufferToBuffer(this.counterBuf, 0, rb, 0, COUNTER_BUF_U32 * 4);
     dev.queue.submit([enc.finish()]);
     await rb.mapAsync(GPUMapMode.READ);
     const u = new Uint32Array(rb.getMappedRange().slice(0));
     rb.unmap();
     return {
       lineVerts: u[0], lineIdx: u[1], fillVerts: u[2], fillIdx: u[3],
-      lineIndirect: [u[4], u[5], u[6], u[7], u[8]],
-      fillIndirect: [u[9], u[10], u[11], u[12], u[13]],
+      lineIndirect: [...u.slice(INDIRECT_LINE_U32, INDIRECT_LINE_U32 + 5)],
+      fillIndirect: [...u.slice(INDIRECT_FILL_U32, INDIRECT_FILL_U32 + 5)],
     };
   }
 }
