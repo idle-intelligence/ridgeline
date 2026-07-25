@@ -355,12 +355,24 @@ function veForAlt(alt) {
 function sampleElevM(b, latDeg, lonDeg) {
   if (!b.hfPtr || !wasmMem || !b.gridW || !b.gridH) return 0;
   const w = b.gridW, h = b.gridH;
-  let r = Math.round((90 - latDeg) / 180 * (h - 1));
-  let c = Math.round(((((lonDeg + 180) % 360) + 360) % 360) / 360 * (w - 1));
-  r = r < 0 ? 0 : r >= h ? h - 1 : r;
-  c = c < 0 ? 0 : c >= w ? w - 1 : c;
+  // Fractional grid coordinates + BILINEAR interpolation of the 4 surrounding nodes, so the
+  // terrain-follow clearance is a continuous function of position — nearest-node sampling
+  // made the camera step/judder cell-to-cell as the sub-point moved.
+  const rf = (90 - latDeg) / 180 * (h - 1);
+  const cf = ((((lonDeg + 180) % 360) + 360) % 360) / 360 * (w - 1);
+  let r0 = Math.floor(rf); const fr = rf - r0;
+  r0 = r0 < 0 ? 0 : r0 >= h - 1 ? h - 2 : r0;
+  const r1 = r0 + 1;                          // latitude clamps at the poles
+  let c0 = Math.floor(cf); const fc = cf - c0;
+  c0 = ((c0 % w) + w) % w;
+  const c1 = (c0 + 1) % w;                    // longitude wraps
   // Fresh view each call (cheap, O(1)) so a WASM-memory grow can't leave a stale buffer.
-  return new Int16Array(wasmMem.buffer, b.hfPtr, w * h)[r * w + c];
+  const hf = new Int16Array(wasmMem.buffer, b.hfPtr, w * h);
+  const v00 = hf[r0 * w + c0], v01 = hf[r0 * w + c1];
+  const v10 = hf[r1 * w + c0], v11 = hf[r1 * w + c1];
+  const top = v00 + (v01 - v00) * fc;
+  const bot = v10 + (v11 - v10) * fc;
+  return top + (bot - top) * fr;
 }
 
 // ── Camera ────────────────────────────────────────────────────────────────────
