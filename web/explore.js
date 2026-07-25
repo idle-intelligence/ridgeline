@@ -7,7 +7,8 @@ import {
   mat4LookAt, mat4Perspective, mat4Mul,
   vec3ToLatLon, rotateY, rodrigues, raySphere, clampPolar,
 } from './mathutil.js';
-import { toJD, bodySkyDirection, OBLIQUITY } from './ephemeris.js';
+import { toJD, bodySkyDirection, OBLIQUITY, helioPos } from './ephemeris.js';
+import { createSystemView } from './system-view.js';
 
 const R_WORLD = WORLD_RADIUS;
 const VERT_EXAGGERATION = 8.0; // matches the renderer's ve_ratio = ve / VERT_EXAGGERATION
@@ -66,6 +67,19 @@ function tiltRestForAlt(altWu, body) {
 const Z_NEAR = 1.0;
 const Z_FAR = 200_000.0;
 const DAY_SEC = 86400;
+
+// ── System (orrery) view thresholds ──────────────────────────────────────────
+// SYSTEM_ENTER: altitude (wu) at which zooming out triggers the orrery.
+// SYSTEM_EXIT_ZOOM: orrery zoom below which scrolling-in exits back to globe.
+// ALT_CAP_SYSTEM: allow altitude to grow beyond normal 100k cap while in/entering system mode.
+const SYSTEM_ENTER      = 60_000;  // wu — trigger enter when altitude exceeds this
+const ALT_CAP_SYSTEM    = 200_000; // wu — max altitude while approaching system view
+const SYS_TRANSITION    = 0.6;     // seconds for cross-fade
+
+// System mode state (module-level so frame loop + handlers can share it).
+let systemMode = false;
+let sysT = 0.0;          // 0 = globe, 1 = system; eased each frame
+let systemView = null;   // set after main() creates it
 
 let wasmMem = null; // set in main(); backs the per-body heightfield sampling below
 let groundElevM = 0; // terrain elevation (m) under the camera this frame — for the HUD GND readout
@@ -709,6 +723,21 @@ async function main() {
   const getAspect = () => canvas.width / canvas.height;
   const getCam = () => computeCamera(getAspect());
 
+  // ── System view ─────────────────────────────────────────────────────────────
+  systemView = createSystemView({
+    registry: REGISTRY,
+    helioPos,
+    getJd: () => toJD(simEpochMs + simTimeSec * 1000),
+    onEnterBody: (bodyId) => {
+      systemMode = false;
+      const targetBody = REGISTRY.find(b => b.id === bodyId);
+      if (targetBody) {
+        active.view.altitude = SYSTEM_ENTER * 0.85;
+        jumpTo(targetBody).catch(e => console.warn('[explore] system onEnterBody:', e));
+      }
+    },
+  });
+
   // ── Orbit drag (shared by mouse + touch), singularity-free vector math ──────
   function beginDrag(x, y) {
     // Freeze the camera + planet-rotation for the whole drag. The trackball maps the grabbed
@@ -758,6 +787,10 @@ async function main() {
   // ── Mouse ───────────────────────────────────────────────────────────────────
   canvas.addEventListener('contextmenu', e => e.preventDefault());
   canvas.addEventListener('mousedown', e => {
+    if (systemMode) {
+      systemView.onPointerDown(e);
+      return;
+    }
     if (e.button === 2) {
       rightDragActive = true;
       rdStartX = e.clientX; rdStartY = e.clientY;
@@ -768,6 +801,7 @@ async function main() {
     beginDrag(e.clientX, e.clientY);
   });
   window.addEventListener('mousemove', e => {
+    if (systemMode) { systemView.onPointerMove(e); return; }
     if (rightDragActive) {
       active.view.tilt    = clampTilt(rdStartTilt - (e.clientY-rdStartY)*0.005, active.modeFor(active.view.altitude));
       active.view.heading = rdStartHeading + (e.clientX-rdStartX)*0.005;
@@ -776,12 +810,45 @@ async function main() {
     moveDrag(e.clientX, e.clientY);
   });
   window.addEventListener('mouseup', e => {
+    if (systemMode) { systemView.onPointerUp(e); return; }
     if (e.button === 2) rightDragActive = false; else dragActive = false;
+  });
+
+  // System view click-on-body handler (separate click listener on the sys canvas).
+  // Fires only while systemMode (sys canvas has pointer-events:auto then).
+  document.addEventListener('click', e => {
+    if (!systemMode) return;
+    const hit = systemView.hitTest(e.clientX, e.clientY);
+    if (hit) {
+      // Find the Body in REGISTRY.
+      const targetBody = REGISTRY.find(b => b.id === hit);
+      if (targetBody) {
+        // Exit system mode and jump to the clicked body.
+        systemMode = false;
+        active.view.altitude = SYSTEM_ENTER * 0.85;
+        jumpTo(targetBody).catch(err => console.warn('[explore] jumpTo after system click:', err));
+      }
+    }
   });
   canvas.addEventListener('wheel', e => {
     e.preventDefault();
+    if (systemMode) {
+      // In system mode: wheel-in (negative deltaY) decreases orrery zoom → exit when small enough.
+      const newZoom = systemView.onWheel(e);
+      if (newZoom < 0.55) {
+        // Exit system mode — restore globe at altitude just below threshold.
+        systemMode = false;
+        active.view.altitude = SYSTEM_ENTER * 0.85;
+      }
+      return;
+    }
     const v = active.view;
-    v.altitude = Math.max(2, Math.min(100_000, v.altitude * Math.pow(0.85, -e.deltaY / 100)));
+    const altCap = (sysT > 0 || v.altitude > 80_000) ? ALT_CAP_SYSTEM : 100_000;
+    v.altitude = Math.max(2, Math.min(altCap, v.altitude * Math.pow(0.85, -e.deltaY / 100)));
+    // Enter system mode when zooming far enough out.
+    if (v.altitude >= SYSTEM_ENTER && !systemMode) {
+      systemMode = true;
+    }
   }, { passive: false });
 
   // ── Touch ───────────────────────────────────────────────────────────────────
@@ -841,22 +908,66 @@ async function main() {
     active._prevMode = mode;
     active.view.tilt = clampTilt(active.view.tilt, mode);
 
-    const cam = computeCamera(getAspect());
-    renderer.draw(makeProxy(cam), null);
-    if (!loadingDone) { document.getElementById('loading').style.display = 'none'; loadingDone = true; }
-    document.getElementById('info').textContent = hudText();
-    // Compute Julian Date for this frame from the simulated clock.
-    // simEpochMs anchors the simulation to the real calendar so 1000× time speed
-    // sweeps the true planetary configuration.
     const jd = toJD(simEpochMs + simTimeSec * 1000);
-    // Process ALL markers each frame — REGISTRY bodies + MARKER_ONLY (e.g. Sun).
-    // Collect placement records, then resolve label collisions across all visible markers.
-    const placements = [];
-    for (const b of ALL_MARKERS) {
-      const p = updateBodyMarker(cam, b, jd);
-      if (p) placements.push(p);
+
+    // ── System mode transition ─────────────────────────────────────────────
+    const targetT = systemMode ? 1.0 : 0.0;
+    const tSpeed  = dt / SYS_TRANSITION;
+    if (sysT < targetT) sysT = Math.min(targetT, sysT + tSpeed);
+    else if (sysT > targetT) sysT = Math.max(targetT, sysT - tSpeed);
+
+    // Cross-fade: globe (#c) fades out as sysT→1, orrery (#sys) fades in.
+    const globeOpacity  = 1 - sysT;
+    const orreryOpacity = sysT;
+    canvas.style.opacity = String(globeOpacity);
+
+    if (systemView) {
+      systemView.setActive(active.id);
+      if (orreryOpacity > 0) {
+        if (sysT >= 0.01) systemView.show();
+        systemView.canvas.style.opacity = String(orreryOpacity);
+        systemView.draw(jd);
+      } else {
+        systemView.hide();
+      }
     }
-    resolveLabelCollisions(placements);
+
+    // ── Globe render (skip when fully in system mode) ─────────────────────
+    const cam = computeCamera(getAspect());
+    if (sysT < 1.0) {
+      renderer.draw(makeProxy(cam), null);
+    }
+    if (!loadingDone) { document.getElementById('loading').style.display = 'none'; loadingDone = true; }
+
+    // ── HUD ───────────────────────────────────────────────────────────────
+    const infoEl = document.getElementById('info');
+    if (sysT > 0.5) {
+      // System mode HUD: minimal readout.
+      const pad = n => String(n).padStart(2,'0');
+      const ms = (jd - 2440587.5) * 86400000;
+      const dt2 = new Date(ms);
+      const dateStr = `${dt2.getUTCFullYear()}-${pad(dt2.getUTCMonth()+1)}-${pad(dt2.getUTCDate())}`;
+      const spd = timeSpeed === 0 ? '⏸' : timeSpeed < 1 ? timeSpeed+'×' : timeSpeed >= 1000 ? (timeSpeed/1000).toFixed(0)+'k×' : timeSpeed+'×';
+      infoEl.textContent = `SOLAR SYSTEM\n${dateStr} · ${spd}\nclick a world to visit`;
+    } else {
+      infoEl.textContent = hudText();
+    }
+
+    // ── Markers: hide all in system mode ─────────────────────────────────
+    if (sysT > 0.5) {
+      for (const b of ALL_MARKERS) {
+        const w = widgets.get(b.id);
+        if (w) { w.marker.style.display = 'none'; w.arrow.style.display = 'none'; }
+      }
+    } else {
+      // Process ALL markers each frame — REGISTRY bodies + MARKER_ONLY (e.g. Sun).
+      const placements = [];
+      for (const b of ALL_MARKERS) {
+        const p = updateBodyMarker(cam, b, jd);
+        if (p) placements.push(p);
+      }
+      resolveLabelCollisions(placements);
+    }
 
     requestAnimationFrame(frame);
   }

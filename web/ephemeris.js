@@ -300,7 +300,7 @@ const SATELLITES = {
 };
 
 /** Heliocentric ecliptic J2000 position of a body (handles 'sun', 'moon', and satellites). */
-function helioPos(id, jd) {
+export function helioPos(id, jd) {
   if (id === 'sun')  return [0, 0, 0];
   if (id === 'moon') return add3(helioEcl('earth', jd), moonGeoEcl(jd));
 
