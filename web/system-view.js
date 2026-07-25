@@ -28,11 +28,13 @@
  *
  * API:
  *   createSystemView({ registry, helioPos, helioEcl, onEnterBody })
- *   → { canvas, setActive, show, hide, draw(jd, sysT), onPointerDown,
- *        onPointerMove, onPointerUp, hitTest(x,y) }
+ *   → { canvas, setActive, show, hide, draw(jd, sysT), onPointerDown(x,y,touch),
+ *        onPointerMove(x,y,touch), onPointerUp(x,y), onPointerCancel,
+ *        hitTest(x,y,touch) }
  */
 
 import { orbitPeriodDays } from './ephemeris.js';
+import { createDragTap } from './dragtap.js';
 
 // ── Log-radial compression ────────────────────────────────────────────────────
 // Single formula, all bodies. 40 AU upper bound covers Pluto's orbit.
@@ -225,59 +227,65 @@ export function createSystemView({ registry, helioPos, helioEcl, onEnterBody }) 
   // small to aim at. Rectangles are recorded during draw().
   const hitTargets = new Map(); // id → { px, py, dotR, x1, y1, x2, y2 }
   const LABEL_PAD = 7;
+  // A fingertip needs ~44 CSS px. The label rect is 10 px tall and the dots are a
+  // few px across, so touch pads both out to that — the drawn appearance is
+  // untouched, only the invisible hit region grows.
+  const TOUCH_PAD   = 17;
+  const TOUCH_DOT_R = 22;
   let hoverId = null;
 
-  function hitTest(px, py) {
+  function hitTest(px, py, touch = false) {
+    const pad = touch ? TOUCH_PAD : LABEL_PAD;
+    const minDotR = touch ? TOUCH_DOT_R : 14;
     let bestId = null, bestScore = Infinity;
     for (const [id, t] of hitTargets) {
-      const inLabel = px >= t.x1 - LABEL_PAD && px <= t.x2 + LABEL_PAD
-                   && py >= t.y1 - LABEL_PAD && py <= t.y2 + LABEL_PAD;
+      const inLabel = px >= t.x1 - pad && px <= t.x2 + pad
+                   && py >= t.y1 - pad && py <= t.y2 + pad;
       const dDot = Math.hypot(px - t.px, py - t.py);
-      const dotHit = dDot <= Math.max(14, t.dotR + 9);
+      const dotHit = dDot <= Math.max(minDotR, t.dotR + 9);
       if (!inLabel && !dotHit) continue;
-      const score = inLabel ? 0 : dDot;
+      // Enlarged touch targets overlap, so rank by the nearest centre rather than
+      // by list order. The mouse keeps its exact previous ranking (label wins flat).
+      let score;
+      if (!touch) score = inLabel ? 0 : dDot;
+      else if (!inLabel) score = dDot;
+      else score = Math.min(dDot, Math.hypot(px - (t.x1 + t.x2) / 2, py - (t.y1 + t.y2) / 2));
       if (score < bestScore) { bestScore = score; bestId = id; }
     }
     return bestId;
   }
 
-  // ── Pointer: drag-vs-click discrimination ─────────────────────────────────────
-  // A press that moves more than DRAG_SLOP px, or is held longer than CLICK_MS, is a
-  // camera rotate and never enters a body. Anything shorter and stiller is a click.
-  const DRAG_SLOP = 5;   // px
-  const CLICK_MS  = 450;
-  let _ptrDown = false, _dragging = false;
-  let _downX = 0, _downY = 0, _downT = 0, _ptrX = 0, _ptrY = 0;
+  // ── Pointer: drag-vs-tap discrimination ───────────────────────────────────────
+  // Mouse and touch run the same state machine (dragtap.js): a press that moves
+  // more than DRAG_SLOP px, or is held longer than CLICK_MS, is a camera rotate and
+  // never enters a body. Anything shorter and stiller is a tap.
+  const gesture = createDragTap();
 
-  function onPointerDown(e) {
-    _ptrDown = true;
-    _dragging = false;
-    _downX = _ptrX = e.clientX ?? e.touches?.[0]?.clientX ?? 0;
-    _downY = _ptrY = e.clientY ?? e.touches?.[0]?.clientY ?? 0;
-    _downT = performance.now();
+  function onPointerDown(x, y, touch = false) {
+    gesture.press(x, y, touch);
+    if (touch) hoverId = null;
   }
-  function onPointerMove(e) {
-    const x = e.clientX ?? e.touches?.[0]?.clientX ?? 0;
-    const y = e.clientY ?? e.touches?.[0]?.clientY ?? 0;
-    if (!_ptrDown) { hoverId = hitTest(x, y); return; }
-    if (!_dragging && Math.hypot(x - _downX, y - _downY) > DRAG_SLOP) _dragging = true;
-    if (_dragging) {
-      azimuthUser += (x - _ptrX) * 0.007;
+  function onPointerMove(x, y, touch = false) {
+    const m = gesture.move(x, y);
+    if (!m) { if (!touch) hoverId = hitTest(x, y); return; }
+    if (m.dragging) {
+      azimuthUser += m.dx * 0.007;
       elevation = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05,
-                    elevation - (y - _ptrY) * 0.005));
+                    elevation - m.dy * 0.005));
       hoverId = null;
     }
-    _ptrX = x; _ptrY = y;
   }
-  function onPointerUp(e) {
-    if (!_ptrDown) return;
-    const wasDrag = _dragging;
-    const held = performance.now() - _downT;
-    _ptrDown = false; _dragging = false;
-    if (wasDrag || held > CLICK_MS) return;
-    const x = e?.clientX ?? _ptrX, y = e?.clientY ?? _ptrY;
-    const hit = hitTest(x, y);
+  function onPointerUp(x, y) {
+    const touch = gesture.isTouch;
+    const r = gesture.release(x, y);
+    if (touch) hoverId = null;   // no hover on touch — never leave a ring stuck on
+    if (!r.tap) return;
+    const hit = hitTest(r.x, r.y, touch);
     if (hit) onEnterBody(hit);
+  }
+  function onPointerCancel() {
+    gesture.cancel();
+    hoverId = null;
   }
 
   // ── Orbit path building ───────────────────────────────────────────────────────
@@ -635,6 +643,7 @@ export function createSystemView({ registry, helioPos, helioEcl, onEnterBody }) 
     onPointerDown,
     onPointerMove,
     onPointerUp,
+    onPointerCancel,
     hitTest,
     isHovering: () => hoverId !== null,
   };

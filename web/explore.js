@@ -837,7 +837,7 @@ async function main() {
   canvas.addEventListener('contextmenu', e => e.preventDefault());
   canvas.addEventListener('mousedown', e => {
     if (sysT > SYS_INPUT_T) {
-      systemView.onPointerDown(e);
+      systemView.onPointerDown(e.clientX, e.clientY);
       return;
     }
     if (e.button === 2) {
@@ -851,7 +851,7 @@ async function main() {
   });
   window.addEventListener('mousemove', e => {
     if (sysT > SYS_INPUT_T) {
-      systemView.onPointerMove(e);
+      systemView.onPointerMove(e.clientX, e.clientY);
       canvas.style.cursor = systemView.isHovering() ? 'pointer' : '';
       return;
     }
@@ -864,7 +864,7 @@ async function main() {
     moveDrag(e.clientX, e.clientY);
   });
   window.addEventListener('mouseup', e => {
-    if (sysT > SYS_INPUT_T) { systemView.onPointerUp(e); return; }
+    if (sysT > SYS_INPUT_T) { systemView.onPointerUp(e.clientX, e.clientY); return; }
     if (e.button === 2) rightDragActive = false; else dragActive = false;
   });
 
@@ -883,8 +883,13 @@ async function main() {
   // ── Touch ───────────────────────────────────────────────────────────────────
   canvas.addEventListener('touchstart', e => {
     e.preventDefault();
-    if (e.touches.length === 1) beginDrag(e.touches[0].clientX, e.touches[0].clientY);
-    else if (e.touches.length === 2) {
+    if (e.touches.length === 1) {
+      // Past the SYSTEM threshold one finger orbits the orrery instead of the globe.
+      if (sysT > SYS_INPUT_T) systemView.onPointerDown(e.touches[0].clientX, e.touches[0].clientY, true);
+      else beginDrag(e.touches[0].clientX, e.touches[0].clientY);
+    } else if (e.touches.length === 2) {
+      // A second finger landing mid-rotate ends it cleanly — no tap, no jump.
+      systemView.onPointerCancel();
       dragActive = false;
       const t0 = e.touches[0], t1 = e.touches[1];
       lastPinchDist = Math.hypot(t0.clientX-t1.clientX, t0.clientY-t1.clientY);
@@ -895,8 +900,10 @@ async function main() {
   }, { passive: false });
   canvas.addEventListener('touchmove', e => {
     e.preventDefault();
-    if (e.touches.length === 1 && dragActive) moveDrag(e.touches[0].clientX, e.touches[0].clientY);
-    else if (e.touches.length === 2) {
+    if (e.touches.length === 1) {
+      if (sysT > SYS_INPUT_T) systemView.onPointerMove(e.touches[0].clientX, e.touches[0].clientY, true);
+      else if (dragActive) moveDrag(e.touches[0].clientX, e.touches[0].clientY);
+    } else if (e.touches.length === 2) {
       // Two fingers do BOTH: pinch (distance) → zoom; pan (centroid move) → tilt + heading,
       // exactly like the desktop right-drag.
       const t0 = e.touches[0], t1 = e.touches[1];
@@ -917,9 +924,16 @@ async function main() {
     }
   }, { passive: false });
   canvas.addEventListener('touchend', e => {
+    const t = e.changedTouches[0];
+    if (e.touches.length === 0 && t) systemView.onPointerUp(t.clientX, t.clientY);
     if (e.touches.length < 2) lastPinchDist = 0;
     if (e.touches.length === 0) dragActive = false;
   }, { passive: false });
+  canvas.addEventListener('touchcancel', () => {
+    systemView.onPointerCancel();
+    lastPinchDist = 0;
+    dragActive = false;
+  });
 
   // ── Render loop ───────────────────────────────────────────────────────────
   let prev = performance.now();
