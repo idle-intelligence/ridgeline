@@ -2,12 +2,12 @@
 name = "ridgeline-core"
 version = "0.1.0"
 edition = "2021"
-description = "Spherical-world mapping, flight physics, and ridgeline geometry generation for the ridgeline globe-flight game (Rust → WASM)."
+description = "Heightfield container for ridgeline, a solar-system globe explorer: decodes and owns the int16 elevation buffer for the JS/WGSL shell (Rust → WASM)."
 license = "MIT"
-repository = "https://github.com/ilnmtlbnm/ridgeline"
+repository = "https://github.com/idle-intelligence/ridgeline"
 authors = ["ilnmtlbnm"]
-keywords = ["wasm", "webgpu", "geometry", "physics", "globe"]
-categories = ["wasm", "game-development", "graphics"]
+keywords = ["wasm", "webgpu", "heightfield", "terrain", "globe"]
+categories = ["wasm", "graphics", "visualization"]
 
 [lib]
 # rlib alongside cdylib so the crate is unit-testable and usable as a normal dependency.
