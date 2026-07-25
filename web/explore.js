@@ -893,7 +893,13 @@ async function main() {
       const cx = (t0.clientX + t1.clientX) / 2, cy = (t0.clientY + t1.clientY) / 2;
       const v = active.view;
       // Maps convention: fingers apart (nd > last) → zoom IN = lower altitude.
-      if (lastPinchDist > 0) v.altitude = Math.max(2, Math.min(100_000, v.altitude * lastPinchDist / nd));
+      // Same dynamic cap as the wheel handler — past the SYSTEM-view threshold the
+      // ceiling opens up to ALT_CAP_SYSTEM so pinch can reach the full SYSTEM view.
+      const altCap = v.altitude > SYS_FADE_START * 0.5 ? ALT_CAP_SYSTEM : 100_000;
+      if (lastPinchDist > 0) {
+        altGlide = null; // manual zoom takes over, same as wheel
+        v.altitude = Math.max(2, Math.min(altCap, v.altitude * lastPinchDist / nd));
+      }
       v.tilt    = clampTilt(v.tilt - (cy - twoCY) * 0.005, active.modeFor(v.altitude));
       v.heading = v.heading + (cx - twoCX) * 0.005;
       lastPinchDist = nd; twoCX = cx; twoCY = cy;
