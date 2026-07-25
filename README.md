@@ -1,22 +1,16 @@
 # ridgeline
 
-A 3D flight/explore toy over the **whole Earth** — and the **Moon** and **Mars** — each rendered
-as a globe of stacked Joy Division "Unknown Pleasures" latitude rings. Real global elevation data;
-spawn out in deep space, recognise the continents (or Olympus Mons, or Mare Imbrium) on the
-glowing globe, then orbit, dive, and skim the surface.
+A 3D explorer of the solar system's solid worlds, each rendered as a globe of stacked Joy Division
+"Unknown Pleasures" latitude rings. Real elevation data; spawn out in deep space, recognise the
+continents (or Olympus Mons, or Mare Imbrium) on the glowing globe, then orbit, dive, and skim the
+surface — or pull all the way out to a SYSTEM view of the whole orrery.
 
 A `game + dataviz` experiment — a thing I built, not a polished product. Static site: no bundler,
 no server, all relative paths.
 
-## Two modes
-- **`web/explore.html`** — orbit-camera explorer: drift around a body, jump between Earth / Moon /
-  Mars via the sky markers, morph from a top-down deep-space view down to skimming the surface.
-- **`web/index.html`** — free-flight chase-camera game over the globe, with a sense of speed.
-
 ## Requirements
-Both modes use a **WebGPU** compute renderer by default. Explore mode **requires** WebGPU
-(Chrome/Edge 113+, Safari 18+; Firefox Android has no WebGPU yet). The flight game falls back to
-WebGL2 automatically where WebGPU is unavailable (`?webgpu=0` forces WebGL2).
+A **WebGPU** compute renderer, so a WebGPU-capable browser is required
+(Chrome/Edge 113+, Safari 18+; Firefox Android has no WebGPU yet).
 
 ## Run locally
 Prerequisites:
@@ -35,15 +29,11 @@ Serve from the **repo root** (not `web/`) so the app's `../data/*` fetches resol
 ```
 python3 -m http.server 8080
 ```
-- Explore: http://localhost:8080/web/explore.html
-- Flight:  http://localhost:8080/web/
+Then open http://localhost:8080/web/
 
 ## Controls
-**Explore** — drag to orbit · right-drag / two-finger to pitch + turn · wheel / pinch to change
-altitude · click a sky marker (MOON / MARS) to jump there · time buttons speed up rotation.
-
-**Flight** — ZS pitch · QD roll · AE yaw · Shift throttle up · Ctrl throttle down ·
-Space-hold afterburner · mouse freelook.
+Drag to orbit · right-drag / two-finger to pitch + turn · wheel / pinch to change altitude ·
+click a sky marker to jump to that body · time buttons speed up the clock.
 
 ## How it works
 - Each body is a globe of stacked constant-latitude rings — every ring is an elevation profile
@@ -59,10 +49,10 @@ roughly how fast each one spins/orbits, but they are **not a real ephemeris**: t
 in their true positions relative to each other.
 
 ## Stack
-- **Rust → WASM** core (`core/`): spherical world mapping, flight physics, per-frame cull/LOD +
-  ridgeline geometry generation. `wasm-pack build --target web`.
-- **Vanilla JS** shell (`web/`): WebGPU compute renderer + WebGL2 fallback, game loop, input.
-  No bundler, static assets only.
+- **Rust → WASM** core (`core/`): spherical world mapping, heightfield ownership, per-frame
+  cull/LOD. `wasm-pack build --target web`.
+- **Vanilla JS** shell (`web/`): WebGPU compute renderer (ridgeline geometry generated in WGSL),
+  render loop, input. No bundler, static assets only.
 - **Python** offline bakes (`data/bake/`): public-domain government DEMs → compact binary
   heightfields + meta.
 
@@ -71,7 +61,7 @@ in their true positions relative to each other.
 data/        meta.json per body + bake pipelines; *.bin heightfields fetched from HF (gitignored)
 data/bake/   Python pipelines: bake_earth.py / bake_moon.py / bake_mars.py
 core/        Rust/WASM crate
-web/         JS shell — explore.html, index.html, renderers, static assets
+web/         JS shell — index.html (the explorer), about.html, renderer, static assets
 ```
 
 ## Data & license
