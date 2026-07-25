@@ -72,12 +72,12 @@ const ELEMENTS = {
   // Ceres: approximate elements from USNO/MPC orbital data (a, e, I, period).
   // Mean longitude L0 at J2000 is approximate — the phase is plausible but not fitted.
   ceres:   { a0:2.76750591,  da: 0.0,        e0:0.07850400, de: 0.0,
-             I0:10.59406704,  dI: 0.0,        L0:291.40,      dL: 68.00 * 36525 / 1682,
+             I0:10.59406704,  dI: 0.0,        L0:291.40,      dL: 360 * 36525 / 1682,
              w0:73.59759364,  dw: 0.0,        O0: 80.32942800, dO: 0.0 },
   // Vesta: approximate elements from USNO/MPC orbital data (a, e, I, period).
   // Mean longitude L0 at J2000 is approximate — the phase is plausible but not fitted.
   vesta:   { a0:2.36126423,  da: 0.0,        e0:0.08874128, de: 0.0,
-             I0: 7.14187571,  dI: 0.0,        L0:103.85,      dL: 68.00 * 36525 / 1325,
+             I0: 7.14187571,  dI: 0.0,        L0:103.85,      dL: 360 * 36525 / 1325,
              w0:151.19853039, dw: 0.0,        O0:103.81050905, dO: 0.0 },
 };
 
@@ -317,6 +317,25 @@ export function helioPos(id, jd) {
   }
 
   return helioEcl(id, jd);
+}
+
+/**
+ * Sidereal orbital period of a body, in days, DERIVED from the same elements the
+ * position solver uses (P = 360° / dL × 36525). Deriving rather than tabulating is
+ * what guarantees that sampling helioEcl over one period traces a CLOSED ellipse —
+ * a hardcoded period that disagrees with dL leaves the path an open arc.
+ *
+ * @param {string} id — body id
+ * @returns {number|null} period in days, or null if the body has no modelled orbit
+ */
+export function orbitPeriodDays(id) {
+  if (id === 'sun') return null;
+  if (id === 'moon') return 27.321661;
+  const sat = SATELLITES[id];
+  if (sat) return sat.periodDays;
+  const el = ELEMENTS[id];
+  if (!el || !el.dL) return null;
+  return Math.abs(360 * 36525 / el.dL);
 }
 
 function add3(a, b)  { return [a[0]+b[0], a[1]+b[1], a[2]+b[2]]; }
