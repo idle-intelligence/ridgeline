@@ -18,11 +18,20 @@
     #timectl {
       position:fixed; bottom:calc(20px + env(safe-area-inset-bottom));
       left:50%; transform:translateX(-50%);
-      display:flex; gap:6px; align-items:center;
+      display:flex; gap:12px; align-items:center;
     }
     .tb {
       background:#0a0a0a; border:1px solid #2a2a2a; color:#666;
       padding:5px 11px; cursor:pointer; font:11px monospace; border-radius:2px;
+      position:relative;
+    }
+    /* A centred invisible overlay lifts the tap target to >=44x44 CSS px while the
+       button keeps its exact drawn size. The buttons have visible chrome, so the
+       padding + negative-margin trick used on #about-link would enlarge them. */
+    .tb::before {
+      content:''; position:absolute; top:50%; left:50%;
+      transform:translate(-50%,-50%);
+      width:100%; height:100%; min-width:44px; min-height:44px;
     }
     .tb:hover { border-color:#555; color:#ccc; }
     .tb.on { border-color:#777; color:#ddd; }
