@@ -9,6 +9,7 @@ import {
 } from './mathutil.js';
 import { toJD, bodySkyDirection, OBLIQUITY, helioPos, helioEcl } from './ephemeris.js';
 import { createSystemView } from './system-view.js';
+import { createDragTap } from './dragtap.js';
 
 const R_WORLD = WORLD_RADIUS;
 const FOV_Y = Math.PI / 4;    // 45° — matches core
@@ -693,7 +694,7 @@ async function main() {
   for (const b of ALL_MARKERS) {
     const marker = document.createElement('div');
     marker.style.cssText = 'position:fixed; display:none; transform:translate(-50%,-50%); cursor:pointer;'
-      + ' font:11px monospace; text-align:center; pointer-events:auto; z-index:5;';
+      + ' font:11px monospace; text-align:center; pointer-events:none; user-select:none; z-index:5;';
     marker.innerHTML = '<div class="dot"></div><div class="lbl"></div>';
     document.body.appendChild(marker);
     const dot = marker.querySelector('.dot');
@@ -702,21 +703,38 @@ async function main() {
       + ` border:1px solid #fff; box-shadow:0 0 8px rgba(255,255,255,0.4); background:${b.color};`;
     lbl.style.color = b.color;
     lbl.textContent = '▸ ' + b.name;
-    // Marker-only entries (no Body.resetView etc.) are not jumpable — suppress the click handler.
-    if (b instanceof Body) marker.addEventListener('click', () => jumpTo(b));
 
     const arrow = document.createElement('div');
     arrow.style.cssText = 'position:fixed; display:none; transform:translate(-50%,-50%);'
-      + ' cursor:pointer; text-align:center; z-index:5; pointer-events:auto; text-shadow:0 0 6px rgba(0,0,0,0.9);';
+      + ' cursor:pointer; text-align:center; z-index:5; pointer-events:none; user-select:none;'
+      + ' text-shadow:0 0 6px rgba(0,0,0,0.9);';
     arrow.innerHTML = '<span class="chev">➤</span><span class="albl"></span>';
     document.body.appendChild(arrow);
     const chev = arrow.querySelector('.chev');
     const albl = arrow.querySelector('.albl');
     chev.style.cssText = `display:inline-block; font-size:20px; line-height:1; color:${b.color};`;
     albl.style.cssText = `display:block; font:10px monospace; margin-top:2px; color:${b.color};`;
-    if (b instanceof Body) arrow.addEventListener('click', () => jumpTo(b));
 
     widgets.set(b.id, { marker, arrow, chev, lbl, albl });
+  }
+
+  // ── Sky-marker hit testing ────────────────────────────────────────────────
+  // The markers are pure visuals (pointer-events:none). They used to be clickable
+  // divs layered over the canvas with no touch listeners of their own, so a touch
+  // starting on one never reached the canvas — no preventDefault, no drag-rotate
+  // until you lifted and re-touched. Taps are resolved here instead, against the
+  // placements recorded by the last frame, so every touch reaches the canvas.
+  const MARKER_HIT_R = 22; // CSS px — a 44x44 target around the marker centre
+  let markerHits = [];
+  function markerAt(x, y) {
+    // Enlarged targets overlap (Charon sits on Pluto), so the nearest centre wins
+    // rather than DOM order — same rule as the SYSTEM view's hitTest.
+    let best = null, bestD = Infinity;
+    for (const p of markerHits) {
+      const d = Math.hypot(x - p.x, y - p.y);
+      if (d <= MARKER_HIT_R && d < bestD) { bestD = d; best = p.b; }
+    }
+    return best;
   }
 
   async function jumpTo(b) {
@@ -842,6 +860,17 @@ async function main() {
     prevX = x; prevY = y;
   }
 
+  // Drag-vs-tap for the globe view, sharing the SYSTEM view's state machine: a press
+  // that moves past DRAG_SLOP or is held past CLICK_MS rotates the globe and never
+  // counts as a marker tap.
+  const globeGesture = createDragTap();
+  function releaseGlobeGesture(x, y) {
+    const r = globeGesture.release(x, y);
+    if (!r.tap) return;
+    const b = markerAt(r.x, r.y);
+    if (b) jumpTo(b);
+  }
+
   // ── Mouse ───────────────────────────────────────────────────────────────────
   canvas.addEventListener('contextmenu', e => e.preventDefault());
   canvas.addEventListener('mousedown', e => {
@@ -856,6 +885,7 @@ async function main() {
       active._autoTilt = false; // user takes over pitch → stop the surface auto-morph
       return;
     }
+    globeGesture.press(e.clientX, e.clientY);
     beginDrag(e.clientX, e.clientY);
   });
   window.addEventListener('mousemove', e => {
@@ -870,11 +900,14 @@ async function main() {
       active.view.heading = rdStartHeading + (e.clientX-rdStartX)*0.005;
       return;
     }
+    globeGesture.move(e.clientX, e.clientY);
     moveDrag(e.clientX, e.clientY);
   });
   window.addEventListener('mouseup', e => {
     if (sysT > SYS_INPUT_T) { systemView.onPointerUp(e.clientX, e.clientY); return; }
-    if (e.button === 2) rightDragActive = false; else dragActive = false;
+    if (e.button === 2) { rightDragActive = false; return; }
+    dragActive = false;
+    releaseGlobeGesture(e.clientX, e.clientY);
   });
 
   canvas.addEventListener('wheel', e => {
@@ -895,10 +928,14 @@ async function main() {
     if (e.touches.length === 1) {
       // Past the SYSTEM threshold one finger orbits the orrery instead of the globe.
       if (sysT > SYS_INPUT_T) systemView.onPointerDown(e.touches[0].clientX, e.touches[0].clientY, true);
-      else beginDrag(e.touches[0].clientX, e.touches[0].clientY);
+      else {
+        globeGesture.press(e.touches[0].clientX, e.touches[0].clientY, true);
+        beginDrag(e.touches[0].clientX, e.touches[0].clientY);
+      }
     } else if (e.touches.length === 2) {
       // A second finger landing mid-rotate ends it cleanly — no tap, no jump.
       systemView.onPointerCancel();
+      globeGesture.cancel();
       dragActive = false;
       const t0 = e.touches[0], t1 = e.touches[1];
       lastPinchDist = Math.hypot(t0.clientX-t1.clientX, t0.clientY-t1.clientY);
@@ -911,7 +948,10 @@ async function main() {
     e.preventDefault();
     if (e.touches.length === 1) {
       if (sysT > SYS_INPUT_T) systemView.onPointerMove(e.touches[0].clientX, e.touches[0].clientY, true);
-      else if (dragActive) moveDrag(e.touches[0].clientX, e.touches[0].clientY);
+      else if (dragActive) {
+        globeGesture.move(e.touches[0].clientX, e.touches[0].clientY);
+        moveDrag(e.touches[0].clientX, e.touches[0].clientY);
+      }
     } else if (e.touches.length === 2) {
       // Two fingers do BOTH: pinch (distance) → zoom; pan (centroid move) → tilt + heading,
       // exactly like the desktop right-drag.
@@ -934,12 +974,16 @@ async function main() {
   }, { passive: false });
   canvas.addEventListener('touchend', e => {
     const t = e.changedTouches[0];
-    if (e.touches.length === 0 && t) systemView.onPointerUp(t.clientX, t.clientY);
+    if (e.touches.length === 0 && t) {
+      systemView.onPointerUp(t.clientX, t.clientY);
+      releaseGlobeGesture(t.clientX, t.clientY);
+    }
     if (e.touches.length < 2) lastPinchDist = 0;
     if (e.touches.length === 0) dragActive = false;
   }, { passive: false });
   canvas.addEventListener('touchcancel', () => {
     systemView.onPointerCancel();
+    globeGesture.cancel();
     lastPinchDist = 0;
     dragActive = false;
   });
@@ -1038,6 +1082,7 @@ async function main() {
         const w = widgets.get(b.id);
         if (w) { w.marker.style.display = 'none'; w.arrow.style.display = 'none'; }
       }
+      markerHits = [];
     } else {
       // Process ALL markers each frame — REGISTRY bodies + MARKER_ONLY (e.g. Sun).
       const placements = [];
@@ -1046,6 +1091,8 @@ async function main() {
         if (p) placements.push(p);
       }
       resolveLabelCollisions(placements);
+      // Marker-only entries (the Sun) have no Body methods and are not jumpable.
+      markerHits = placements.filter(p => p.b instanceof Body);
     }
 
     requestAnimationFrame(frame);
