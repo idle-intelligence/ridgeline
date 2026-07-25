@@ -36,7 +36,20 @@ const POLE_GUARD_LAT = 88.0;     // polar-cap convergence guard — matches geom
 const OCCLUDER_FOV_GATE = 0.55; // dome gate (disc regime) — matches geometry.rs
 const OCCLUDER_R = R_WORLD * 0.985; // dome radius — matches geometry.rs
 const FILL_COARSEN = 3;          // per-ring fill coarsen vs lines — matches geometry.rs
-const FILL_R_INSET = 0.999;      // fill pushed inward — matches geometry.rs
+
+// ── The FLOOR field ──────────────────────────────────────────────────────────
+// ONE smooth surface per body, precomputed on tier load (see computeOccluderField), shared by
+// BOTH dark surfaces: the occluder mesh reads it as a per-vertex attribute, the fill strips
+// sample it bilinearly in the compute pass. They can no longer disagree, and neither traces
+// the waves. Grid = the occluder mesh's own vertex grid.
+const OCC_STACKS = 64;
+const OCC_SLICES = 128;
+const FLOOR_ROWS = OCC_STACKS + 1;
+const FLOOR_COLS = OCC_SLICES + 1;
+// Clearance (world units, R_WORLD = 6000) of both dark surfaces below the smoothed ridge-foot
+// envelope. THE knob for "how far under the ridges the dark body sits": raise it if the body
+// still reaches into the bumps, lower it if the ridge feet float.
+const FLOOR_CLEARANCE_WU = 8.0;
 
 function stridesForDistance(d) {
   if (d < 1200.0) return [2, 4];   // near→horizon: uniform "second level", no visible bands
@@ -120,6 +133,7 @@ struct FillRow { ra : u32, rb : u32, lat_a : f32, lat_b : f32, stride : u32, _pa
 @group(0) @binding(8) var<storage, read> fills : array<FillRow>;
 @group(0) @binding(9) var<storage, read_write> fout_pos : array<f32>;  // fill x,y,z
 @group(0) @binding(10) var<storage, read_write> fout_idx : array<u32>; // fill indices (tri-strip, restart)
+@group(0) @binding(11) var<storage, read> floor_field : array<f32>;    // FLOOR_ROWS×FLOOR_COLS, raw i16 units
 
 const PI : f32 = 3.14159265359;
 fn deg2rad(d: f32) -> f32 { return d * (PI / 180.0); }
@@ -157,29 +171,26 @@ fn sample_row_frac(r0: u32, frac: f32, c: u32) -> f32 {
   return a + (b - a) * frac;
 }
 
-// Min elevation (world units) between the two bounding ridgeline rows [ra, rb] at
-// column c. The fill strip interpolates linearly between ra and rb, so in a crater
-// the straight segment would ride ABOVE the dipped floor — sampling the minimum keeps
-// the strip at-or-below terrain (it only seals, never pokes).
+// The FLOOR: elevation (world units) of the shared smooth envelope at (lat, lon), bilinear
+// over the FLOOR_ROWS×FLOOR_COLS grid, minus the clearance. This is the SAME field the
+// occluder mesh displaces by, so the two dark surfaces coincide instead of disagreeing.
 //
-// BOUNDED cost: the two endpoints plus two interior thirds (≤4 samples/vertex),
-// independent of how many rows the span covers. A full row×column min loop here was
-// O(rowStep·colStride) per vertex — ~128 samples in ATMO — and dropped the frame rate
-// to ~1 fps. Four points catch crater floors near the 1/3 and 2/3 marks; the column
-// dimension is dropped (adjacent fill columns are close, so column poke is negligible).
-fn sample_fill_min(ra: u32, rb: u32, c: u32) -> f32 {
-  let W = cam.width;
-  var mn : f32 = sample_idx(ra * W + c);
-  let hb = sample_idx(rb * W + c);
-  if (hb < mn) { mn = hb; }
-  let span : u32 = rb - ra;
-  if (span >= 2u) {
-    let v1 = sample_idx((ra + span / 3u) * W + c);
-    let v2 = sample_idx((ra + (2u * span) / 3u) * W + c);
-    if (v1 < mn) { mn = v1; }
-    if (v2 < mn) { mn = v2; }
-  }
-  return mn;
+// It is a pure function of (lat, lon): consecutive fill bands evaluate it identically at
+// their shared latitude, so their edges meet exactly — no crack for the sky to show
+// through. (The old per-band column minimum gave each band its own edge radius; those
+// mismatched edges were the black slits.) 4 loads/vertex, no dependence on band height.
+fn floor_h_wu(lat_deg: f32, lon_deg: f32) -> f32 {
+  let fi = clamp((lat_deg + 90.0) / 180.0 * ${FLOOR_ROWS - 1}.0, 0.0, ${FLOOR_ROWS - 1}.0);
+  let fj = clamp((lon_deg + 180.0) / 360.0 * ${FLOOR_COLS - 1}.0, 0.0, ${FLOOR_COLS - 1}.0);
+  let i0 = min(u32(fi), ${FLOOR_ROWS - 2}u);
+  let j0 = min(u32(fj), ${FLOOR_COLS - 2}u);
+  let ti = fi - f32(i0);
+  let tj = fj - f32(j0);
+  let base0 = i0 * ${FLOOR_COLS}u + j0;
+  let base1 = base0 + ${FLOOR_COLS}u;
+  let top = mix(floor_field[base0], floor_field[base0 + 1u], tj);
+  let bot = mix(floor_field[base1], floor_field[base1 + 1u], tj);
+  return mix(top, bot, ti) * cam.vert_scale - ${FLOOR_CLEARANCE_WU.toFixed(3)} / cam.ve_ratio;
 }
 
 fn elev_norm(r0: u32, frac: f32, c: u32) -> f32 {
@@ -397,12 +408,11 @@ fn fillmain(@builtin(global_invocation_id) gid : vec3<u32>) {
     let c : u32 = u32(m);
 
     let lon = col_lon(c);
-    // Use the MINIMUM elevation between the bounding rows (ra..rb) at this column so the
-    // fill vertex can never sit above a ridgeline. Both pa and pb share the same min —
-    // the strip only seals, never pokes. Bounded to ≤4 samples/vertex (see sample_fill_min).
-    let h_min = sample_fill_min(fr.ra, fr.rb, c);
-    let pa = sphere_point_scaled(fr.lat_a, lon, h_min) * ${FILL_R_INSET};
-    let pb = sphere_point_scaled(fr.lat_b, lon, h_min) * ${FILL_R_INSET};
+    // Both edges ride the shared floor field, evaluated at their own latitude — provably
+    // at or below the terrain minimum (so the strip only seals, never pokes) and identical
+    // to the neighbouring band's edge (so the shell is watertight).
+    let pa = sphere_point_scaled(fr.lat_a, lon, floor_h_wu(fr.lat_a, lon));
+    let pb = sphere_point_scaled(fr.lat_b, lon, floor_h_wu(fr.lat_b, lon));
     let sa = point_strength(pa);
     let sb = point_strength(pb);
     let vis = (sa > 0.0 && in_sight(pa)) || (sb > 0.0 && in_sight(pb));
@@ -610,8 +620,6 @@ function mat4InvertInto(m, out) {
 // Displaced occluder mesh base: generates (lat, lon) per vertex and triangle indices.
 // Per-vertex minElevRaw is computed in _makeBody from the body's heightfield (CPU, one-off).
 // STACKS×SLICES covers the full sphere; rowLen = slices+1, vertCount = (stacks+1)×rowLen.
-const OCC_STACKS = 64;
-const OCC_SLICES = 128;
 function buildOccluderMeshBase() {
   const stacks = OCC_STACKS, slices = OCC_SLICES;
   const latLon = []; // vec2<f32> per vertex: [lat_deg, lon_deg]
@@ -869,7 +877,7 @@ export class WebGPURenderer {
     this.fillRowBuf = device.createBuffer({ size: MAX_FILL_ROWS * 8 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.camBuf = device.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
-    // ── Compute pipelines (explicit shared layout: all 11 bindings to all 3 entry points) ──
+    // ── Compute pipelines (explicit shared layout: all 12 bindings to all 3 entry points) ──
     const computeMod = device.createShaderModule({ code: COMPUTE_WGSL });
     const st = (t) => ({ buffer: { type: t } });
     const computeBGL = device.createBindGroupLayout({
@@ -885,6 +893,7 @@ export class WebGPURenderer {
         { binding: 8, visibility: GPUShaderStage.COMPUTE, ...st('read-only-storage') },
         { binding: 9, visibility: GPUShaderStage.COMPUTE, ...st('storage') },
         { binding: 10, visibility: GPUShaderStage.COMPUTE, ...st('storage') },
+        { binding: 11, visibility: GPUShaderStage.COMPUTE, ...st('read-only-storage') },
       ],
     });
     const computeLayout = device.createPipelineLayout({ bindGroupLayouts: [computeBGL] });
@@ -1191,6 +1200,19 @@ export class WebGPURenderer {
     const wordCount = Math.ceil(hfLen / 2); // round up so an odd hfLen keeps its trailing i16
     const hfBuf = device.createBuffer({ size: wordCount * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(hfBuf, 0, new Uint8Array(wasmMemory.buffer, hfPtr, hfBytes));
+
+    // The shared FLOOR field (CPU, one-off per tier load): per-cell minimum, eroded and
+    // blurred into a smooth envelope. Consumed twice — as the occluder mesh's per-vertex
+    // displacement (VERTEX) and as the fill strips' floor in the compute pass (STORAGE).
+    const gridW = eng.grid_width(), gridH = eng.grid_height();
+    const hf = new Int16Array(wasmMemory.buffer, hfPtr, hfLen);
+    const minElevF32 = computeOccluderField(hf, gridW, gridH, OCC_STACKS, OCC_SLICES, !!smoothOccluder);
+    const minElevBuf = device.createBuffer({
+      size: minElevF32.byteLength,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(minElevBuf, 0, minElevF32);
+
     const computeBind = device.createBindGroup({
       layout: this._computeBGL,
       entries: [
@@ -1205,16 +1227,9 @@ export class WebGPURenderer {
         { binding: 8, resource: { buffer: this.fillRowBuf } },
         { binding: 9, resource: { buffer: this.fillPosBuf } },
         { binding: 10, resource: { buffer: this.fillIdxBuf } },
+        { binding: 11, resource: { buffer: minElevBuf } },
       ],
     });
-
-    // Compute the per-vertex occluder displacement for the displaced mesh (CPU, one-off):
-    // per-cell minimum, eroded and blurred into a smooth envelope, then biased down.
-    const gridW = eng.grid_width(), gridH = eng.grid_height();
-    const hf = new Int16Array(wasmMemory.buffer, hfPtr, hfLen);
-    const minElevF32 = computeOccluderField(hf, gridW, gridH, OCC_STACKS, OCC_SLICES, !!smoothOccluder);
-    const minElevBuf = device.createBuffer({ size: minElevF32.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
-    device.queue.writeBuffer(minElevBuf, 0, minElevF32);
 
     console.log(`[webgpu] body uploaded: ${(hfBytes/1e6).toFixed(0)}MB int16 (${gridW}x${gridH})`);
     return {
@@ -1357,13 +1372,12 @@ export class WebGPURenderer {
     // where minElevRaw is the smooth envelope built in computeOccluderField: below the terrain
     // minimum everywhere (no poke-through) but low-frequency, so it never traces the waves.
     if (this._activeMinElevBuf) {
-      const OCC_MARGIN = 8.0;
       const u = this._occUScratch;
       u.set(mvp, 0);
       u.set(PALETTE.fill, 16);
       u[20] = this.vertScale;
       u[21] = ve / VERT_EXAGGERATION;
-      u[22] = OCC_MARGIN;
+      u[22] = FLOOR_CLEARANCE_WU;
       u[23] = 0.0; // pad
       device.queue.writeBuffer(this.occVP, 0, u);
       rp.setPipeline(this.occPipe);
