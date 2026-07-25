@@ -32,3 +32,6 @@ venv/
 
 # Terrain blobs — hosted on the HF dataset idle-intelligence/ridgeline-terrain, not in git
 /data/*.bin
+
+# large preview images live on the HF dataset, not in git
+data/*preview*.png
