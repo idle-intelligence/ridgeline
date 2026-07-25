@@ -40,6 +40,7 @@ export class Body {
     // Explicit spec values still win (e.g. the Sun sets autoTilt: false explicitly).
     this.autoTilt = spec.autoTilt ?? (spec.radiusM >= 700_000);
     this.trueShape = spec.trueShape ?? false; // true → pin ve to fixedVe (true-proportion rendering)
+    this.smoothOccluder = spec.smoothOccluder ?? false; // true → occluder is a plain sphere, not a terrain envelope
 
     // HUD altitude bands: ascending [[ceilWu, label], …]; last is the catch-all.
     this.modes = spec.modes;

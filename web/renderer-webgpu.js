@@ -730,9 +730,14 @@ const OCC_MIN_REDUCE = { init: Infinity, step: (a, v) => (v < a ? v : a), done: 
 const OCC_AVG_REDUCE = { init: 0, step: (a, v) => a + v, done: (a, r) => a / (2 * r + 1) };
 
 // Build the per-vertex occluder displacement (raw int16 units) for a body's heightfield.
-export function computeOccluderField(hf, gridW, gridH, stacks, slices) {
+// `smooth` skips the envelope and returns a plain sphere at the global minimum — for bodies
+// whose "elevation" is not relief (the Sun's magnetogram), where a shell shaped by the data
+// is meaningless. A sphere at the global minimum already clears every ridge foot, so it takes
+// no relief bias.
+export function computeOccluderField(hf, gridW, gridH, stacks, slices, smooth = false) {
   const { minElev, rawMin, rawMax } = computeMinElevPerVertex(hf, gridW, gridH, stacks, slices);
   const rows = stacks + 1, cols = slices + 1;
+  if (smooth) return new Float32Array(minElev.length).fill(rawMin);
   let field = occFilter(minElev, rows, cols, OCC_ERODE, OCC_MIN_REDUCE);
   for (let p = 0; p < OCC_BLUR_PASSES; p++) field = occFilter(field, rows, cols, OCC_BLUR_RADIUS, OCC_AVG_REDUCE);
   const bias = OCC_RELIEF_BIAS * (rawMax - rawMin);
@@ -1171,7 +1176,7 @@ export class WebGPURenderer {
   // Build a renderable BODY (planet/moon): upload its int16 heightfield to a GPU storage
   // buffer and create the compute bind group referencing it. Also computes the occluder
   // envelope for the displaced occluder mesh (one-off O(grid) CPU pass). Returns a body handle.
-  _makeBody(eng, wasmMemory) {
+  _makeBody(eng, wasmMemory, smoothOccluder) {
     const device = this.device;
     const hfPtr = eng.heightfield_i16_ptr();
     const hfLen = eng.heightfield_i16_len();
@@ -1200,7 +1205,7 @@ export class WebGPURenderer {
     // per-cell minimum, eroded and blurred into a smooth envelope, then biased down.
     const gridW = eng.grid_width(), gridH = eng.grid_height();
     const hf = new Int16Array(wasmMemory.buffer, hfPtr, hfLen);
-    const minElevF32 = computeOccluderField(hf, gridW, gridH, OCC_STACKS, OCC_SLICES);
+    const minElevF32 = computeOccluderField(hf, gridW, gridH, OCC_STACKS, OCC_SLICES, !!smoothOccluder);
     const minElevBuf = device.createBuffer({ size: minElevF32.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(minElevBuf, 0, minElevF32);
 
@@ -1215,7 +1220,7 @@ export class WebGPURenderer {
   }
 
   // Register an additional body (e.g. the Moon) for later swapping. Returns its handle.
-  addBody(eng, wasmMemory) { return this._makeBody(eng, wasmMemory); }
+  addBody(eng, wasmMemory, smoothOccluder) { return this._makeBody(eng, wasmMemory, smoothOccluder); }
 
   // Destroy a body handle, freeing its GPU buffers. Do NOT call on the currently
   // active body (switch to another first). Safe to call on any non-active handle.

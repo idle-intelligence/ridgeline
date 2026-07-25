@@ -125,7 +125,7 @@ function _applyTier(b, f, buf, meta, Engine, renderer, isActive) {
   const { bbox } = meta;
   const newEngine = new Engine(w, h, new Uint8Array(buf),
     meta.elev_max, bbox.lat_min, bbox.lat_max, bbox.lon_min, bbox.lon_max);
-  const newHandle = renderer.addBody(newEngine, wasmMem);
+  const newHandle = renderer.addBody(newEngine, wasmMem, b.smoothOccluder);
   // Occluder depth uses RAW int16 units (the shader's bulge units) — for scaled bodies
   // (Vesta: 2 m/unit) elev_min is real metres and would over-deepen the dome.
   newHandle.elevMinWu = (meta.elev_i16_min ?? meta.elev_min) * newHandle.vertScale;
@@ -304,6 +304,8 @@ const SUN = new Body({
   // Field-values are tiny relative to the huge radius — boost ve so the magnetic
   // ridges read like Earth's mountains do (≈ Earth relief ratio × 32).
   veFactor: 1.5, color: '#ffcf6a', hasOcean: false,
+  // The field is not relief: an occluder shaped by it is meaningless. Plain smooth sphere.
+  smoothOccluder: true,
   cacheBust: 'r3', // re-bake 3: restored gradation — ±32000 cap (was ±10000); veFactor 2→1.5
   autoTilt: false, // no resting-pitch morphs on the Sun — zooming keeps your angle
   tint: [1.35, 0.82, 0.38], // warm gold — blue cut hard so bright ridges stay amber, not clipped white
