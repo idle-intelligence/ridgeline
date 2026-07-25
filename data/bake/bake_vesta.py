@@ -256,8 +256,8 @@ def resample_to(elev, out_h, out_w):
     print(f"  numpy bilinear interp {src_w}x{src_h} -> {out_w}x{out_h} ...")
     row_idx = np.linspace(0, src_h - 1, out_h)
     col_idx = np.linspace(0, src_w - 1, out_w)
-    c0 = np.floor(col_idx).astype(int).clip(0, src_w - 2)
-    c1 = c0 + 1
+    c0 = np.floor(col_idx).astype(int).clip(0, src_w - 1)
+    c1 = (c0 + 1) % src_w          # periodic lon wrap (no dateline seam)
     dc = (col_idx - c0).astype(np.float32)
 
     out = np.empty((out_h, out_w), dtype=np.float32)
@@ -275,6 +275,32 @@ def resample_to(elev, out_h, out_w):
     return out
 
 
+def flatten_poles(elev, blend_deg=1.0):
+    """Collapse each polar row to its own row mean and cosine-blend that constant
+    into the neighbouring rows over the last `blend_deg` of latitude.
+
+    Vesta's north was in winter darkness during Dawn's HAMO stereo campaign, so
+    the DLR DTM carries several km of unconstrained, longitude-varying relief on
+    the rows nearest +90°.  Those rows collapse to a single point on the render
+    sphere, so the spread becomes a radial sawtooth crown.  Forcing the exact
+    pole row constant is not enough on its own — it would leave a step at row 1 —
+    hence the C1 (zero-derivative at both ends) cosine ramp.
+    """
+    h = elev.shape[0]
+    dlat = 180.0 / (h - 1)
+    n = max(1, int(round(blend_deg / dlat)))
+    for rows in (range(0, n + 1), range(h - 1, h - n - 2, -1)):
+        rows = list(rows)
+        cap = float(elev[rows[0]].mean())
+        spread = float(elev[rows[0]].max() - elev[rows[0]].min())
+        print(f"  pole row {rows[0]}: mean {cap:.0f} m, spread {spread:.0f} m "
+              f"-> flattened, blended over {n} rows ({n * dlat:.2f}°)")
+        for i, r in enumerate(rows):
+            w = 0.5 * (1.0 + np.cos(np.pi * i / n))   # 1 at the pole -> 0 at the edge
+            elev[r] = elev[r] * (1.0 - w) + cap * w
+    return elev
+
+
 def main():
     download()
 
@@ -284,6 +310,7 @@ def main():
     H_src, W_src = elev.shape
     print(f"\nresampling {W_src}x{H_src} -> {OUT_W}x{OUT_H} ...")
     elev_ds = resample_to(elev, OUT_H, OUT_W)
+    elev_ds = flatten_poles(elev_ds)
     H, W = elev_ds.shape
 
     # Vesta terrain range ~-43 km to +38 km (full triaxial relief vs 255 km sphere).

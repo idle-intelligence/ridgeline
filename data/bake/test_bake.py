@@ -176,3 +176,54 @@ def test_lat_lon_to_grid_index_mapping():
     rmid, cmid = sample_index(0.0, 0.0)
     assert rmid == round((h - 1) / 2)
     assert cmid == round((w - 1) / 2)
+
+
+# --- 6. Vesta polar flatten ----------------------------------------------------
+
+import bake_vesta
+
+
+def _wobbly(h, w, amp=3474.0):
+    """Every row carries the same longitude wobble, so any change in a row's
+    peak-to-peak spread is entirely the doing of flatten_poles."""
+    lon = np.linspace(0.0, 2.0 * np.pi, w, endpoint=False)[None, :]
+    wobble = amp * 0.5 * (np.sin(lon) + np.sin(3.0 * lon + 0.7))
+    return (np.zeros((h, 1), dtype=np.float32) + wobble).astype(np.float32)
+
+
+def test_flatten_poles_makes_pole_rows_constant():
+    h, w = 361, 64
+    out = bake_vesta.flatten_poles(_wobbly(h, w), blend_deg=1.0)
+    assert np.ptp(out[0]) == pytest.approx(0.0, abs=1e-3)
+    assert np.ptp(out[-1]) == pytest.approx(0.0, abs=1e-3)
+
+
+def test_flatten_poles_leaves_the_rest_of_the_grid_untouched():
+    h, w = 361, 64
+    src = _wobbly(h, w)
+    out = bake_vesta.flatten_poles(src.copy(), blend_deg=1.0)
+    # blend_deg=1.0 on a 0.5°/row grid touches rows 0..2 and h-3..h-1 only.
+    assert np.array_equal(out[3:-3], src[3:-3])
+
+
+def test_flatten_poles_ramp_is_monotone_and_c1():
+    h, w = 3601, 64  # 0.05°/row -> a 20-row ramp, enough to see its shape
+    out = bake_vesta.flatten_poles(_wobbly(h, w), blend_deg=1.0)
+    spread = np.array([np.ptp(out[r]) for r in range(24)])
+    # Monotone non-decreasing away from the pole, and fully recovered past the ramp.
+    assert np.all(np.diff(spread) >= -1e-3)
+    assert spread[0] == pytest.approx(0.0, abs=1e-3)
+    assert spread[21] == pytest.approx(spread[23], rel=1e-6)
+    # C1: the cosine ramp flattens at both ends, so the first and last steps are
+    # far smaller than the step at the middle of the ramp.
+    steps = np.diff(spread[:21])
+    assert steps[0] < 0.1 * steps.max()
+    assert steps[-1] < 0.1 * steps.max()
+
+
+def test_flatten_poles_pole_value_is_the_original_row_mean():
+    h, w = 361, 64
+    src = _wobbly(h, w)
+    expected = float(src[0].mean())
+    out = bake_vesta.flatten_poles(src.copy(), blend_deg=1.0)
+    assert out[0, 0] == pytest.approx(expected, abs=1e-3)
