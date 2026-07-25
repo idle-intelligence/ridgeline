@@ -36,6 +36,13 @@
     #loadbar { width:220px; height:2px; background:#1a1a1a; overflow:hidden; }
     #loadfill { height:100%; width:0%; background:#6aa3ff; transition:width .15s ease; }
     #loadpct { color:#555; font-size:11px; }
+    #about-link {
+      position:fixed; top:16px; right:16px;
+      font:11px/1 monospace; color:#333;
+      text-decoration:none; letter-spacing:1px;
+      pointer-events:auto; z-index:20;
+    }
+    #about-link:hover { color:#555; }
   </style>
 </head>
 <body>
@@ -54,6 +61,7 @@
     <button class="tb" data-s="10000">10k×</button>
   </div>
   <div id="nowgpu">WebGPU required for explore mode.<br>Try Chrome 113+ or Safari 18+.</div>
+  <a id="about-link" href="about.html">about</a>
   <script type="module" src="explore.js"></script>
 </body>
 </html>
