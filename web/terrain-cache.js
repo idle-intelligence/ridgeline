@@ -1,8 +1,10 @@
 // terrain-cache.js — single point of truth for terrain data URLs + download-once caching.
 //
-// Deployers: set window.RIDGELINE_DATA_BASE to an absolute URL before this module loads,
-// e.g. 'https://huggingface.co/datasets/idle-intelligence/ridgeline-terrain/resolve/main'
-// The local dev default is '../data' (relative to the web/ directory).
+// Terrain is streamed from the HF dataset by default, so a local checkout behaves exactly
+// like the published demo without needing the ~1.1 GB of .bin files on disk.
+// Escape hatches, highest precedence first:
+//   window.RIDGELINE_DATA_BASE = '<absolute url>'  set before this module loads
+//   ?data=local                                    serve from ../data (offline; repo root)
 //
 // Cache version: bump CACHE_NAME whenever the .bin files are re-baked so users
 // automatically re-download the new data; stale older caches are deleted on load.
@@ -17,7 +19,12 @@ try {
   }));
 } catch (_) { /* Cache API unavailable — nothing to evict */ }
 
-const DATA_BASE = () => window.RIDGELINE_DATA_BASE ?? '../data';
+const HF_BASE = 'https://huggingface.co/datasets/idle-intelligence/ridgeline-terrain/resolve/main';
+
+const DATA_BASE = () => {
+  if (window.RIDGELINE_DATA_BASE) return window.RIDGELINE_DATA_BASE;
+  return new URLSearchParams(location.search).get('data') === 'local' ? '../data' : HF_BASE;
+};
 
 // Returns the full URL for a terrain file (e.g. 'heightfield.bin', 'moon_meta.json').
 export function dataUrl(file) {
