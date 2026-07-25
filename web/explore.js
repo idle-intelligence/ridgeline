@@ -767,12 +767,23 @@ async function main() {
     onEnterBody: (bodyId) => {
       const targetBody = REGISTRY.find(b => b.id === bodyId);
       if (!targetBody) return;
-      jumpTo(targetBody).then(() => {
+      // Glide down from system range instead of cutting — the zoom-out played backwards.
+      const arrive = () => {
         if (active !== targetBody) return;
         const dest = targetBody.view.altitude;   // canonical framing set by resetView()
         targetBody.view.altitude = SYS_FADE_END * 0.9;
         altGlide = { body: targetBody, dest };
-      }).catch(e => console.warn('[explore] system onEnterBody:', e));
+      };
+      // Re-entering the body you departed from is the natural "go back": jumpTo would
+      // no-op on it, so reset the framing here and take the same arrival glide.
+      if (targetBody === active) {
+        targetBody.resetView();
+        dragActive = false; rightDragActive = false;
+        arrive();
+        return;
+      }
+      jumpTo(targetBody).then(arrive)
+        .catch(e => console.warn('[explore] system onEnterBody:', e));
     },
   });
 

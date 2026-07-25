@@ -277,7 +277,7 @@ export function createSystemView({ registry, helioPos, helioEcl, onEnterBody }) 
     if (wasDrag || held > CLICK_MS) return;
     const x = e?.clientX ?? _ptrX, y = e?.clientY ?? _ptrY;
     const hit = hitTest(x, y);
-    if (hit && hit !== activeId) onEnterBody(hit);
+    if (hit) onEnterBody(hit);
   }
 
   // ── Orbit path building ───────────────────────────────────────────────────────
