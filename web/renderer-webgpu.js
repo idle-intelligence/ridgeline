@@ -46,6 +46,11 @@ const OCC_STACKS = 64;
 const OCC_SLICES = 128;
 const FLOOR_ROWS = OCC_STACKS + 1;
 const FLOOR_COLS = OCC_SLICES + 1;
+// The field rides a UNIFORM binding, not a storage one: Metal caps a shader stage at 10
+// storage buffers and the compute pass already uses all 10. Packed 4 floats per vec4 —
+// 2097 vec4s = 33 KB, comfortably inside the 64 KB uniform binding size.
+const FLOOR_LEN = FLOOR_ROWS * FLOOR_COLS;
+const FLOOR_VEC4S = Math.ceil(FLOOR_LEN / 4);
 // Clearance (world units, R_WORLD = 6000) of both dark surfaces below the smoothed ridge-foot
 // envelope. THE knob for "how far under the ridges the dark body sits": raise it if the body
 // still reaches into the bumps, lower it if the ridge feet float.
@@ -133,7 +138,7 @@ struct FillRow { ra : u32, rb : u32, lat_a : f32, lat_b : f32, stride : u32, _pa
 @group(0) @binding(8) var<storage, read> fills : array<FillRow>;
 @group(0) @binding(9) var<storage, read_write> fout_pos : array<f32>;  // fill x,y,z
 @group(0) @binding(10) var<storage, read_write> fout_idx : array<u32>; // fill indices (tri-strip, restart)
-@group(0) @binding(11) var<storage, read> floor_field : array<f32>;    // FLOOR_ROWS×FLOOR_COLS, raw i16 units
+@group(0) @binding(11) var<uniform> floor_field : array<vec4<f32>, ${FLOOR_VEC4S}>; // FLOOR_ROWS×FLOOR_COLS, raw i16 units
 
 const PI : f32 = 3.14159265359;
 fn deg2rad(d: f32) -> f32 { return d * (PI / 180.0); }
@@ -179,6 +184,7 @@ fn sample_row_frac(r0: u32, frac: f32, c: u32) -> f32 {
 // their shared latitude, so their edges meet exactly — no crack for the sky to show
 // through. (The old per-band column minimum gave each band its own edge radius; those
 // mismatched edges were the black slits.) 4 loads/vertex, no dependence on band height.
+fn floor_at(i: u32) -> f32 { return floor_field[i >> 2u][i & 3u]; }
 fn floor_h_wu(lat_deg: f32, lon_deg: f32) -> f32 {
   let fi = clamp((lat_deg + 90.0) / 180.0 * ${FLOOR_ROWS - 1}.0, 0.0, ${FLOOR_ROWS - 1}.0);
   let fj = clamp((lon_deg + 180.0) / 360.0 * ${FLOOR_COLS - 1}.0, 0.0, ${FLOOR_COLS - 1}.0);
@@ -188,8 +194,8 @@ fn floor_h_wu(lat_deg: f32, lon_deg: f32) -> f32 {
   let tj = fj - f32(j0);
   let base0 = i0 * ${FLOOR_COLS}u + j0;
   let base1 = base0 + ${FLOOR_COLS}u;
-  let top = mix(floor_field[base0], floor_field[base0 + 1u], tj);
-  let bot = mix(floor_field[base1], floor_field[base1 + 1u], tj);
+  let top = mix(floor_at(base0), floor_at(base0 + 1u), tj);
+  let bot = mix(floor_at(base1), floor_at(base1 + 1u), tj);
   return mix(top, bot, ti) * cam.vert_scale - ${FLOOR_CLEARANCE_WU.toFixed(3)} / cam.ve_ratio;
 }
 
@@ -895,7 +901,7 @@ export class WebGPURenderer {
         { binding: 8, visibility: GPUShaderStage.COMPUTE, ...st('read-only-storage') },
         { binding: 9, visibility: GPUShaderStage.COMPUTE, ...st('storage') },
         { binding: 10, visibility: GPUShaderStage.COMPUTE, ...st('storage') },
-        { binding: 11, visibility: GPUShaderStage.COMPUTE, ...st('read-only-storage') },
+        { binding: 11, visibility: GPUShaderStage.COMPUTE, ...st('uniform') },
       ],
     });
     const computeLayout = device.createPipelineLayout({ bindGroupLayouts: [computeBGL] });
@@ -1222,8 +1228,8 @@ export class WebGPURenderer {
     const hf = new Int16Array(wasmMemory.buffer, hfPtr, hfLen);
     const minElevF32 = computeOccluderField(hf, gridW, gridH, OCC_STACKS, OCC_SLICES, !!smoothOccluder);
     const minElevBuf = device.createBuffer({
-      size: minElevF32.byteLength,
-      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      size: FLOOR_VEC4S * 16,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     device.queue.writeBuffer(minElevBuf, 0, minElevF32);
 
