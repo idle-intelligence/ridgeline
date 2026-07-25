@@ -15,12 +15,17 @@ A **WebGPU** compute renderer, so a WebGPU-capable browser is required
 ## Run locally
 Prerequisites:
 ```
-# 1. Fetch the ~400 MB binary heightfields (hosted as a Hugging Face dataset)
+# 1. Fetch the binary heightfields (hosted as a Hugging Face dataset) — ~1.2 GB for everything
 hf download idle-intelligence/ridgeline-terrain --repo-type dataset --include "*.bin" --local-dir data
 
 # 2. Build the WASM core (outputs to web/pkg/)
 wasm-pack build core --target web --out-dir ../web/pkg
 ```
+You don't need all 1.2 GB to run it. The app streams coarse-to-fine and only fetches what you
+visit: the `_d16` tiers for all eleven bodies are ~4 MB total and are what paints the first frame,
+with `_d4` and full resolution pulled in the background as you get closer. Fetching just
+`--include "*_d16.bin"` is enough to fly around everything.
+
 (No `hf` CLI? Grab the files by URL from
 https://huggingface.co/datasets/idle-intelligence/ridgeline-terrain into `data/` —
 or re-bake them yourself with the scripts in `data/bake/`.)
