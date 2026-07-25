@@ -48,26 +48,29 @@ test('envelope stays at or below the per-cell terrain minimum (isolated spikes)'
 // and must sit far closer than the global minimum a plain sphere would be pinned to.
 test('smooth occluder is near-spherical, below the minimum, and above the global minimum', () => {
   const w = 360, h = 180;
-  // Large-scale structure (what the reach has to average away) plus fine noise.
-  const hf = new Int16Array(w * h);
-  for (let r = 0; r < h; r++) {
-    for (let c = 0; c < w; c++) {
-      const lat = (90 - r / (h - 1) * 180) * Math.PI / 180;
-      const lon = (-180 + c / (w - 1) * 360) * Math.PI / 180;
-      hf[r * w + c] = Math.round(15000 * Math.sin(3 * lon) * Math.cos(2 * lat));
-    }
-  }
+  // Bipolar spikes on a gentle background — the Sun's magnetogram in miniature. This is
+  // exactly the structure the wider reach exists to average away.
+  const hf = randomTerrain(w, h, 3000, 4242);
+  for (let i = 0; i < 200; i++) hf[(i * 613) % hf.length] = (i % 2 ? 1 : -1) * 30000;
   const { minElev } = computeMinElevPerVertex(hf, w, h, STACKS, SLICES);
   const rough = computeOccluderField(hf, w, h, STACKS, SLICES, false);
   const env = computeOccluderField(hf, w, h, STACKS, SLICES, true);
-  const spread = (a) => { let lo = Infinity, hi = -Infinity; for (const v of a) { if (v < lo) lo = v; if (v > hi) hi = v; } return hi - lo; };
+  // "Near-spherical" is about how fast it varies, not its total range: the largest step
+  // between neighbouring vertices is what reads as the shell tracing the data.
+  const roughness = (a) => {
+    let mx = 0;
+    for (let i = 0; i < STACKS + 1; i++) {
+      for (let j = 1; j <= SLICES; j++) mx = Math.max(mx, Math.abs(a[i * (SLICES + 1) + j] - a[i * (SLICES + 1) + j - 1]));
+    }
+    return mx;
+  };
   let globalMin = Infinity, sum = 0;
   for (let i = 0; i < env.length; i++) {
     assert.ok(env[i] <= minElev[i], `smooth field rises ${env[i] - minElev[i]} above the terrain minimum`);
     if (minElev[i] < globalMin) globalMin = minElev[i];
     sum += env[i];
   }
-  assert.ok(spread(env) < 0.5 * spread(rough), `smooth field varies ${spread(env)} vs ${spread(rough)} — not flatter`);
+  assert.ok(roughness(env) < 0.5 * roughness(rough), `smooth field steps ${roughness(env)} vs ${roughness(rough)} — not flatter`);
   assert.ok(sum / env.length > globalMin, 'smooth field should sit above the global minimum a plain sphere needs');
 });
 

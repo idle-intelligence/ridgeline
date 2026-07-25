@@ -752,7 +752,7 @@ const OCC_AVG_REDUCE = { init: 0, step: (a, v) => a + v, done: (a, r) => a / (2 
 // (the Sun's magnetogram), where a shell that follows the data is meaningless. The result is
 // near-spherical but still tracks the data, so it sits far closer than a sphere pinned to the
 // global minimum, which the field's extremes drag hopelessly deep.
-const OCC_SMOOTH_MULT = 3;
+const OCC_SMOOTH_MULT = 2;
 export function computeOccluderField(hf, gridW, gridH, stacks, slices, smooth = false) {
   const { minElev } = computeMinElevPerVertex(hf, gridW, gridH, stacks, slices);
   const rows = stacks + 1, cols = slices + 1;
