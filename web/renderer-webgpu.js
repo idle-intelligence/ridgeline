@@ -649,7 +649,6 @@ function buildOccluderMeshBase() {
 export function computeMinElevPerVertex(hf, gridW, gridH, stacks, slices) {
   const vertCount = (stacks + 1) * (slices + 1);
   const minElev = new Float32Array(vertCount);
-  let rawMin = 32767, rawMax = -32768;
   // Cell sizes for the occluder mesh in degrees
   const cellLat = 180 / stacks;   // degrees per mesh row
   const cellLon = 360 / slices;   // degrees per mesh column
@@ -674,25 +673,29 @@ export function computeMinElevPerVertex(hf, gridW, gridH, stacks, slices) {
       const cLo = Math.floor((lonLo + 180) / lonPerCol);
       const cHi  = Math.ceil((lonHi + 180) / lonPerCol);
       let mn = 32767;
+      const wraps = cLo < 0 || cHi > gridW - 1;
       for (let r = rMin; r <= rMax; r++) {
         const rowBase = r * gridW;
-        for (let c = cLo; c <= cHi; c++) {
-          const cw = ((c % gridW) + gridW) % gridW;
-          const v = hf[rowBase + cw];
-          if (v < mn) mn = v;
-          if (v > rawMax) rawMax = v;
+        if (wraps) {
+          for (let c = cLo; c <= cHi; c++) {
+            const v = hf[rowBase + (((c % gridW) + gridW) % gridW)];
+            if (v < mn) mn = v;
+          }
+        } else {
+          for (let c = cLo; c <= cHi; c++) {
+            const v = hf[rowBase + c];
+            if (v < mn) mn = v;
+          }
         }
       }
-      const m = mn === 32767 ? 0 : mn;
-      if (m < rawMin) rawMin = m;
-      minElev[i * (slices + 1) + j] = m;
+      minElev[i * (slices + 1) + j] = mn === 32767 ? 0 : mn;
     }
     // Column `slices` (+180°) is the SAME meridian as column 0 (−180°) — give it the
     // identical value rather than a second, differently-rounded window, so the wrapping
     // envelope filter below can never end up above it.
     minElev[i * (slices + 1) + slices] = minElev[i * (slices + 1)];
   }
-  return { minElev, rawMin, rawMax };
+  return { minElev };
 }
 
 // ── Occluder envelope ────────────────────────────────────────────────────────
