@@ -21,7 +21,12 @@ const TILT_MIN = 0.05;
 const DEG = Math.PI / 180;
 const SURFACE_TILT = 80 * DEG;             // resting pitch on arriving at the surface (ground + sky)
 const TILT_MAX_BY_MODE = { SURFACE: 110 * DEG, ATMO: Math.PI / 2, LOW: Math.PI / 2, ORBIT: 1.75 };
-const TILT_MAX = TILT_MAX_BY_MODE.SURFACE; // absolute ceiling — up-vector safety clamp in _buildCamMvp
+// A body can sit anywhere up to the zenith, and the per-mode ceilings (100–110°) stop the
+// camera ~10° above the horizon — so a marker high overhead could never be faced, and the
+// hop's hold beat framed empty sky. The hop is allowed up to this instead, then eased back
+// into the mode's range on arrival. Kept short of 180°: at exactly π the up-vector is
+// degenerate (_buildCamMvp falls back, but the roll it picks is arbitrary).
+const TILT_HOP_MAX = 175 * DEG;
 const tiltMaxFor = m => TILT_MAX_BY_MODE[m] ?? 1.75; // DEEP SPACE etc. → ~100°
 const clampTilt = (t, m) => Math.max(TILT_MIN, Math.min(tiltMaxFor(m), t));
 const ALT_START = 12010;   // world units — lowest DEEP SPACE (just past the 12000 orbit ceiling); largest framed globe
@@ -418,7 +423,7 @@ function _buildCamMvp(pos, tiltR, headR, aspect, zNear = Z_NEAR, zFar = Z_FAR) {
   const northDir = northLen < 0.01 ? normalize(cross(radial, [1,0,0])) : normalize(northProj);
   const eastDir = normalize(cross(northDir, radial));
   const headFwd = add(scale(northDir, Math.cos(headR)), scale(eastDir, Math.sin(headR)));
-  const safeTilt = Math.max(TILT_MIN, Math.min(TILT_MAX, tiltR));
+  const safeTilt = Math.max(TILT_MIN, Math.min(TILT_HOP_MAX, tiltR));
   const nadir = scale(radial, -1);
   const lookDir = normalize(add(scale(nadir, Math.cos(safeTilt)), scale(headFwd, Math.sin(safeTilt))));
   const upRaw = sub(radial, scale(lookDir, dot(radial, lookDir)));
@@ -893,7 +898,8 @@ async function main() {
   const smoother = t => t * t * t * (t * (t * 6 - 15) + 10);
   const easeOut  = t => 1 - (1 - t) ** 3;          // fastest at the start, 0 velocity at the end
 
-  let hop = null;   // { phase, t, from, to, target, startAlt }
+  let hop = null;        // { phase, t, fromH, toH, fromT, toT, target, startAlt, dest }
+  let tiltRelax = false; // true while tilt is above the mode ceiling and easing back
 
   // Where to point to look AT a body, inverted from the camera's own construction in
   // _buildCamMvp: lookDir = nadir·cos(tilt) + headFwd·sin(tilt), with headFwd spanning
@@ -946,7 +952,7 @@ async function main() {
     hop = {
       phase: 'turn', t: 0, target: b,
       fromH: v.heading, toH: shortestTurn(v.heading, aim.heading),
-      fromT: v.tilt,    toT: clampTilt(aim.tilt, active.modeFor(v.altitude)),
+      fromT: v.tilt,    toT: Math.max(TILT_MIN, Math.min(TILT_HOP_MAX, aim.tilt)),
       startAlt: HOP_START,
     };
   }
@@ -1323,7 +1329,22 @@ async function main() {
       active.view.tilt += (target - active.view.tilt) * Math.min(1, dt * 1.4);
     }
     active._prevMode = mode;
-    active.view.tilt = clampTilt(active.view.tilt, mode);
+    // While a hop owns the camera it may exceed the mode ceiling (see TILT_HOP_MAX). On
+    // arrival, ease back into range rather than snapping — tiltRelax holds the relaxed
+    // ceiling until the eased value is legal again.
+    if (hop) {
+      tiltRelax = true;
+      active.view.tilt = Math.max(TILT_MIN, Math.min(TILT_HOP_MAX, active.view.tilt));
+    } else if (tiltRelax) {
+      const ceil = tiltMaxFor(mode);
+      if (active.view.tilt > ceil) {
+        active.view.tilt += (ceil - active.view.tilt) * Math.min(1, dt * 3.0);
+        if (active.view.tilt - ceil < 0.01) { active.view.tilt = ceil; tiltRelax = false; }
+      } else { tiltRelax = false; }
+      active.view.tilt = Math.max(TILT_MIN, Math.min(TILT_HOP_MAX, active.view.tilt));
+    } else {
+      active.view.tilt = clampTilt(active.view.tilt, mode);
+    }
 
     stepHop(dt);
 
