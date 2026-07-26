@@ -499,15 +499,10 @@ function makeProxy(cam) {
 
 // ── HUD ───────────────────────────────────────────────────────────────────────
 const COMPASS = ['N','NE','E','SE','S','SW','W','NW'];
-// LOD indicator: its own line under TIME, animated so a background tier fetch reads as
-// activity rather than a static label. Two styles, ?lod= to switch:
-//   dots (default) — trailing '.', '..', '...' cycling
-//   bar            — a dot progress bar, driven by real bytes when the fetch reports them
-const LOD_STYLE = new URLSearchParams(location.search).get('lod') === 'bar' ? 'bar' : 'dots';
-const LOD_BAR_W = 9;
-// 700 ms a step = a 2.1 s cycle against the CSS breathe's 1.8 s, so the two drift instead
-// of locking into a single pulse.
-const LOD_DOT_MS = 700;
+// LOD indicator: its own line under TIME, breathing (CSS) so a background fetch reads as
+// activity. A 20-dot bar driven by real bytes — an animated placeholder was tried first and
+// dropped, since the fetch already reports progress and a real bar says more.
+const LOD_BAR_W = 20;
 // How long a "complete" line stays up after the fetch finishes.
 const LOD_DONE_MS = 2200;
 // Tier names on screen. Internally the finest tier is 'full'; shown as d1 so the three read
@@ -521,29 +516,19 @@ let preloadStatus = null;
 let preloadDoneUntil = 0;
 const PRELOAD_DONE_MS = 3500;
 
+const lodBar = frac => {
+  const n = Math.round(Math.max(0, Math.min(1, frac)) * LOD_BAR_W);
+  return `[${'.'.repeat(n)}${' '.repeat(LOD_BAR_W - n)}]`;
+};
+
 function lodText(active, nowMs) {
   const label = lodLabel[active.id];
-  if (label) {
-    const what = `Loading ${LOD_WORD[label] ?? label}`;
-    if (LOD_STYLE === 'bar') {
-      const frac = Math.max(0, Math.min(1, lodProgress[active.id] ?? 0));
-      const n = Math.round(frac * LOD_BAR_W);
-      return `${what} [${'.'.repeat(n)}${' '.repeat(LOD_BAR_W - n)}]`;
-    }
-    return `${what} ${'.'.repeat(1 + Math.floor(nowMs / LOD_DOT_MS) % 3)}`;
-  }
+  if (label) return `Loading ${LOD_WORD[label] ?? label} ${lodBar(lodProgress[active.id] ?? 0)}`;
   const done = lodDone[active.id];
   if (done && nowMs < done.until) return `Loading ${done.word} complete`;
   // Nothing for the body you are on, so report the background warm-up instead. Named,
   // because unlike the active body's tiers it is not obvious what is loading.
-  if (preloadStatus) {
-    const what = `Loading ${preloadStatus.name} d16`;
-    if (LOD_STYLE === 'bar') {
-      const n = Math.round(Math.max(0, Math.min(1, preloadStatus.frac)) * LOD_BAR_W);
-      return `${what} [${'.'.repeat(n)}${' '.repeat(LOD_BAR_W - n)}]`;
-    }
-    return `${what} ${'.'.repeat(1 + Math.floor(nowMs / LOD_DOT_MS) % 3)}`;
-  }
+  if (preloadStatus) return `Loading ${preloadStatus.name} d16 ${lodBar(preloadStatus.frac)}`;
   if (nowMs < preloadDoneUntil) return 'Loaded all bodies coarse data';
   return '';
 }
