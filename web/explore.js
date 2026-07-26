@@ -515,6 +515,8 @@ const LOD_DONE_MS = 2200;
 const LOD_WORD = { d4: 'd4', full: 'd1' };
 // id -> { word, until } for the lingering completion line.
 const lodDone = {};
+// The background coarse-tier warm-up, surfaced on the same HUD line: { name, frac } | null.
+let preloadStatus = null;
 
 function lodText(active, nowMs) {
   const label = lodLabel[active.id];
@@ -529,6 +531,16 @@ function lodText(active, nowMs) {
   }
   const done = lodDone[active.id];
   if (done && nowMs < done.until) return `Loading ${done.word} complete`;
+  // Nothing for the body you are on, so report the background warm-up instead. Named,
+  // because unlike the active body's tiers it is not obvious what is loading.
+  if (preloadStatus) {
+    const what = `Loading ${preloadStatus.name} d16`;
+    if (LOD_STYLE === 'bar') {
+      const n = Math.round(Math.max(0, Math.min(1, preloadStatus.frac)) * LOD_BAR_W);
+      return `${what} [${'.'.repeat(n)}${' '.repeat(LOD_BAR_W - n)}]`;
+    }
+    return `${what} ${'.'.repeat(1 + Math.floor(nowMs / LOD_DOT_MS) % 3)}`;
+  }
   return '';
 }
 
@@ -824,8 +836,10 @@ async function main() {
     for (const b of queue) {
       if (b.tier !== 0) continue;               // a jump may have loaded it meanwhile
       try {
+        preloadStatus = { name: b.name, frac: 0 };
         if (!b.meta) b.meta = await fetch(b.metaUrl).then(r => r.json());
-        const resp = await cachedFetch(tierUrl(b, 16), null);   // no HUD progress: background
+        const resp = await cachedFetch(tierUrl(b, 16),
+          (loaded, total) => { if (preloadStatus) preloadStatus.frac = total > 0 ? loaded / total : 0; });
         const buf = await resp.arrayBuffer();
         if (b.tier !== 0) continue;
         _applyTier(b, 16, buf, b.meta, Engine, renderer, false);
@@ -833,6 +847,7 @@ async function main() {
         console.warn(`[explore] preload ${b.name}:`, e);        // one failure must not stop the queue
       }
     }
+    preloadStatus = null;
   }
 
   // Enter a body from the orrery: shared by the SYSTEM view's own click handling and by
