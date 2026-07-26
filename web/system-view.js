@@ -223,29 +223,33 @@ const DOLLY_NEAR = 0.045;   // scene units — camera sits right beside the body
  * @param {function} opts.helioEcl   — helioEcl(id, jd) → [x,y,z] AU (planets only, for orbit paths)
  * @param {function} opts.onEnterBody — (bodyId: string) → void
  */
-export function createSystemView({ registry, helioPos, helioEcl, onEnterBody }) {
+export function createSystemView({ registry, helioPos, helioEcl, onEnterBody, host }) {
+  // Render into the host container (defaults to the page body).
+  const _host = host || document.body;
   // ── Canvas setup ─────────────────────────────────────────────────────────────
   const canvas = document.createElement('canvas');
   canvas.id = 'sys';
-  canvas.style.cssText = 'position:fixed;inset:0;display:none;opacity:0;z-index:8;'
-    + 'width:100vw;height:100vh;height:100dvh;pointer-events:none;';
-  document.body.appendChild(canvas);
+  canvas.style.cssText = 'position:absolute;inset:0;display:none;opacity:0;z-index:8;'
+    + 'width:100%;height:100%;pointer-events:none;';
+  _host.appendChild(canvas);
   const ctx = canvas.getContext('2d');
 
   // Backing store in DEVICE px (capped at 2), with a matching context transform so
   // the whole draw path below — dot radii, fonts, label rects, hit targets — stays
   // in CSS px and lines up with the clientX/clientY the pointer handlers receive.
   const DPR_MAX = 2;
-  let cssW = window.innerWidth, cssH = window.innerHeight;
+  let cssW = canvas.clientWidth || window.innerWidth;
+  let cssH = canvas.clientHeight || window.innerHeight;
   function resize() {
-    cssW = window.innerWidth;
-    cssH = window.innerHeight;
+    cssW = canvas.clientWidth || window.innerWidth;
+    cssH = canvas.clientHeight || window.innerHeight;
     const dpr = Math.min(DPR_MAX, window.devicePixelRatio || 1);
     canvas.width  = Math.round(cssW * dpr);
     canvas.height = Math.round(cssH * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
   window.addEventListener('resize', resize);
+  new ResizeObserver(resize).observe(canvas);
   resize();
 
   // ── Camera state ─────────────────────────────────────────────────────────────
