@@ -884,7 +884,6 @@ async function main() {
   // smootherstep: zero velocity AND zero acceleration at both ends, so the departure
   // eases in rather than snapping to full speed.
   const smoother = t => t * t * t * (t * (t * 6 - 15) + 10);
-  const easeIn   = t => t * t * t;                 // 0 velocity at the start, fastest at the end
   const easeOut  = t => 1 - (1 - t) ** 3;          // fastest at the start, 0 velocity at the end
 
   let hop = null;   // { phase, t, from, to, target, startAlt }
@@ -976,14 +975,22 @@ async function main() {
       hop.fade = Math.max(0, 1 - hop.t / HOP_FADE_MS);   // 1 -> 0
       if (hop.t < HOP_FADE_MS) return;
       hop.phase = 'loading'; hop.t = 0;
-      const p = jumpTo(hop.target);
+      const target = hop.target;
+      const p = jumpTo(target);
       // Synchronously, NOT in .then(): jumpTo runs resetView() before any await, so the
       // canonical altitude is already set and `active` may swap within this same frame.
       // Deferring the pull-back by even one frame rendered the new body at full size
       // before the descent began — the flash in the recording.
-      hop.dest = hop.target.view.altitude;
-      hop.target.view.altitude = hop.startAlt;
-      p.then(() => { if (hop) { hop.phase = 'travel'; hop.t = 0; } })
+      const dest = target.view.altitude;
+      hop.dest = dest;
+      target.view.altitude = hop.startAlt;
+      p.then(() => {
+        if (hop) { hop.phase = 'travel'; hop.t = 0; return; }
+        // Cancelled (wheel/pinch) while the swap was in flight. We had already parked the
+        // target out at HOP_START for an arrival that is no longer coming, which stranded
+        // the camera ~120,000 wu out. Put it back where the jump intended.
+        if (active === target) target.view.altitude = dest;
+      })
        .catch(e => { console.warn('[explore] hop:', e); hop = null; });
       return;
     }
