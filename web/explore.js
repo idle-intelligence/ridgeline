@@ -92,6 +92,10 @@ const SYS_HANDOFF_START = 0.9;       // sysT at which the (now dot-sized) globe 
 
 // System mode state (module-level so frame loop + handlers can share it).
 const SYS_INPUT_T = 0.35; // sysT past which pointer input drives the orrery, not the globe
+// sysT past which the globe's own sky markers stop being drawn and the orrery's labels take
+// over. Below it the sky markers are the view and their directions are real; above it only
+// the orrery's log-compressed dots exist.
+const MARKER_FADE_T = 0.15;
 let sysT = 0.0;          // 0 = globe, 1 = system; computed from altitude each frame
 // Entering a body from the orrery: glide its altitude down from system range so the
 // arrival is the zoom-out played backwards, not a cut. Cancelled by any wheel input.
@@ -873,12 +877,15 @@ async function main() {
   // HOP_START sits at the system-fade floor, so sysT stays 0 and the hop never routes
   // out through the orrery. Raise it toward SYS_FADE_END for more pull-back.
   const HOP_START     = SYS_FADE_START;
-  const HOP_TURN_MS   = 850;   // the swing round to face the target
+  const HOP_TURN_MS   = 1200;  // the swing round to face the target
   const HOP_HOLD_MS   = 650;   // a beat on the target before departing
-  const HOP_TRAVEL_MS = 1100;  // the flight itself
+  const HOP_FADE_MS   = 260;   // dip to black across the body swap
+  const HOP_TRAVEL_MS = 1100;  // the flight in
   // smootherstep: zero velocity AND zero acceleration at both ends, so the departure
   // eases in rather than snapping to full speed.
   const smoother = t => t * t * t * (t * (t * 6 - 15) + 10);
+  const easeIn   = t => t * t * t;                 // 0 velocity at the start, fastest at the end
+  const easeOut  = t => 1 - (1 - t) ** 3;          // fastest at the start, 0 velocity at the end
 
   let hop = null;   // { phase, t, from, to, target, startAlt }
 
@@ -921,7 +928,11 @@ async function main() {
 
   function hopTo(b) {
     if (b === active || hop) return;
-    if (sysT > SYS_INPUT_T) { jumpTo(b).then(() => arriveAt(b)); return; } // out in the orrery
+    // The aim-turn is only meaningful while the globe's sky markers are still drawn: those
+    // carry true directions. Past MARKER_FADE_T only the orrery's dots remain, and they sit at
+    // log-compressed positions with no relation to where the body actually is — turning to
+    // face one aimed the camera at empty space. There, take the straight arrival instead.
+    if (sysT > MARKER_FADE_T) { enterFromSystem(b.id); return; }
     altGlide = null;                        // the hop drives altitude itself
     const v = active.view;
     const aim = aimAt(b);
@@ -953,6 +964,17 @@ async function main() {
     if (hop.phase === 'hold') {
       hop.t += dt * 1000;
       if (hop.t < HOP_HOLD_MS) return;
+      // The swap is a cut: one frame you are in this body's sky, the next you are far
+      // above another. Travelling the gap physically just reinstates the zoom-out. Dip
+      // through black across the cut instead — short enough to read as a transition
+      // rather than a scene change.
+      hop.phase = 'fade'; hop.t = 0;
+      return;
+    }
+    if (hop.phase === 'fade') {
+      hop.t += dt * 1000;
+      hop.fade = Math.max(0, 1 - hop.t / HOP_FADE_MS);   // 1 -> 0
+      if (hop.t < HOP_FADE_MS) return;
       hop.phase = 'loading'; hop.t = 0;
       const p = jumpTo(hop.target);
       // Synchronously, NOT in .then(): jumpTo runs resetView() before any await, so the
@@ -968,7 +990,8 @@ async function main() {
     if (hop.phase === 'travel') {
       hop.t += dt * 1000;
       const k = Math.min(1, hop.t / HOP_TRAVEL_MS);
-      active.view.altitude = hop.startAlt + (hop.dest - hop.startAlt) * smoother(k);
+      active.view.altitude = hop.startAlt + (hop.dest - hop.startAlt) * easeOut(k);
+      hop.fade = Math.min(1, hop.t / HOP_FADE_MS);       // 0 -> 1, back up as we arrive
       if (k >= 1) { active.view.altitude = hop.dest; hop = null; }
     }
   }
@@ -1089,10 +1112,10 @@ async function main() {
     if (!r.tap) return;
     const b = markerAt(r.x, r.y);
     if (b) { hopTo(b); return; }
-    // Dead band: the globe's markers stop being drawn at sysT > 0.15, but the orrery does
+    // Dead band: the globe's markers stop at MARKER_FADE_T, but the orrery does
     // not take pointer input until SYS_INPUT_T (0.35). In between its dots were on screen
     // and inert. Fall through so a tap always hits whatever is actually visible.
-    if (sysT > 0 && sysT <= SYS_INPUT_T) {
+    if (sysT > MARKER_FADE_T && sysT <= SYS_INPUT_T) {
       const id = systemView.hitTest(r.x, r.y);
       if (id) enterFromSystem(id);
     }
@@ -1311,7 +1334,7 @@ async function main() {
     // dips out over the last sliver, where it is already a few pixels wide and the
     // orrery is drawing its dot in the same place.
     const globeOpacity = 1 - Math.max(0, (sysT - SYS_HANDOFF_START) / (1 - SYS_HANDOFF_START));
-    canvas.style.opacity = String(globeOpacity);
+    canvas.style.opacity = String(globeOpacity * (hop?.fade ?? 1));
 
     if (systemView) {
       systemView.setActive(active.id);
@@ -1355,7 +1378,7 @@ async function main() {
     }
 
     // ── Markers: hide once the orrery's own labels take over ─────────────
-    if (sysT > 0.15) {
+    if (sysT > MARKER_FADE_T) {
       for (const b of ALL_MARKERS) {
         const w = widgets.get(b.id);
         if (w) { w.marker.style.display = 'none'; w.arrow.style.display = 'none'; }
