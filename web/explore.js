@@ -1412,8 +1412,14 @@ async function main() {
     if (!loadingDone) { document.getElementById('loading').style.display = 'none'; loadingDone = true; }
 
     // ── HUD ───────────────────────────────────────────────────────────────
+    // Guard: a cached index.html without these spans, served alongside newer JS, threw here
+    // every frame and blacked the canvas. Degrade to no HUD rather than no render.
     const hudMainEl = document.getElementById('hudmain');
     const lodEl = document.getElementById('lod');
+    const setHud = (main, lod) => {
+      if (hudMainEl) hudMainEl.textContent = main;
+      if (lodEl) lodEl.textContent = lod;
+    };
     if (sysT > SYS_INPUT_T) {
       // System mode HUD: minimal readout.
       const pad = n => String(n).padStart(2,'0');
@@ -1421,11 +1427,9 @@ async function main() {
       const dt2 = new Date(ms);
       const dateStr = `${dt2.getUTCFullYear()}-${pad(dt2.getUTCMonth()+1)}-${pad(dt2.getUTCDate())}`;
       const spd = timeSpeed === 0 ? '⏸' : timeSpeed < 1 ? timeSpeed+'×' : timeSpeed >= 1000 ? (timeSpeed/1000).toFixed(0)+'k×' : timeSpeed+'×';
-      hudMainEl.textContent = `SOLAR SYSTEM\n${dateStr} · ${spd}\nclick a world to visit`;
-      lodEl.textContent = '';
+      setHud(`SOLAR SYSTEM\n${dateStr} · ${spd}\nclick a world to visit`, '');
     } else {
-      hudMainEl.textContent = hudText();
-      lodEl.textContent = lodText(active, now);
+      setHud(hudText(), lodText(active, now));
     }
 
     // ── Markers: hide once the orrery's own labels take over ─────────────
