@@ -873,30 +873,51 @@ async function main() {
   // HOP_START sits at the system-fade floor, so sysT stays 0 and the hop never routes
   // out through the orrery. Raise it toward SYS_FADE_END for more pull-back.
   const HOP_START     = SYS_FADE_START;
-  const HOP_TURN_MS   = 420;
-  const HOP_TRAVEL_MS = 1100;
+  const HOP_TURN_MS   = 850;   // the swing round to face the target
+  const HOP_HOLD_MS   = 650;   // a beat on the target before departing
+  const HOP_TRAVEL_MS = 1100;  // the flight itself
   // smootherstep: zero velocity AND zero acceleration at both ends, so the departure
   // eases in rather than snapping to full speed.
   const smoother = t => t * t * t * (t * (t * 6 - 15) + 10);
 
   let hop = null;   // { phase, t, from, to, target, startAlt }
 
-  // Angular offset of a body from screen centre, both axes: turning by this puts it dead
-  // ahead. Heading alone only swung the camera sideways, so a target above or below the
-  // horizon was never actually looked at.
+  // Where to point to look AT a body, inverted from the camera's own construction in
+  // _buildCamMvp: lookDir = nadir·cos(tilt) + headFwd·sin(tilt), with headFwd spanning
+  // north/east in the tangent plane.
+  //
+  // This replaces an earlier screen-space version that derived the turn from the marker's
+  // pixel offset. That was wrong in principle: tilt is measured off NADIR, so in deep
+  // space the camera sits ~3° (straight down at the globe) while the body is near the
+  // horizon. A marker 18° off screen-centre is nowhere near 18° off the true direction,
+  // so the camera barely pitched and it read as pure yaw.
   function aimAt(b) {
-    // markerHits carries the last frame's screen placements; the tap that got us here
-    // resolved against the same list, so the target is present.
-    const p = markerHits.find(h => h.b === b);
-    if (!p) return { dHeading: 0, dTilt: 0 };
-    const tanY = Math.tan(FOV_Y / 2);
-    const ndcX = (p.x / cssW) * 2 - 1;
-    const ndcY = 1 - (p.y / cssH) * 2;
-    return {
-      dHeading: Math.atan(ndcX * tanY * (cssW / cssH)),
-      dTilt:    Math.atan(ndcY * tanY),
-    };
+    const jd = toJD(simEpochMs + simTimeSec * 1000);
+    const dir = bodySkyDirection(active.id, b.id, jd, OBLIQUITY[active.id] ?? 0);
+    const radial = normalize(rotateY(active.view.gpos, -active.view.planetRot));
+    const nadir = scale(radial, -1);
+
+    const cosT = Math.max(-1, Math.min(1, dot(dir, nadir)));
+    const tilt = Math.acos(cosT);                    // 0 = straight down, π/2 = horizon
+
+    let heading = active.view.heading;
+    const tang = sub(dir, scale(nadir, cosT));       // component in the tangent plane
+    const len = Math.hypot(...tang);
+    if (len > 1e-6) {
+      const f = scale(tang, 1 / len);
+      const northRaw = [0, 1, 0];
+      const northProj = sub(northRaw, scale(radial, dot(northRaw, radial)));
+      const northDir = Math.hypot(...northProj) < 0.01
+        ? normalize(cross(radial, [1, 0, 0]))
+        : normalize(northProj);
+      const eastDir = normalize(cross(northDir, radial));
+      heading = Math.atan2(dot(f, eastDir), dot(f, northDir));
+    }
+    return { heading, tilt };
   }
+
+  // Shortest way round: turning 350° the long way is never what you want.
+  const shortestTurn = (from, to) => from + ((to - from + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
 
   function hopTo(b) {
     if (b === active || hop) return;
@@ -907,8 +928,8 @@ async function main() {
     active._autoTilt = false;          // the hop owns pitch for its duration
     hop = {
       phase: 'turn', t: 0, target: b,
-      fromH: v.heading, toH: v.heading + aim.dHeading,
-      fromT: v.tilt,    toT: clampTilt(v.tilt + aim.dTilt, active.modeFor(v.altitude)),
+      fromH: v.heading, toH: shortestTurn(v.heading, aim.heading),
+      fromT: v.tilt,    toT: clampTilt(aim.tilt, active.modeFor(v.altitude)),
       startAlt: HOP_START,
     };
   }
@@ -923,8 +944,15 @@ async function main() {
       active.view.heading = hop.fromH + (hop.toH - hop.fromH) * e;
       active.view.tilt    = hop.fromT + (hop.toT - hop.fromT) * e;
       if (k < 1) return;
-      // Face the target, then go. The swap happens here, so the turn is spent on the
-      // body we are leaving and the travel on the one we are joining.
+      // Hold the aim for a beat before departing: the turn has just found the body and
+      // it deserves a moment on screen. Still on the departing body here — the swap is
+      // deliberately after the hold, so what you pause on is the target in this sky.
+      hop.phase = 'hold'; hop.t = 0;
+      return;
+    }
+    if (hop.phase === 'hold') {
+      hop.t += dt * 1000;
+      if (hop.t < HOP_HOLD_MS) return;
       hop.phase = 'loading'; hop.t = 0;
       const p = jumpTo(hop.target);
       // Synchronously, NOT in .then(): jumpTo runs resetView() before any await, so the
