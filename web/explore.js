@@ -21,7 +21,12 @@ const TILT_MIN = 0.05;
 const DEG = Math.PI / 180;
 const SURFACE_TILT = 80 * DEG;             // resting pitch on arriving at the surface (ground + sky)
 const TILT_MAX_BY_MODE = { SURFACE: 110 * DEG, ATMO: Math.PI / 2, LOW: Math.PI / 2, ORBIT: 1.75 };
-const TILT_MAX = TILT_MAX_BY_MODE.SURFACE; // absolute ceiling — up-vector safety clamp in _buildCamMvp
+// A body can sit anywhere up to the zenith, and the per-mode ceilings (100–110°) stop the
+// camera ~10° above the horizon — so a marker high overhead could never be faced, and the
+// hop's hold beat framed empty sky. The hop is allowed up to this instead, then eased back
+// into the mode's range on arrival. Kept short of 180°: at exactly π the up-vector is
+// degenerate (_buildCamMvp falls back, but the roll it picks is arbitrary).
+const TILT_HOP_MAX = 175 * DEG;
 const tiltMaxFor = m => TILT_MAX_BY_MODE[m] ?? 1.75; // DEEP SPACE etc. → ~100°
 const clampTilt = (t, m) => Math.max(TILT_MIN, Math.min(tiltMaxFor(m), t));
 const ALT_START = 12010;   // world units — lowest DEEP SPACE (just past the 12000 orbit ceiling); largest framed globe
@@ -92,6 +97,10 @@ const SYS_HANDOFF_START = 0.9;       // sysT at which the (now dot-sized) globe 
 
 // System mode state (module-level so frame loop + handlers can share it).
 const SYS_INPUT_T = 0.35; // sysT past which pointer input drives the orrery, not the globe
+// sysT past which the globe's own sky markers stop being drawn and the orrery's labels take
+// over. Below it the sky markers are the view and their directions are real; above it only
+// the orrery's log-compressed dots exist.
+const MARKER_FADE_T = 0.15;
 let sysT = 0.0;          // 0 = globe, 1 = system; computed from altitude each frame
 // Entering a body from the orrery: glide its altitude down from system range so the
 // arrival is the zoom-out played backwards, not a cut. Cancelled by any wheel input.
@@ -104,6 +113,8 @@ let groundElevM = 0; // terrain elevation (m) under the camera this frame — fo
 // Per-body refinement indicator: label shown in HUD while finer tier is downloading.
 // e.g. { earth: 'd4', moon: null }
 const lodLabel = {};
+// 0..1 fraction of the tier currently downloading, for the HUD indicator.
+const lodProgress = {};
 
 // ── Tiered heightfield loading ────────────────────────────────────────────────
 // Tier factors: 16 = coarse (d16), 4 = medium (d4), 1 = full resolution.
@@ -412,7 +423,7 @@ function _buildCamMvp(pos, tiltR, headR, aspect, zNear = Z_NEAR, zFar = Z_FAR) {
   const northDir = northLen < 0.01 ? normalize(cross(radial, [1,0,0])) : normalize(northProj);
   const eastDir = normalize(cross(northDir, radial));
   const headFwd = add(scale(northDir, Math.cos(headR)), scale(eastDir, Math.sin(headR)));
-  const safeTilt = Math.max(TILT_MIN, Math.min(TILT_MAX, tiltR));
+  const safeTilt = Math.max(TILT_MIN, Math.min(TILT_HOP_MAX, tiltR));
   const nadir = scale(radial, -1);
   const lookDir = normalize(add(scale(nadir, Math.cos(safeTilt)), scale(headFwd, Math.sin(safeTilt))));
   const upRaw = sub(radial, scale(lookDir, dot(radial, lookDir)));
@@ -460,7 +471,17 @@ function computeCamera(aspect) {
   const follow = Math.max(0, Math.min(1, (surfCeil - altitude) / (surfCeil * 0.6))); // 1 at ≤40% ceil → 0 at ceil
   // Only ride UP over peaks (max with 0); over basins stay reference-relative so the camera
   // never drops below the reference sphere (which would break the trackball ray-cast).
-  const camR = R_WORLD + Math.max(0, terrainWu) * follow + altitude;
+  // Terrain-follow fades out by the SURFACE ceiling, which assumes relief is small next
+  // to the altitude bands. True for Earth; false for the small irregular bodies, where the
+  // bulge can exceed the whole SURFACE band (Vesta reaches +18 km on a 262 km radius) and
+  // the camera ended up *inside* the ridgelines. Floor the radius so there is always
+  // clearance, whatever the follow term is doing. The max() only bites when we would
+  // otherwise be underground, so framing everywhere else is untouched.
+  const MIN_CLEARANCE_WU = 2;
+  const camR = Math.max(
+    R_WORLD + Math.max(0, terrainWu) * follow + altitude,
+    R_WORLD + Math.max(0, terrainWu) + MIN_CLEARANCE_WU,
+  );
 
   const pos = scale(worldDir, camR);
   const [zNear, zFar] = depthRange(altitude, camR);
@@ -483,6 +504,40 @@ function makeProxy(cam) {
 
 // ── HUD ───────────────────────────────────────────────────────────────────────
 const COMPASS = ['N','NE','E','SE','S','SW','W','NW'];
+// LOD indicator: its own line under TIME, breathing (CSS) so a background fetch reads as
+// activity. A 20-dot bar driven by real bytes — an animated placeholder was tried first and
+// dropped, since the fetch already reports progress and a real bar says more.
+const LOD_BAR_W = 20;
+// How long a "complete" line stays up after the fetch finishes.
+const LOD_DONE_MS = 2200;
+// Tier names on screen. Internally the finest tier is 'full'; shown as d1 so the three read
+// as one series with the d16 / d4 mips instead of two naming schemes.
+const LOD_WORD = { d4: 'd4', full: 'd1' };
+// id -> { word, until } for the lingering completion line.
+const lodDone = {};
+// The background coarse-tier warm-up, surfaced on the same HUD line: { name, frac } | null.
+let preloadStatus = null;
+// Set when the warm-up queue drains, so the line signs off instead of just vanishing.
+let preloadDoneUntil = 0;
+const PRELOAD_DONE_MS = 3500;
+
+const lodBar = frac => {
+  const n = Math.round(Math.max(0, Math.min(1, frac)) * LOD_BAR_W);
+  return `[${'.'.repeat(n)}${' '.repeat(LOD_BAR_W - n)}]`;
+};
+
+function lodText(active, nowMs) {
+  const label = lodLabel[active.id];
+  if (label) return `Loading ${LOD_WORD[label] ?? label} ${lodBar(lodProgress[active.id] ?? 0)}`;
+  const done = lodDone[active.id];
+  if (done && nowMs < done.until) return `Loading ${done.word} complete`;
+  // Nothing for the body you are on, so report the background warm-up instead. Named,
+  // because unlike the active body's tiers it is not obvious what is loading.
+  if (preloadStatus) return `Loading ${preloadStatus.name} d16 ${lodBar(preloadStatus.frac)}`;
+  if (nowMs < preloadDoneUntil) return 'Loaded all bodies coarse data';
+  return '';
+}
+
 function hudText() {
   const { gpos, altitude, tilt, heading } = active.view;
   const [latD, lonD] = vec3ToLatLon(gpos);
@@ -501,11 +556,10 @@ function hudText() {
   const elevScaleM = active.meta?.elev_scale_m ?? 1;
   const gndKm = (groundElevM * elevScaleM) / 1000;
   const gnd = `${gndKm >= 0 ? '+' : '−'}${Math.abs(gndKm).toFixed(1)} km`;
-  const refine = lodLabel[active.id] ? ` · LOD ${lodLabel[active.id]}↻` : '';
   return `${active.name} · ${active.modeFor(altitude)}`
     + `\n${Math.abs(latD).toFixed(2)}°${ns} ${Math.abs(dispLon).toFixed(2)}°${ew} · GND ${gnd}`
     + `\nALT ${altKm.toLocaleString()} km · TILT ${Math.round(tilt*180/Math.PI)}° · HDG ${COMPASS[compassIdx]}`
-    + `\nTIME ${spd}${refine}`;
+    + `\nTIME ${spd}`;
 }
 
 // Sky marker world position for a body, computed from real Keplerian ephemeris.
@@ -626,7 +680,10 @@ async function main() {
       try {
         const resp = await cachedFetch(tierUrl(b, f),
           isActive()
-            ? (loaded, total) => trackProgress(`${b.id}_${label}`, loaded, total)
+            ? (loaded, total) => {
+                trackProgress(`${b.id}_${label}`, loaded, total);
+                lodProgress[b.id] = total > 0 ? loaded / total : 0;
+              }
             : null);
         if (token.cancelled) break;
 
@@ -635,9 +692,11 @@ async function main() {
 
         _applyTier(b, f, buf, b.meta, Engine, renderer, isActive());
         if (isActive()) {
-          // Clear the HUD indicator for this tier now that it's applied.
-          if (f === 1) lodLabel[b.id] = null;
-          else lodLabel[b.id] = f === 4 ? 'full' : null; // next tier to come
+          // Clear the in-flight label and leave a completion line up briefly, so a fast
+          // tier still registers as having happened.
+          lodLabel[b.id] = null;
+          lodProgress[b.id] = 0;
+          lodDone[b.id] = { word: LOD_WORD[label] ?? label, until: performance.now() + LOD_DONE_MS };
         }
         console.log(`[explore] ${b.name} upgraded to tier ${f === 1 ? 'full' : `d${f}`} (${b.gridW}×${b.gridH})`);
       } catch (e) {
@@ -646,7 +705,7 @@ async function main() {
       }
     }
 
-    if (active === b) lodLabel[b.id] = null;
+    if (active === b) { lodLabel[b.id] = null; lodProgress[b.id] = 0; }
   }
 
   // Demote a body from tier 4/1 back to tier 16 to reclaim GPU/WASM memory.
@@ -667,7 +726,9 @@ async function main() {
 
   // Kick off background refinement for active body (Earth) now that d16 is showing.
   // Metas for Moon/Mars are fetched lazily on first jumpTo.
-  refineBody(EARTH, [4]).catch(e => console.warn('[explore] EARTH refine:', e));
+  refineBody(EARTH, [4])
+    .catch(e => console.warn('[explore] EARTH refine:', e))
+    .finally(() => preloadCoarse());
 
   // The backing store is sized in DEVICE pixels, the canvas itself stays 100vw/100vh
   // CSS px. Everything that talks to the pointer or to the DOM (rays, marker
@@ -699,7 +760,8 @@ async function main() {
   });
 
   // ── Per-body sky markers: on-screen dot (click to jump) or off-screen edge arrow ──
-  // ALL_MARKERS = explorable bodies (REGISTRY) + marker-only entries (MARKER_ONLY, e.g. Sun).
+  // ALL_MARKERS = explorable bodies (REGISTRY) + any marker-only entries (MARKER_ONLY,
+  // currently empty: the Sun became a full Body when the magnetogram bake landed).
   // updateBodyMarker uses only id/name/color + computed position — safe to mix both kinds.
   const ALL_MARKERS = [...REGISTRY, ...MARKER_ONLY];
   const widgets = new Map();
@@ -747,6 +809,224 @@ async function main() {
       if (d <= MARKER_HIT_R && d < bestD) { bestD = d; best = p.b; }
     }
     return best;
+  }
+
+  // Warm every body's coarse tier in the background, nearest first.
+  //
+  // Without this, the first click on an unvisited body dropped a loading splash over the
+  // hop: jumpTo had to fetch its meta + d16 before it could show anything. All eleven d16
+  // tiers together are ~4 MB, so the whole set costs less than one body's d4 — cheap
+  // enough to just have, and it makes every hop instant.
+  //
+  // Sequential on purpose: these are background fetches and must not compete with the
+  // active body's d4/d1 for bandwidth.
+  async function preloadCoarse() {
+    const jd = toJD(simEpochMs + simTimeSec * 1000);
+    const here = helioPos(active.id, jd);
+    const dist = b => {
+      const p = helioPos(b.id, jd);
+      return Math.hypot(p[0] - here[0], p[1] - here[1], p[2] - here[2]);
+    };
+    const queue = REGISTRY.filter(b => b !== active && b.tier === 0).sort((a, b) => dist(a) - dist(b));
+    for (const b of queue) {
+      if (b.tier !== 0) continue;               // a jump may have loaded it meanwhile
+      try {
+        preloadStatus = { name: b.name, frac: 0 };
+        if (!b.meta) b.meta = await fetch(b.metaUrl).then(r => r.json());
+        const resp = await cachedFetch(tierUrl(b, 16),
+          (loaded, total) => { if (preloadStatus) preloadStatus.frac = total > 0 ? loaded / total : 0; });
+        const buf = await resp.arrayBuffer();
+        if (b.tier !== 0) continue;
+        _applyTier(b, 16, buf, b.meta, Engine, renderer, false);
+      } catch (e) {
+        console.warn(`[explore] preload ${b.name}:`, e);        // one failure must not stop the queue
+      }
+    }
+    preloadStatus = null;
+    // Every marker is now on screen and every hop instant — worth saying once.
+    if (queue.length) preloadDoneUntil = performance.now() + PRELOAD_DONE_MS;
+  }
+
+  // Enter a body from the orrery: shared by the SYSTEM view's own click handling and by
+  // the tap fallback, so both take the identical path.
+  function enterFromSystem(bodyId) {
+    const targetBody = REGISTRY.find(b => b.id === bodyId);
+    if (!targetBody) return;
+    const arrive = () => arriveAt(targetBody);
+    // Re-entering the body you departed from is the natural "go back": jumpTo would
+    // no-op on it, so reset the framing here and take the same arrival glide.
+    if (targetBody === active) {
+      targetBody.resetView();
+      dragActive = false; rightDragActive = false;
+      arrive();
+      return;
+    }
+    jumpTo(targetBody).then(arrive)
+      .catch(e => console.warn('[explore] system onEnterBody:', e));
+  }
+
+  // Glide down to a body's canonical framing: the zoom-out played backwards. Shared by
+  // the SYSTEM map and by sky-marker hops, which start closer in.
+  //
+  function arriveAt(b, from = SYS_FADE_END * 0.9) {
+    if (active !== b) return;
+    const dest = b.view.altitude;            // canonical framing set by resetView()
+    b.view.altitude = from;
+    altGlide = { body: b, dest };
+  }
+
+  // Sky-marker hop, in three acts: turn to face the target, then a single eased move
+  // that accelerates away and decelerates into arrival.
+  //
+  //   TURN     slew heading so the target sits dead ahead. The marker's screen position
+  //            from the last frame gives the bearing directly: horizontal offset from
+  //            centre, scaled by the horizontal half-FOV.
+  //   TRAVEL   swap bodies, then ease altitude from HOP_START down to the canonical
+  //            framing on a smootherstep. The old exponential ease was fastest on its
+  //            first frame and decayed, which is backwards — it read as a jump cut on a
+  //            short trip like Earth to the Moon.
+  //
+  // HOP_START sits at the system-fade floor, so sysT stays 0 and the hop never routes
+  // out through the orrery. Raise it toward SYS_FADE_END for more pull-back.
+  const HOP_START     = SYS_FADE_START;
+  const HOP_TURN_MS   = 1200;  // the swing round to face the target
+  const HOP_HOLD_MS   = 650;   // a beat on the target before departing
+  const HOP_FADE_MS   = 260;   // dip to black across the body swap
+  const HOP_TRAVEL_MS = 1100;  // the flight in
+  // smootherstep: zero velocity AND zero acceleration at both ends, so the departure
+  // eases in rather than snapping to full speed.
+  const smoother = t => t * t * t * (t * (t * 6 - 15) + 10);
+  const easeOut  = t => 1 - (1 - t) ** 3;          // fastest at the start, 0 velocity at the end
+
+  let hop = null;        // { phase, t, fromH, toH, fromT, toT, target, startAlt, dest }
+  let tiltRelax = false; // true while tilt is above the mode ceiling and easing back
+
+  // Where to point to look AT a body, inverted from the camera's own construction in
+  // _buildCamMvp: lookDir = nadir·cos(tilt) + headFwd·sin(tilt), with headFwd spanning
+  // north/east in the tangent plane.
+  //
+  // This replaces an earlier screen-space version that derived the turn from the marker's
+  // pixel offset. That was wrong in principle: tilt is measured off NADIR, so in deep
+  // space the camera sits ~3° (straight down at the globe) while the body is near the
+  // horizon. A marker 18° off screen-centre is nowhere near 18° off the true direction,
+  // so the camera barely pitched and it read as pure yaw.
+  function aimAt(b) {
+    const jd = toJD(simEpochMs + simTimeSec * 1000);
+    const dir = bodySkyDirection(active.id, b.id, jd, OBLIQUITY[active.id] ?? 0);
+    const radial = normalize(rotateY(active.view.gpos, -active.view.planetRot));
+    const nadir = scale(radial, -1);
+
+    const cosT = Math.max(-1, Math.min(1, dot(dir, nadir)));
+    const tilt = Math.acos(cosT);                    // 0 = straight down, π/2 = horizon
+
+    let heading = active.view.heading;
+    const tang = sub(dir, scale(nadir, cosT));       // component in the tangent plane
+    const len = Math.hypot(...tang);
+    if (len > 1e-6) {
+      const f = scale(tang, 1 / len);
+      const northRaw = [0, 1, 0];
+      const northProj = sub(northRaw, scale(radial, dot(northRaw, radial)));
+      const northDir = Math.hypot(...northProj) < 0.01
+        ? normalize(cross(radial, [1, 0, 0]))
+        : normalize(northProj);
+      const eastDir = normalize(cross(northDir, radial));
+      heading = Math.atan2(dot(f, eastDir), dot(f, northDir));
+    }
+    return { heading, tilt };
+  }
+
+  // Shortest way round: turning 350° the long way is never what you want.
+  const shortestTurn = (from, to) => from + ((to - from + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
+
+  function hopTo(b) {
+    if (b === active || hop) return;
+    // The aim-turn is only meaningful while the globe's sky markers are still drawn: those
+    // carry true directions. Past MARKER_FADE_T only the orrery's dots remain, and they sit at
+    // log-compressed positions with no relation to where the body actually is — turning to
+    // face one aimed the camera at empty space. There, take the straight arrival instead.
+    if (sysT > MARKER_FADE_T) { enterFromSystem(b.id); return; }
+    altGlide = null;                        // the hop drives altitude itself
+    const v = active.view;
+    const aim = aimAt(b);
+    active._autoTilt = false;          // the hop owns pitch for its duration
+    hop = {
+      phase: 'turn', t: 0, target: b,
+      fromH: v.heading, toH: shortestTurn(v.heading, aim.heading),
+      fromT: v.tilt,    toT: Math.max(TILT_MIN, Math.min(TILT_HOP_MAX, aim.tilt)),
+      startAlt: HOP_START,
+    };
+  }
+
+  // Advance the hop. Called once per frame with dt in seconds.
+  function stepHop(dt) {
+    if (!hop) return;
+    if (hop.phase === 'turn') {
+      hop.t += dt * 1000;
+      const k = Math.min(1, hop.t / HOP_TURN_MS);
+      const e = smoother(k);
+      active.view.heading = hop.fromH + (hop.toH - hop.fromH) * e;
+      active.view.tilt    = hop.fromT + (hop.toT - hop.fromT) * e;
+      if (k < 1) return;
+      // Hold the aim for a beat before departing: the turn has just found the body and
+      // it deserves a moment on screen. Still on the departing body here — the swap is
+      // deliberately after the hold, so what you pause on is the target in this sky.
+      hop.phase = 'hold'; hop.t = 0;
+      return;
+    }
+    if (hop.phase === 'hold') {
+      hop.t += dt * 1000;
+      if (hop.t < HOP_HOLD_MS) return;
+      // The swap is a cut: one frame you are in this body's sky, the next you are far
+      // above another. Travelling the gap physically just reinstates the zoom-out. Dip
+      // through black across the cut instead — short enough to read as a transition
+      // rather than a scene change.
+      hop.phase = 'fade'; hop.t = 0;
+      return;
+    }
+    if (hop.phase === 'fade') {
+      hop.t += dt * 1000;
+      hop.fade = Math.max(0, 1 - hop.t / HOP_FADE_MS);   // 1 -> 0
+      if (hop.t < HOP_FADE_MS) return;
+      hop.phase = 'loading'; hop.t = 0;
+      // Capture the hop this swap belongs to. Testing the module-level `hop` in the
+      // callbacks was wrong: cancel mid-flight (wheel nulls it) then start a second hop, and
+      // the first jumpTo's resolution would yank the NEW hop from 'turn' straight into
+      // 'travel' with no dest set — altitude became NaN and poisoned sysT and the camera.
+      const h = hop;
+      const target = h.target;
+      const p = jumpTo(target);
+      // Synchronously, NOT in .then(): jumpTo runs resetView() before any await, so the
+      // canonical altitude is already set and `active` may swap within this same frame.
+      // Deferring the pull-back by even one frame rendered the new body at full size
+      // before the descent began.
+      const dest = target.view.altitude;
+      h.dest = dest;
+      target.view.altitude = h.startAlt;
+      const settle = () => {
+        if (hop !== h) {
+          // Cancelled (wheel/pinch) while the swap was in flight. We parked the target at
+          // HOP_START for an arrival that is no longer coming; put it back.
+          if (active === target) target.view.altitude = dest;
+          return;
+        }
+        // jumpTo swallows fetch failures and still resolves, so without this check a failed
+        // load would fly the body we never left down to the target's framing.
+        if (active !== target) { hop = null; return; }
+        h.phase = 'travel'; h.t = 0;
+      };
+      p.then(settle).catch(e => {
+        console.warn('[explore] hop:', e);
+        if (hop === h) hop = null;
+      });
+      return;
+    }
+    if (hop.phase === 'travel') {
+      hop.t += dt * 1000;
+      const k = Math.min(1, hop.t / HOP_TRAVEL_MS);
+      active.view.altitude = hop.startAlt + (hop.dest - hop.startAlt) * easeOut(k);
+      hop.fade = Math.min(1, hop.t / HOP_FADE_MS);       // 0 -> 1, back up as we arrive
+      if (k >= 1) { active.view.altitude = hop.dest; hop = null; }
+    }
   }
 
   async function jumpTo(b) {
@@ -807,27 +1087,7 @@ async function main() {
     registry: REGISTRY,
     helioPos,
     helioEcl,
-    onEnterBody: (bodyId) => {
-      const targetBody = REGISTRY.find(b => b.id === bodyId);
-      if (!targetBody) return;
-      // Glide down from system range instead of cutting — the zoom-out played backwards.
-      const arrive = () => {
-        if (active !== targetBody) return;
-        const dest = targetBody.view.altitude;   // canonical framing set by resetView()
-        targetBody.view.altitude = SYS_FADE_END * 0.9;
-        altGlide = { body: targetBody, dest };
-      };
-      // Re-entering the body you departed from is the natural "go back": jumpTo would
-      // no-op on it, so reset the framing here and take the same arrival glide.
-      if (targetBody === active) {
-        targetBody.resetView();
-        dragActive = false; rightDragActive = false;
-        arrive();
-        return;
-      }
-      jumpTo(targetBody).then(arrive)
-        .catch(e => console.warn('[explore] system onEnterBody:', e));
-    },
+    onEnterBody: enterFromSystem,
   });
 
   // ── Orbit drag (shared by mouse + touch), singularity-free vector math ──────
@@ -884,7 +1144,14 @@ async function main() {
     const r = globeGesture.release(x, y);
     if (!r.tap) return;
     const b = markerAt(r.x, r.y);
-    if (b) jumpTo(b);
+    if (b) { hopTo(b); return; }
+    // Dead band: the globe's markers stop at MARKER_FADE_T, but the orrery does
+    // not take pointer input until SYS_INPUT_T (0.35). In between its dots were on screen
+    // and inert. Fall through so a tap always hits whatever is actually visible.
+    if (sysT > MARKER_FADE_T && sysT <= SYS_INPUT_T) {
+      const id = systemView.hitTest(r.x, r.y);
+      if (id) enterFromSystem(id);
+    }
   }
 
   // ── Mouse ───────────────────────────────────────────────────────────────────
@@ -932,7 +1199,7 @@ async function main() {
 
   canvas.addEventListener('wheel', e => {
     e.preventDefault();
-    altGlide = null; // manual zoom takes over
+    altGlide = null; hop = null; // manual zoom takes over
     const v = active.view;
     // Altitude is the single control for the whole zoom-out — it drives sysT, which drives
     // the orrery camera's pull-back. Past SYS_FADE_START the step is bigger so the retreat
@@ -999,7 +1266,7 @@ async function main() {
       // ceiling opens up to ALT_CAP_SYSTEM so pinch can reach the full SYSTEM view.
       const altCap = v.altitude > SYS_FADE_START * 0.5 ? ALT_CAP_SYSTEM : 100_000;
       if (lastPinchDist > 0) {
-        altGlide = null; // manual zoom takes over, same as wheel
+        altGlide = null; hop = null; // manual zoom takes over, same as wheel
         v.altitude = Math.max(2, Math.min(altCap, v.altitude * lastPinchDist / nd));
       }
       v.tilt    = clampTilt(v.tilt - (cy - twoCY) * 0.005, active.modeFor(v.altitude));
@@ -1062,15 +1329,40 @@ async function main() {
       active.view.tilt += (target - active.view.tilt) * Math.min(1, dt * 1.4);
     }
     active._prevMode = mode;
-    active.view.tilt = clampTilt(active.view.tilt, mode);
+    // While a hop owns the camera it may exceed the mode ceiling (see TILT_HOP_MAX). On
+    // arrival, ease back into range rather than snapping — tiltRelax holds the relaxed
+    // ceiling until the eased value is legal again.
+    if (hop) {
+      tiltRelax = true;
+      active.view.tilt = Math.max(TILT_MIN, Math.min(TILT_HOP_MAX, active.view.tilt));
+    } else if (tiltRelax) {
+      const ceil = tiltMaxFor(mode);
+      if (active.view.tilt > ceil) {
+        active.view.tilt += (ceil - active.view.tilt) * Math.min(1, dt * 3.0);
+        if (active.view.tilt - ceil < 0.01) { active.view.tilt = ceil; tiltRelax = false; }
+      } else { tiltRelax = false; }
+      active.view.tilt = Math.max(TILT_MIN, Math.min(TILT_HOP_MAX, active.view.tilt));
+    } else {
+      active.view.tilt = clampTilt(active.view.tilt, mode);
+    }
 
-    // Arrival glide: exponential ease down to the body's canonical framing (~1 s).
+    stepHop(dt);
+
+    // Altitude glide: exponential ease to a target framing (~1 s). Used both ways — down
+    // on arrival, and up when hopping out to system range before a body swap. The
+    // completion test is symmetric: the old one-sided `< dest * 1.02` was already true on
+    // the first frame of an ascending glide, which would snap instead of travelling.
     if (altGlide) {
       if (altGlide.body !== active) altGlide = null;
       else {
         const v = active.view;
         v.altitude += (altGlide.dest - v.altitude) * Math.min(1, dt * 4.5);
-        if (v.altitude < altGlide.dest * 1.02) { v.altitude = altGlide.dest; altGlide = null; }
+        if (Math.abs(v.altitude - altGlide.dest) <= altGlide.dest * 0.02) {
+          v.altitude = altGlide.dest;
+          const done = altGlide.onDone;
+          altGlide = null;
+          if (done) done();
+        }
       }
     }
 
@@ -1090,7 +1382,7 @@ async function main() {
     // dips out over the last sliver, where it is already a few pixels wide and the
     // orrery is drawing its dot in the same place.
     const globeOpacity = 1 - Math.max(0, (sysT - SYS_HANDOFF_START) / (1 - SYS_HANDOFF_START));
-    canvas.style.opacity = String(globeOpacity);
+    canvas.style.opacity = String(globeOpacity * (hop?.fade ?? 1));
 
     if (systemView) {
       systemView.setActive(active.id);
@@ -1117,7 +1409,8 @@ async function main() {
     if (!loadingDone) { document.getElementById('loading').style.display = 'none'; loadingDone = true; }
 
     // ── HUD ───────────────────────────────────────────────────────────────
-    const infoEl = document.getElementById('info');
+    const hudMainEl = document.getElementById('hudmain');
+    const lodEl = document.getElementById('lod');
     if (sysT > SYS_INPUT_T) {
       // System mode HUD: minimal readout.
       const pad = n => String(n).padStart(2,'0');
@@ -1125,13 +1418,15 @@ async function main() {
       const dt2 = new Date(ms);
       const dateStr = `${dt2.getUTCFullYear()}-${pad(dt2.getUTCMonth()+1)}-${pad(dt2.getUTCDate())}`;
       const spd = timeSpeed === 0 ? '⏸' : timeSpeed < 1 ? timeSpeed+'×' : timeSpeed >= 1000 ? (timeSpeed/1000).toFixed(0)+'k×' : timeSpeed+'×';
-      infoEl.textContent = `SOLAR SYSTEM\n${dateStr} · ${spd}\nclick a world to visit`;
+      hudMainEl.textContent = `SOLAR SYSTEM\n${dateStr} · ${spd}\nclick a world to visit`;
+      lodEl.textContent = '';
     } else {
-      infoEl.textContent = hudText();
+      hudMainEl.textContent = hudText();
+      lodEl.textContent = lodText(active, now);
     }
 
     // ── Markers: hide once the orrery's own labels take over ─────────────
-    if (sysT > 0.15) {
+    if (sysT > MARKER_FADE_T) {
       for (const b of ALL_MARKERS) {
         const w = widgets.get(b.id);
         if (w) { w.marker.style.display = 'none'; w.arrow.style.display = 'none'; }
@@ -1139,13 +1434,24 @@ async function main() {
       markerHits = [];
     } else {
       // Process ALL markers each frame — REGISTRY bodies + MARKER_ONLY (e.g. Sun).
+      // A body only appears once its coarse tier is in hand (preloadCoarse warms them in
+      // the background, nearest first). Showing one earlier meant a click could land on a
+      // body with nothing loaded, and the hop would stall behind a loading splash instead
+      // of playing. This covers every body including the Sun, which is a full Body with
+      // its own tiers — MARKER_ONLY is empty.
       const placements = [];
       for (const b of ALL_MARKERS) {
+        if (b instanceof Body && b.tier === 0) {
+          const w = widgets.get(b.id);
+          if (w) { w.marker.style.display = 'none'; w.arrow.style.display = 'none'; }
+          continue;
+        }
         const p = updateBodyMarker(cam, b, jd);
         if (p) placements.push(p);
       }
       resolveLabelCollisions(placements);
-      // Marker-only entries (the Sun) have no Body methods and are not jumpable.
+      // Marker-only entries would have no Body methods and are not jumpable; MARKER_ONLY
+      // is empty today, so in practice this keeps everything.
       markerHits = placements.filter(p => p.b instanceof Body);
     }
 

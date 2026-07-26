@@ -21,6 +21,18 @@
       font:12px/1.7 monospace; color:#555; pointer-events:none;
       white-space: pre;
     }
+    /* LOD line: its own row under TIME, breathing so a background fetch reads as activity. */
+    #lod {
+      display:block;
+      color:#6aa3ff;
+      animation:lodbreath 1.8s ease-in-out infinite;
+    }
+    @keyframes lodbreath {
+      0%, 100% { opacity:0.40; }
+      50%      { opacity:1.00; }
+    }
+    @media (prefers-reduced-motion: reduce) { #lod { animation:none; opacity:0.85; } }
+
     #timectl {
       position:fixed; bottom:calc(20px + env(safe-area-inset-bottom));
       left:50%; transform:translateX(-50%);
@@ -75,7 +87,7 @@
     <div id="loadbar"><div id="loadfill"></div></div>
     <div id="loadpct">loading terrain…</div>
   </div>
-  <div id="info"></div>
+  <div id="info"><span id="hudmain"></span><span id="lod"></span></div>
   <div id="timectl">
     <button class="tb" data-s="0">⏸</button>
     <button class="tb" data-s="1">1×</button>
