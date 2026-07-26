@@ -82,6 +82,9 @@ const DAY_SEC = 86400;
 //
 // Reversibility: wheel-out increases altitude → we keep pulling back.
 //   Wheel-in decreases altitude → the camera flies back in and the globe grows again.
+// Altitude (world units) below which the full-resolution tier is worth its download.
+// Matches the second band ceiling: ATMO / LOW / CORONA.
+const FULL_RES_ALT      = 1500;
 const SYS_FADE_START    = 120_000;   // wu — globe ~12% of screen height; orrery starts pulling back
 const SYS_FADE_END      = 1_500_000; // wu — globe ~1% of screen height (dot-sized); system framed
 const ALT_CAP_SYSTEM    = SYS_FADE_END; // fully zoomed out = the end of the wheel's travel
@@ -518,6 +521,8 @@ function bodySkyMarkerPos(targetId, jd) {
 // ── Main ─────────────────────────────────────────────────────────────────────
 async function main() {
   const canvas = document.getElementById('c');
+  // Overlays attach to the canvas's container, so they follow it when it is windowed.
+  const host = canvas.parentElement || document.body;
   const showErr = (detail) => {
     document.getElementById('loading').style.display = 'none';
     const el = document.getElementById('nowgpu');
@@ -598,14 +603,17 @@ async function main() {
   // finishing a download only to demote it immediately after.
   const refineTokens = new Map(); // b.id → { cancelled: bool }
 
-  async function refineBody(b) {
+  async function refineBody(b, tiers) {
     // Issue (or re-issue) a refinement chain for b starting at d4, then full.
     // Cancels any previous in-flight chain for this body.
     // On constrained devices, stop at d4 (skip the 151 MB full-res upgrade).
     const token = { cancelled: false };
     refineTokens.set(b.id, token);
 
-    for (const f of (_constrainedDevice ? [4] : [4, 1])) {
+    // Full-res is never fetched eagerly: callers ask for [4] on arrival and the frame
+    // loop asks for [1] only once the camera actually descends.
+    const chain = tiers ?? (_constrainedDevice ? [4] : [4, 1]);
+    for (const f of chain) {
       if (token.cancelled) break;
       if (b.tier !== 0 && f >= b.tier) continue; // already at this resolution or finer
 
@@ -659,23 +667,27 @@ async function main() {
 
   // Kick off background refinement for active body (Earth) now that d16 is showing.
   // Metas for Moon/Mars are fetched lazily on first jumpTo.
-  refineBody(EARTH).catch(e => console.warn('[explore] EARTH refine:', e));
+  refineBody(EARTH, [4]).catch(e => console.warn('[explore] EARTH refine:', e));
 
   // The backing store is sized in DEVICE pixels, the canvas itself stays 100vw/100vh
   // CSS px. Everything that talks to the pointer or to the DOM (rays, marker
   // placement, aspect) uses cssW/cssH; only the renderer sees the device-pixel size.
   // Capped at 2 — an uncapped 2.625 costs ~1.7× the fill rate for no visible gain.
   const DPR_MAX = 2;
-  let cssW = window.innerWidth, cssH = window.innerHeight;
+  // Size from the canvas's own box so the app can live in a windowed container as well
+  // as full-screen; full-screen is the same numbers, since there the canvas IS the viewport.
+  let cssW = canvas.clientWidth || window.innerWidth;
+  let cssH = canvas.clientHeight || window.innerHeight;
   function resize() {
-    cssW = window.innerWidth;
-    cssH = window.innerHeight;
+    cssW = canvas.clientWidth || window.innerWidth;
+    cssH = canvas.clientHeight || window.innerHeight;
     const dpr = Math.min(DPR_MAX, window.devicePixelRatio || 1);
     canvas.width = Math.round(cssW * dpr);
     canvas.height = Math.round(cssH * dpr);
     renderer.resize(canvas.width, canvas.height, cssH);
   }
   window.addEventListener('resize', resize);
+  new ResizeObserver(resize).observe(canvas);
   resize();
 
   // Time speed buttons
@@ -693,10 +705,10 @@ async function main() {
   const widgets = new Map();
   for (const b of ALL_MARKERS) {
     const marker = document.createElement('div');
-    marker.style.cssText = 'position:fixed; display:none; transform:translate(-50%,-50%); cursor:pointer;'
+    marker.style.cssText = 'position:absolute; display:none; transform:translate(-50%,-50%); cursor:pointer;'
       + ' font:11px monospace; text-align:center; pointer-events:none; user-select:none; z-index:5;';
     marker.innerHTML = '<div class="dot"></div><div class="lbl"></div>';
-    document.body.appendChild(marker);
+    host.appendChild(marker);
     const dot = marker.querySelector('.dot');
     const lbl = marker.querySelector('.lbl');
     dot.style.cssText = 'width:14px; height:14px; border-radius:50%; margin:0 auto 3px;'
@@ -705,11 +717,11 @@ async function main() {
     lbl.textContent = '▸ ' + b.name;
 
     const arrow = document.createElement('div');
-    arrow.style.cssText = 'position:fixed; display:none; transform:translate(-50%,-50%);'
+    arrow.style.cssText = 'position:absolute; display:none; transform:translate(-50%,-50%);'
       + ' cursor:pointer; text-align:center; z-index:5; pointer-events:none; user-select:none;'
       + ' text-shadow:0 0 6px rgba(0,0,0,0.9);';
     arrow.innerHTML = '<span class="chev">➤</span><span class="albl"></span>';
-    document.body.appendChild(arrow);
+    host.appendChild(arrow);
     const chev = arrow.querySelector('.chev');
     const albl = arrow.querySelector('.albl');
     chev.style.cssText = `display:inline-block; font-size:20px; line-height:1; color:${b.color};`;
@@ -779,7 +791,10 @@ async function main() {
 
     // Refine in background from whatever tier b currently holds.
     if (b.tier > 1) {
-      refineBody(b).catch(e => console.warn(`[explore] refine ${b.name}:`, e));
+      // Re-arm the full-res request: jumping away demotes the body to d16, so a later
+      // descent must be able to ask for it again (served from the Cache API, no refetch).
+      b._fullRequested = false;
+      refineBody(b, [4]).catch(e => console.warn(`[explore] refine ${b.name}:`, e));
     }
   }
 
@@ -788,6 +803,7 @@ async function main() {
 
   // ── System view ─────────────────────────────────────────────────────────────
   systemView = createSystemView({
+    host,
     registry: REGISTRY,
     helioPos,
     helioEcl,
@@ -872,42 +888,46 @@ async function main() {
   }
 
   // ── Mouse ───────────────────────────────────────────────────────────────────
+  // The canvas is not necessarily at the viewport origin, so every pointer coordinate is
+  // converted to canvas-local space before it reaches the camera/picking.
+  const ptX = p => p.clientX - canvas.getBoundingClientRect().left;
+  const ptY = p => p.clientY - canvas.getBoundingClientRect().top;
   canvas.addEventListener('contextmenu', e => e.preventDefault());
   canvas.addEventListener('mousedown', e => {
     if (sysT > SYS_INPUT_T) {
-      systemView.onPointerDown(e.clientX, e.clientY);
+      systemView.onPointerDown(ptX(e), ptY(e));
       return;
     }
     if (e.button === 2) {
       rightDragActive = true;
-      rdStartX = e.clientX; rdStartY = e.clientY;
+      rdStartX = ptX(e); rdStartY = ptY(e);
       rdStartTilt = active.view.tilt; rdStartHeading = active.view.heading;
       active._autoTilt = false; // user takes over pitch → stop the surface auto-morph
       return;
     }
-    globeGesture.press(e.clientX, e.clientY);
-    beginDrag(e.clientX, e.clientY);
+    globeGesture.press(ptX(e), ptY(e));
+    beginDrag(ptX(e), ptY(e));
   });
   window.addEventListener('mousemove', e => {
     if (sysT > SYS_INPUT_T) {
-      systemView.onPointerMove(e.clientX, e.clientY);
+      systemView.onPointerMove(ptX(e), ptY(e));
       canvas.style.cursor = systemView.isHovering() ? 'pointer' : '';
       return;
     }
     canvas.style.cursor = '';
     if (rightDragActive) {
-      active.view.tilt    = clampTilt(rdStartTilt - (e.clientY-rdStartY)*0.005, active.modeFor(active.view.altitude));
-      active.view.heading = rdStartHeading + (e.clientX-rdStartX)*0.005;
+      active.view.tilt    = clampTilt(rdStartTilt - (ptY(e)-rdStartY)*0.005, active.modeFor(active.view.altitude));
+      active.view.heading = rdStartHeading + (ptX(e)-rdStartX)*0.005;
       return;
     }
-    globeGesture.move(e.clientX, e.clientY);
-    moveDrag(e.clientX, e.clientY);
+    globeGesture.move(ptX(e), ptY(e));
+    moveDrag(ptX(e), ptY(e));
   });
   window.addEventListener('mouseup', e => {
-    if (sysT > SYS_INPUT_T) { systemView.onPointerUp(e.clientX, e.clientY); return; }
+    if (sysT > SYS_INPUT_T) { systemView.onPointerUp(ptX(e), ptY(e)); return; }
     if (e.button === 2) { rightDragActive = false; return; }
     dragActive = false;
-    releaseGlobeGesture(e.clientX, e.clientY);
+    releaseGlobeGesture(ptX(e), ptY(e));
   });
 
   canvas.addEventListener('wheel', e => {
@@ -927,9 +947,9 @@ async function main() {
   // or within a multi-touch gesture, so a stale delta is never applied.
   function beginPinch(touches) {
     const t0 = touches[0], t1 = touches[1];
-    lastPinchDist = Math.hypot(t0.clientX-t1.clientX, t0.clientY-t1.clientY);
-    twoCX = (t0.clientX + t1.clientX) / 2;
-    twoCY = (t0.clientY + t1.clientY) / 2;
+    lastPinchDist = Math.hypot(ptX(t0)-ptX(t1), ptY(t0)-ptY(t1));
+    twoCX = (ptX(t0) + ptX(t1)) / 2;
+    twoCY = (ptY(t0) + ptY(t1)) / 2;
   }
   function resetGestures() {
     systemView.onPointerCancel();
@@ -943,10 +963,10 @@ async function main() {
     e.preventDefault();
     if (e.touches.length === 1) {
       // Past the SYSTEM threshold one finger orbits the orrery instead of the globe.
-      if (sysT > SYS_INPUT_T) systemView.onPointerDown(e.touches[0].clientX, e.touches[0].clientY, true);
+      if (sysT > SYS_INPUT_T) systemView.onPointerDown(ptX(e.touches[0]), ptY(e.touches[0]), true);
       else {
-        globeGesture.press(e.touches[0].clientX, e.touches[0].clientY, true);
-        beginDrag(e.touches[0].clientX, e.touches[0].clientY);
+        globeGesture.press(ptX(e.touches[0]), ptY(e.touches[0]), true);
+        beginDrag(ptX(e.touches[0]), ptY(e.touches[0]));
       }
     } else if (e.touches.length >= 2) {
       // A second finger landing mid-rotate ends it cleanly — no tap, no jump.
@@ -962,17 +982,17 @@ async function main() {
   canvas.addEventListener('touchmove', e => {
     e.preventDefault();
     if (e.touches.length === 1) {
-      if (sysT > SYS_INPUT_T) systemView.onPointerMove(e.touches[0].clientX, e.touches[0].clientY, true);
+      if (sysT > SYS_INPUT_T) systemView.onPointerMove(ptX(e.touches[0]), ptY(e.touches[0]), true);
       else if (dragActive) {
-        globeGesture.move(e.touches[0].clientX, e.touches[0].clientY);
-        moveDrag(e.touches[0].clientX, e.touches[0].clientY);
+        globeGesture.move(ptX(e.touches[0]), ptY(e.touches[0]));
+        moveDrag(ptX(e.touches[0]), ptY(e.touches[0]));
       }
     } else if (e.touches.length >= 2) {
       // Two fingers do BOTH: pinch (distance) → zoom; pan (centroid move) → tilt + heading,
       // exactly like the desktop right-drag.
       const t0 = e.touches[0], t1 = e.touches[1];
-      const nd = Math.hypot(t0.clientX-t1.clientX, t0.clientY-t1.clientY);
-      const cx = (t0.clientX + t1.clientX) / 2, cy = (t0.clientY + t1.clientY) / 2;
+      const nd = Math.hypot(ptX(t0)-ptX(t1), ptY(t0)-ptY(t1));
+      const cx = (ptX(t0) + ptX(t1)) / 2, cy = (ptY(t0) + ptY(t1)) / 2;
       const v = active.view;
       // Maps convention: fingers apart (nd > last) → zoom IN = lower altitude.
       // Same dynamic cap as the wheel handler — past the SYSTEM-view threshold the
@@ -991,8 +1011,8 @@ async function main() {
     const t = e.changedTouches[0];
     if (e.touches.length === 0) {
       if (t) {
-        systemView.onPointerUp(t.clientX, t.clientY);
-        releaseGlobeGesture(t.clientX, t.clientY);
+        systemView.onPointerUp(ptX(t), ptY(t));
+        releaseGlobeGesture(ptX(t), ptY(t));
       }
       lastPinchDist = 0;
       dragActive = false;
@@ -1004,7 +1024,7 @@ async function main() {
       // beginDrag re-freezes the camera at the survivor's current position, so the
       // rotation resumes from where the finger is — no jump. Never a tap.
       lastPinchDist = 0;
-      if (sysT <= SYS_INPUT_T) beginDrag(e.touches[0].clientX, e.touches[0].clientY);
+      if (sysT <= SYS_INPUT_T) beginDrag(ptX(e.touches[0]), ptY(e.touches[0]));
     } else {
       // 3+ fingers back down to 2 — re-seed from the survivors rather than applying
       // a delta against the distance/centroid of a finger that is already gone.
@@ -1021,6 +1041,13 @@ async function main() {
   function frame(now) {
     const dt = Math.min((now - prev) / 1000, 0.05);
     prev = now;
+
+    // Fetch the full-res tier only once the camera actually descends (FULL_RES_ALT = the
+    // ATMO/LOW/CORONA ceiling). Fires once per body; re-armed on jumpTo.
+    if (active.view.altitude < FULL_RES_ALT && active.tier > 1 && !active._fullRequested) {
+      active._fullRequested = true;
+      refineBody(active, [1]).catch(e => console.warn(`[explore] full-res ${active.name}:`, e));
+    }
     active.view.planetRot = (active.view.planetRot + timeSpeed * dt * active.rotDegPerSec) % 360;
     simTimeSec += timeSpeed * dt; // advance the shared simulated clock (each marker uses its own period)
 
