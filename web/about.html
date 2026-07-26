@@ -188,9 +188,10 @@
     </header>
 
     <p class="intro">
-      ridgeline draws the solar system as ridgeline graphs. Ten solid bodies for which we
-      have real elevation data: Earth, the Moon, Mars, Venus, Mercury, Ceres, Vesta,
-      Enceladus, Pluto, Charon. For the Sun, we render magnetic field measurements.
+      ridgeline draws the solar system as ridgeline graphs.<br>
+      Ten solid bodies for which we have real elevation data: Earth, the Moon, Mars, Venus,
+      Mercury, Ceres, Vesta, Enceladus, Pluto, Charon.<br>
+      For the Sun, we render magnetic field measurements.<br>
       Each one is a globe of stacked Joy Division "Unknown Pleasures" ridgelines.
     </p>
 
@@ -230,9 +231,8 @@
     <section>
       <h2>Data sources</h2>
       <p>
-        Every ridge is measured elevation, or for the Sun measured magnetic field. All sources
-        are public domain or freely redistributable. Grids run from 2880×1440 (Sun) to
-        12288×6144 (Earth), stored as raw <code>int16</code>.
+        Every ridge is measured elevation, or for the Sun measured magnetic field. Grids run
+        from 2880×1440 (Sun) to 12288×6144 (Earth), stored as raw <code>int16</code>.
       </p>
       <ul>
         <li><span class="body-name">Earth</span><span class="source">NOAA ETOPO 2022 · <a href="https://www.ncei.noaa.gov/products/etopo-global-relief-model" target="_blank" rel="noopener">doc</a> · <a href="https://www.ngdc.noaa.gov/mgg/global/" target="_blank" rel="noopener">data</a></span></li>
@@ -245,6 +245,7 @@
         <li><span class="body-name">Pluto &amp; Charon</span><span class="source">NASA New Horizons · <a href="https://pds-smallbodies.astro.umd.edu/data_sb/missions/newhorizons/" target="_blank" rel="noopener">doc</a> · <a href="https://planetarymaps.usgs.gov/mosaic/Pluto_NewHorizons_Global_DEM_300m_Jul2017_16bit.tif" target="_blank" rel="noopener">Pluto (620 MB)</a>, <a href="https://planetarymaps.usgs.gov/mosaic/Charon_NewHorizons_Global_DEM_300m_Jul2017_16bit.tif" target="_blank" rel="noopener">Charon (161 MB)</a></span></li>
         <li><span class="body-name">Sun</span><span class="source">NASA SDO / HMI · <a href="https://sdo.gsfc.nasa.gov/" target="_blank" rel="noopener">doc</a> · <a href="https://jsoc1.stanford.edu/data/hmi/synoptic/" target="_blank" rel="noopener">data</a></span></li>
       </ul>
+      <p>All sources are public domain or freely redistributable.</p>
     </section>
 
     <section>
@@ -331,10 +332,15 @@
     <section>
       <h2>Logarithmic system</h2>
       <p>
-        Drawn to scale an orrery is mostly empty: fit Pluto on screen and the inner planets
-        collapse into the Sun. (Josh Worth's
+        Drawn to scale an orrery (<em>planétaire</em>) is mostly empty: fit Pluto on screen and
+        the inner planets collapse into the Sun.
+      </p>
+      <p>
+        (Josh Worth's
         <a href="https://joshworth.com/dev/pixelspace/pixelspace_solarsystem.html" target="_blank" rel="noopener">If the Moon Were Only 1 Pixel</a>
-        is the honest version, and it is almost entirely scrolling through nothing.)
+        is the linear version, and it is almost entirely scrolling through nothing.)
+      </p>
+      <p>
         Only radial distance is compressed, logarithmically:
       </p>
       <span class="formula">display radius = log₁₀(1 + AU) ÷ log₁₀(1 + 40)</span>
@@ -353,7 +359,7 @@
         <li>Everything runs client-side. No server, no build step, no framework. Vanilla
           JavaScript static files.</li>
         <li>Terrain is processed offline in Python into raw <code>int16</code> heightfields and
-          hosted as a Hugging Face dataset. Each body ships three tiers (full resolution,
+          hosted as a <a href="https://huggingface.co/datasets/idle-intelligence/ridgeline-terrain" target="_blank" rel="noopener">Hugging Face dataset</a>. Each body ships three tiers (full resolution,
           ÷4 and ÷16) and loads coarse-to-fine, so the globe paints from the ÷16 tier and
           sharpens as you descend. Files are fetched once and kept in the browser's Cache API.</li>
         <li>A small WebAssembly module (Rust) decodes and owns the heightfield in memory for

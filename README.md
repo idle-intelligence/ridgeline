@@ -3,7 +3,8 @@
 3D explorer of the solar system's solid worlds, each drawn as a globe of stacked Joy Division
 "Unknown Pleasures" latitude rings from real elevation data.
 
-[**Try the demo →**](https://idle-intelligence.github.io/ridgeline/web/) ·
+[**Try the demo →**](https://idle-intelligence.github.io/ridgeline/web/)
+
 [About](https://idle-intelligence.github.io/ridgeline/web/about.html)
 
 ![Earth in orbit view: the globe drawn as stacked latitude ridgelines, Africa and the Indian subcontinent picked out in relief](https://huggingface.co/datasets/idle-intelligence/ridgeline-terrain/resolve/main/preview.png)
@@ -33,6 +34,9 @@ Then open http://localhost:8080/web/, which is identical to the published demo, 
 terrain download is needed: tiers stream from the Hugging Face dataset and the browser caches
 each one after first fetch.
 
+Full-resolution terrain is only fetched once the camera descends, so a first visit costs
+about 10 MB rather than the 150 MB+ a body's full tier would.
+
 ### Running against local terrain
 
 For offline work, or to test a re-bake before uploading it:
@@ -52,7 +56,8 @@ it is a signed magnetogram, so area-mean downsampling cancels opposite polaritie
 ## Controls
 
 Drag to orbit · right-drag / two-finger to pitch + turn · wheel / pinch to change altitude · click
-a sky marker to jump to that body · time buttons speed up the clock.
+a sky marker to jump to that body · zoom all the way out to see the system · time buttons speed
+up the clock.
 
 ## How it works
 
