@@ -1393,8 +1393,17 @@ async function main() {
       markerHits = [];
     } else {
       // Process ALL markers each frame — REGISTRY bodies + MARKER_ONLY (e.g. Sun).
+      // A body only appears once its coarse tier is in hand (preloadCoarse warms them in
+      // the background, nearest first). Showing one earlier meant a click could land on a
+      // body with nothing loaded, and the hop would stall behind a loading splash instead
+      // of playing. Marker-only entries (the Sun) have no tiers, so they always show.
       const placements = [];
       for (const b of ALL_MARKERS) {
+        if (b instanceof Body && b.tier === 0) {
+          const w = widgets.get(b.id);
+          if (w) { w.marker.style.display = 'none'; w.arrow.style.display = 'none'; }
+          continue;
+        }
         const p = updateBodyMarker(cam, b, jd);
         if (p) placements.push(p);
       }
