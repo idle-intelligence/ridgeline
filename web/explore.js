@@ -517,6 +517,9 @@ const LOD_WORD = { d4: 'd4', full: 'd1' };
 const lodDone = {};
 // The background coarse-tier warm-up, surfaced on the same HUD line: { name, frac } | null.
 let preloadStatus = null;
+// Set when the warm-up queue drains, so the line signs off instead of just vanishing.
+let preloadDoneUntil = 0;
+const PRELOAD_DONE_MS = 3500;
 
 function lodText(active, nowMs) {
   const label = lodLabel[active.id];
@@ -541,6 +544,7 @@ function lodText(active, nowMs) {
     }
     return `${what} ${'.'.repeat(1 + Math.floor(nowMs / LOD_DOT_MS) % 3)}`;
   }
+  if (nowMs < preloadDoneUntil) return 'Loaded all bodies coarse data';
   return '';
 }
 
@@ -849,6 +853,8 @@ async function main() {
       }
     }
     preloadStatus = null;
+    // Every marker is now on screen and every hop instant — worth saying once.
+    if (queue.length) preloadDoneUntil = performance.now() + PRELOAD_DONE_MS;
   }
 
   // Enter a body from the orrery: shared by the SYSTEM view's own click handling and by
