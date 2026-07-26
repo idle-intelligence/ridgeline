@@ -766,7 +766,8 @@ async function main() {
   });
 
   // ── Per-body sky markers: on-screen dot (click to jump) or off-screen edge arrow ──
-  // ALL_MARKERS = explorable bodies (REGISTRY) + marker-only entries (MARKER_ONLY, e.g. Sun).
+  // ALL_MARKERS = explorable bodies (REGISTRY) + any marker-only entries (MARKER_ONLY,
+  // currently empty: the Sun became a full Body when the magnetogram bake landed).
   // updateBodyMarker uses only id/name/color + computed position — safe to mix both kinds.
   const ALL_MARKERS = [...REGISTRY, ...MARKER_ONLY];
   const widgets = new Map();
@@ -1411,7 +1412,8 @@ async function main() {
       // A body only appears once its coarse tier is in hand (preloadCoarse warms them in
       // the background, nearest first). Showing one earlier meant a click could land on a
       // body with nothing loaded, and the hop would stall behind a loading splash instead
-      // of playing. Marker-only entries (the Sun) have no tiers, so they always show.
+      // of playing. This covers every body including the Sun, which is a full Body with
+      // its own tiers — MARKER_ONLY is empty.
       const placements = [];
       for (const b of ALL_MARKERS) {
         if (b instanceof Body && b.tier === 0) {
@@ -1423,7 +1425,8 @@ async function main() {
         if (p) placements.push(p);
       }
       resolveLabelCollisions(placements);
-      // Marker-only entries (the Sun) have no Body methods and are not jumpable.
+      // Marker-only entries would have no Body methods and are not jumpable; MARKER_ONLY
+      // is empty today, so in practice this keeps everything.
       markerHits = placements.filter(p => p.b instanceof Body);
     }
 
