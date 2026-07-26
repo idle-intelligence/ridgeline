@@ -35,3 +35,6 @@ venv/
 
 # large preview images live on the HF dataset, not in git
 data/*preview*.png
+
+# Local deploy helper, kept out of the public repo
+/deploy-gh-pages.sh

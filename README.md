@@ -108,8 +108,8 @@ after a re-bake, or the change will be invisible at altitude.
 
 ## Deploying
 
-`./deploy-gh-pages.sh` builds the WASM and publishes `web/` to the `gh-pages` branch. Terrain is
-never deployed; every build streams it from the HF dataset.
+The published demo is the `gh-pages` branch: the contents of `web/` plus the built `web/pkg/`,
+served at `/web/`. Terrain is never deployed; the page streams it from the HF dataset.
 
 ## Branches
 
