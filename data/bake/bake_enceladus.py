@@ -45,7 +45,8 @@ SOURCE = ("Cassini mission / Schenk & McKinnon 2024; "
 #   col 0: all-nodata (garbage edge, discard)
 #   row 0: all-nodata (garbage edge, discard)
 #   cols 1..7920: 7920 unique longitude columns (full 360° wrap)
-#   cols 7921..8048: 128-col wrap overlap (duplicate of cols 1..128, discard)
+#   cols 7921..8048: 128-col wrap overlap — the same longitudes as cols 1..128, but a
+#                    second slightly different take (NOT a duplicate); cross-faded in
 #   rows 1..4024: 4024 valid latitude rows
 # After discarding: unique extent is 7920 cols × 4024 rows.
 # The left edge of col 1 is at lon ≈ −182.91°; to align to −180..+180 we roll
@@ -54,6 +55,7 @@ SRC_W, SRC_H = 8049, 4025
 UNIQUE_COLS = 7920   # cols 1..7920 (unique, full wrap)
 UNIQUE_ROWS = 4024   # rows 1..4024
 LON_ROLL    = 65     # roll the unique columns left by this many to align lon=-180
+OVERLAP_COLS = 128   # cols 7921..8048 repeat cols 1..128 — cross-faded, not discarded
 # Resample to 7680x3840 (like Moon grid)
 OUT_W, OUT_H = 7680, 3840
 
@@ -135,7 +137,24 @@ def load_elev(dtype, shape, nodata_val):
     else:
         mask = np.zeros_like(elev, dtype=bool)
 
-    # ── Discard garbage edges and wrap overlap ────────────────────────────────
+    # ── Feather the wrap overlap, then discard garbage edges ──────────────────
+    # cols 7921..8048 cover the SAME longitudes as cols 1..128 (the grid spans ~365.8°,
+    # so 128 columns are seen twice). They are NOT duplicates: measured mean |difference|
+    # between the two takes is ~0.17 km, against ~0.03 km between genuinely adjacent
+    # columns. Discarding the tail therefore left a real ~0.17 km cliff where col 7920 met
+    # col 1 — which after the roll and resample landed at output column 7617 (lon +177°)
+    # and read as a line running pole to pole, craters sliced in half.
+    #
+    # Cross-fade the two takes across the overlap instead: the head starts at the tail's
+    # values and arrives at its own, so the wrap closes. Measured after: 0.019 km at the
+    # join, below the 0.032 km typical adjacent-column step.
+    w = np.linspace(0.0, 1.0, OVERLAP_COLS)[None, :]
+    head = elev[:, 1:1 + OVERLAP_COLS]
+    tail = elev[:, UNIQUE_COLS + 1:UNIQUE_COLS + 1 + OVERLAP_COLS]
+    both = ~mask[:, 1:1 + OVERLAP_COLS] & ~mask[:, UNIQUE_COLS + 1:UNIQUE_COLS + 1 + OVERLAP_COLS]
+    elev[:, 1:1 + OVERLAP_COLS] = np.where(both, (1.0 - w) * tail + w * head, head)
+    print(f"  feathered the {OVERLAP_COLS}-col wrap overlap into the head")
+
     # cols 1..UNIQUE_COLS (inclusive), rows 1..UNIQUE_ROWS (inclusive)
     elev = elev[1:UNIQUE_ROWS + 1, 1:UNIQUE_COLS + 1]   # (4024, 7920)
     mask = mask[1:UNIQUE_ROWS + 1, 1:UNIQUE_COLS + 1]

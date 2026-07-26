@@ -270,7 +270,10 @@ const ENCELADUS = new Body({
   // trueShape: true relief ±1% of radius (very smooth icy shell, cryo-ocean world).
   // veFactor ignored under trueShape; kept for reference in case trueShape is toggled off.
   trueShape: true, veFactor: 3.3, color: '#dfe9ec', hasOcean: false,
-  cacheBust: 'r2', // data changed: wrap-seam fix (drop duplicate col/row, roll to lon=-180)
+  // r3: the +177° seam. The 128-col wrap overlap was discarded as a 'duplicate', but it is a
+  // second, slightly different take on the same longitudes, so the join left a ~0.17 km cliff
+  // running pole to pole. Cross-faded in the bake now; all three tiers re-uploaded.
+  cacheBust: 'r3',
   modes: [[50, 'SURFACE'], [1500, 'LOW'], [12000, 'ORBIT'], [Infinity, 'DEEP SPACE']],
   // spawn equatorial (stacked-ridge profile); the south-polar tiger stripes are one drag south
   view: { lat: 0, lon: 0, altitude: ALT_START, tilt: TILT_START, heading: 0 }, // south-polar tiger-stripe terrain
