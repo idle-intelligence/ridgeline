@@ -270,7 +270,10 @@ const ENCELADUS = new Body({
   // trueShape: true relief ±1% of radius (very smooth icy shell, cryo-ocean world).
   // veFactor ignored under trueShape; kept for reference in case trueShape is toggled off.
   trueShape: true, veFactor: 3.3, color: '#dfe9ec', hasOcean: false,
-  cacheBust: 'r2', // data changed: wrap-seam fix (drop duplicate col/row, roll to lon=-180)
+  // r3: the +177° seam. The 128-col wrap overlap was discarded as a 'duplicate', but it is a
+  // second, slightly different take on the same longitudes, so the join left a ~0.17 km cliff
+  // running pole to pole. Cross-faded in the bake now; all three tiers re-uploaded.
+  cacheBust: 'r3',
   modes: [[50, 'SURFACE'], [1500, 'LOW'], [12000, 'ORBIT'], [Infinity, 'DEEP SPACE']],
   // spawn equatorial (stacked-ridge profile); the south-polar tiger stripes are one drag south
   view: { lat: 0, lon: 0, altitude: ALT_START, tilt: TILT_START, heading: 0 }, // south-polar tiger-stripe terrain
@@ -1409,8 +1412,14 @@ async function main() {
     if (!loadingDone) { document.getElementById('loading').style.display = 'none'; loadingDone = true; }
 
     // ── HUD ───────────────────────────────────────────────────────────────
+    // Guard: a cached index.html without these spans, served alongside newer JS, threw here
+    // every frame and blacked the canvas. Degrade to no HUD rather than no render.
     const hudMainEl = document.getElementById('hudmain');
     const lodEl = document.getElementById('lod');
+    const setHud = (main, lod) => {
+      if (hudMainEl) hudMainEl.textContent = main;
+      if (lodEl) lodEl.textContent = lod;
+    };
     if (sysT > SYS_INPUT_T) {
       // System mode HUD: minimal readout.
       const pad = n => String(n).padStart(2,'0');
@@ -1418,11 +1427,9 @@ async function main() {
       const dt2 = new Date(ms);
       const dateStr = `${dt2.getUTCFullYear()}-${pad(dt2.getUTCMonth()+1)}-${pad(dt2.getUTCDate())}`;
       const spd = timeSpeed === 0 ? '⏸' : timeSpeed < 1 ? timeSpeed+'×' : timeSpeed >= 1000 ? (timeSpeed/1000).toFixed(0)+'k×' : timeSpeed+'×';
-      hudMainEl.textContent = `SOLAR SYSTEM\n${dateStr} · ${spd}\nclick a world to visit`;
-      lodEl.textContent = '';
+      setHud(`SOLAR SYSTEM\n${dateStr} · ${spd}\nclick a world to visit`, '');
     } else {
-      hudMainEl.textContent = hudText();
-      lodEl.textContent = lodText(active, now);
+      setHud(hudText(), lodText(active, now));
     }
 
     // ── Markers: hide once the orrery's own labels take over ─────────────
