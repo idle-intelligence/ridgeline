@@ -11,6 +11,10 @@ import { toJD, bodySkyDirection, OBLIQUITY, helioPos, helioEcl } from './ephemer
 import { createSystemView } from './system-view.js';
 import { createDragTap } from './dragtap.js';
 
+// Bumped by scripts/build.sh on every deploy so browsers don't keep running a
+// cached wasm pkg from an older build.
+const ENGINE_BUILD = "dev";
+
 const R_WORLD = WORLD_RADIUS;
 const FOV_Y = Math.PI / 4;    // 45° — must match the FOV_Y in renderer-webgpu.js
 // Camera pitch off nadir: TILT_MIN (~3°) = straight down at the planet, π/2 = horizon, higher =
@@ -612,8 +616,8 @@ async function main() {
     if (loadpct) loadpct.textContent = 'initializing renderer…';
 
     // Init WASM + renderer with Earth d16 so we can show something immediately.
-    const { default: initWasm, Engine: EngineClass } = await import('./pkg/ridgeline_core.js');
-    const wasm = await initWasm();
+    const { default: initWasm, Engine: EngineClass } = await import(`./pkg/ridgeline_core.js?v=${ENGINE_BUILD}`);
+    const wasm = await initWasm(new URL(`./pkg/ridgeline_core_bg.wasm?v=${ENGINE_BUILD}`, import.meta.url));
     wasmMem = wasm.memory;
     Engine = EngineClass;
 
