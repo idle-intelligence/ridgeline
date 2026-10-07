@@ -3,8 +3,9 @@
 3D explorer of the solar system's solid worlds — each rendered as a globe of stacked Joy
 Division "Unknown Pleasures" latitude rings. Real elevation data; orbit a body, dive to the
 surface, jump between bodies, or pull out to the SYSTEM view (a true-ephemeris orrery).
-Exploration only. Drops into trucs.ai as a static Cloudflare Pages demo — **no bundlers, all
-relative paths, no server assumptions.**
+Exploration only. Embedded in trucs.ai (`astres/`) and also published standalone via GitHub
+Pages (`scripts/build.sh` + Actions) — **no bundlers, all relative paths, no server
+assumptions.**
 
 ## Layout
 - `data/` — DONE. Global ETOPO bake (`data/bake/bake_earth.py`) → binary heightfield + meta.
