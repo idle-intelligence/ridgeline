@@ -63,11 +63,20 @@
       gap:8px;
       font-size:12px;
       letter-spacing:1px;
-      margin-bottom:48px;
+      margin-bottom:20px;
       padding:11px 0; /* tap target to >=44px tall, text unmoved */
       margin-top:-11px;
     }
     .repo-link svg { flex:0 0 auto; }
+
+    .blog-link {
+      color:#888;
+      max-width:600px;
+    }
+    .blog-link + .blog-link {
+      margin-top:14px;
+      margin-bottom:48px;
+    }
 
     section {
       margin-bottom:44px;
@@ -202,6 +211,11 @@
       </svg>
       github.com/idle-intelligence/ridgeline
     </a>
+
+    <p class="blog-link">
+      <a href="https://trucs.ai/blog/about-astres" target="_blank" rel="noopener">Read the blog post (with images!)</a>
+    </p>
+    <p class="blog-link">or keep reading for the text-only version.</p>
 
     <section>
       <h2>Unknown Pleasures</h2>
