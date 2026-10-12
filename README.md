@@ -53,6 +53,20 @@ all you will ever see: the app refines to `_d4` (64 MB) and full resolution (1.1
 and any tier missing from disk 404s and leaves that world flat. The Sun degrades worst at `_d16`:
 it is a signed magnetogram, so area-mean downsampling cancels opposite polarities and washes it out.
 
+## Tests and CI
+
+CI (`.github/workflows/pages.yml`) runs, on the toolchain pinned in `rust-toolchain.toml`:
+
+```
+cargo test --manifest-path core/Cargo.toml
+cargo clippy --manifest-path core/Cargo.toml --all-targets -- -D warnings
+cargo clippy --manifest-path core/Cargo.toml --target wasm32-unknown-unknown --lib -- -D warnings
+cd web && npm test                      # node --test, no dependencies
+ENGINE_BUILD=<tag> scripts/build.sh     # builds the WASM core and assembles _site/
+```
+
+`scripts/build.sh` rewrites the build tag on the WASM loading URLs to `ENGINE_BUILD` (CI passes the commit sha, local builds default to `dev`). Use a new tag for every real deploy, otherwise browsers keep running the cached module. `core/API.md` documents the contract between the Rust core and the JS shell, including the constants that must match `web/constants.js`.
+
 ## Controls
 
 Drag to orbit · right-drag / two-finger to pitch + turn · wheel / pinch to change altitude · click
