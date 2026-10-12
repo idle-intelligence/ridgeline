@@ -26,7 +26,7 @@ You need a WebGPU browser, a [Rust toolchain](https://rustup.rs) with
 
 ```
 # web/pkg/ is gitignored, so the WASM core must be built before the app will load
-wasm-pack build core --target web --out-dir ../web/pkg
+scripts/build.sh
 python3 -m http.server 8080
 ```
 
@@ -52,6 +52,20 @@ app's `../data/*` fetches resolve.
 all you will ever see: the app refines to `_d4` (64 MB) and full resolution (1.1 GB) as you descend,
 and any tier missing from disk 404s and leaves that world flat. The Sun degrades worst at `_d16`:
 it is a signed magnetogram, so area-mean downsampling cancels opposite polarities and washes it out.
+
+## Tests and CI
+
+CI (`.github/workflows/pages.yml`) runs, on the toolchain pinned in `rust-toolchain.toml`:
+
+```
+cargo test --manifest-path core/Cargo.toml
+cargo clippy --manifest-path core/Cargo.toml --all-targets -- -D warnings
+cargo clippy --manifest-path core/Cargo.toml --target wasm32-unknown-unknown --lib -- -D warnings
+cd web && npm test                      # node --test, no dependencies
+ENGINE_BUILD=<tag> scripts/build.sh     # builds the WASM core and assembles _site/
+```
+
+`scripts/build.sh` builds the WASM core into `web/pkg/`, assembles `_site/`, and writes the build tag `ENGINE_BUILD` into the WASM loading URL (CI passes the commit sha, local builds default to `dev`). `core/API.md` documents the contract between the Rust core and the JS shell, including the constants that must match `web/constants.js`.
 
 ## Controls
 
@@ -110,11 +124,6 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 `make_pyramid.py` is not optional: the app fetches the `_d16` tier **first** for every body, so a
 bake without it produces an app that never paints. Re-upload the mips along with the full-res file
 after a re-bake, or the change will be invisible at altitude.
-
-## Deploying
-
-The published demo is the `gh-pages` branch: the contents of `web/` plus the built `web/pkg/`,
-served at `/web/`. Terrain is never deployed; the page streams it from the HF dataset.
 
 ## Branches
 
