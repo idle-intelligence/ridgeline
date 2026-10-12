@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Builds the ridgeline-core WASM module and assembles the deployed site into
-# _site/, matching the layout deploy-gh-pages.sh has published up to now
-# (a root index.html redirect to web/, plus web/ itself with its built pkg/).
+# Builds the ridgeline-core WASM module into web/pkg/ and assembles the
+# deployed site into _site/ (a root index.html redirect to web/, plus web/
+# itself with its built pkg/).
 #
 # Usage: ENGINE_BUILD=<tag> scripts/build.sh
 # ENGINE_BUILD defaults to "dev" for local builds; CI passes the commit sha.

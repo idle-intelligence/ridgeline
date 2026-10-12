@@ -26,7 +26,7 @@ You need a WebGPU browser, a [Rust toolchain](https://rustup.rs) with
 
 ```
 # web/pkg/ is gitignored, so the WASM core must be built before the app will load
-wasm-pack build core --target web --out-dir ../web/pkg
+scripts/build.sh
 python3 -m http.server 8080
 ```
 
@@ -65,7 +65,7 @@ cd web && npm test                      # node --test, no dependencies
 ENGINE_BUILD=<tag> scripts/build.sh     # builds the WASM core and assembles _site/
 ```
 
-`scripts/build.sh` rewrites the build tag on the WASM loading URLs to `ENGINE_BUILD` (CI passes the commit sha, local builds default to `dev`). Use a new tag for every real deploy, otherwise browsers keep running the cached module. `core/API.md` documents the contract between the Rust core and the JS shell, including the constants that must match `web/constants.js`.
+`scripts/build.sh` builds the WASM core into `web/pkg/`, assembles `_site/`, and writes the build tag `ENGINE_BUILD` into the WASM loading URL (CI passes the commit sha, local builds default to `dev`). `core/API.md` documents the contract between the Rust core and the JS shell, including the constants that must match `web/constants.js`.
 
 ## Controls
 
@@ -124,11 +124,6 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 `make_pyramid.py` is not optional: the app fetches the `_d16` tier **first** for every body, so a
 bake without it produces an app that never paints. Re-upload the mips along with the full-res file
 after a re-bake, or the change will be invisible at altitude.
-
-## Deploying
-
-The published demo is the `gh-pages` branch: the contents of `web/` plus the built `web/pkg/`,
-served at `/web/`. Terrain is never deployed; the page streams it from the HF dataset.
 
 ## Branches
 
